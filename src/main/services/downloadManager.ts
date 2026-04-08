@@ -1,4 +1,4 @@
-import { createWriteStream, existsSync, mkdirSync, statSync } from 'fs'
+import { createWriteStream, existsSync, mkdirSync, statSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { pipeline } from 'stream/promises'
 import { Readable } from 'stream'
@@ -187,11 +187,17 @@ export function startDownload(
       const msg = e instanceof Error ? e.message : String(e)
       if (msg === 'aborted') {
         job.status = 'cancelled'
-        db.prepare(`UPDATE downloads SET status = ?, updated_at = ? WHERE id = ?`).run(
-          'cancelled',
-          Date.now(),
-          job.id
-        )
+        try {
+          if (existsSync(job.destPath)) unlinkSync(job.destPath)
+        } catch (unlinkErr) {
+          logLine('warn', 'download_cancel_partial_unlink', {
+            id: job.id,
+            path: job.destPath,
+            error: unlinkErr instanceof Error ? unlinkErr.message : String(unlinkErr)
+          })
+        }
+        db.prepare(`DELETE FROM downloads WHERE id = ?`).run(job.id)
+        logLine('info', 'download_cancelled', { id: job.id, path: job.destPath })
       } else {
         job.status = 'error'
         job.error = msg
@@ -201,7 +207,9 @@ export function startDownload(
           job.id
         )
       }
-      logLine('error', 'download_failed', { id: job.id, error: msg })
+      if (msg !== 'aborted') {
+        logLine('error', 'download_failed', { id: job.id, error: msg })
+      }
     } finally {
       active.delete(job.id)
       onUpdate({ ...job })
