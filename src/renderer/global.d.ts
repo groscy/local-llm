@@ -28,7 +28,14 @@ type Api = {
   hfCancelDownload: (id: string) => Promise<boolean>
   downloadsList: () => Promise<DownloadRow[]>
   runtimeList: () => Promise<{ id: string; label: string }[]>
-  runtimeInstallPath: () => Promise<{ llamaBinary: string; ollamaBase: string }>
+  runtimeInstallPath: () => Promise<{
+    llamaBinary: string
+    ollamaBase: string
+    llamaResolvedPath: string
+    llamaDetected: boolean
+    llamaConfiguredPathValid: boolean
+  }>
+  openExternalUrl: (url: string) => Promise<{ ok: boolean }>
   runtimeStart: (p: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => Promise<RuntimeStatus>
   runtimeStop: () => Promise<RuntimeStatus>
   runtimeStatus: () => Promise<RuntimeStatus>

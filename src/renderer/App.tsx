@@ -32,6 +32,15 @@ type HfModelSortKey = 'downloads' | 'likes' | 'size'
 
 const HF_RECOMMENDED_FETCH_LIMIT = 72
 
+const LLAMA_CPP_RELEASES_URL = 'https://github.com/ggerganov/llama.cpp/releases'
+const LLAMA_CPP_SERVER_DOC_URL = 'https://github.com/ggerganov/llama.cpp/blob/master/tools/server/README.md'
+
+type LlamaEnvInfo = {
+  detected: boolean
+  resolvedPath: string
+  configuredValid: boolean
+}
+
 function huggingFaceModelUrl(repoId: string): string {
   return `https://huggingface.co/${repoId.split('/').map(encodeURIComponent).join('/')}`
 }
@@ -212,6 +221,7 @@ export default function App(): React.ReactElement {
   const [runtimeKind, setRuntimeKind] = useState<'llamacpp' | 'ollama'>('ollama')
   const [modelPath, setModelPath] = useState('llama3.2')
   const [llamaBin, setLlamaBin] = useState('')
+  const [llamaEnv, setLlamaEnv] = useState<LlamaEnvInfo | null>(null)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
   const [localDownloads, setLocalDownloads] = useState<DownloadRow[]>([])
 
@@ -360,9 +370,30 @@ export default function App(): React.ReactElement {
     }
   }, [refreshRunDrawer, downloadsPinned])
 
+  const refreshLlamaEnv = useCallback(async () => {
+    try {
+      const c = await window.api.runtimeInstallPath()
+      setLlamaEnv({
+        detected: c.llamaDetected,
+        resolvedPath: c.llamaResolvedPath || '',
+        configuredValid: c.llamaConfiguredPathValid
+      })
+    } catch {
+      setLlamaEnv(null)
+    }
+  }, [])
+
   useEffect(() => {
     void refreshPaths()
-    void window.api.runtimeInstallPath().then((c) => setLlamaBin(c.llamaBinary))
+    void window.api.runtimeInstallPath().then((c) => {
+      const initialBin = c.llamaBinary.trim() ? c.llamaBinary : c.llamaResolvedPath || ''
+      setLlamaBin(initialBin)
+      setLlamaEnv({
+        detected: c.llamaDetected,
+        resolvedPath: c.llamaResolvedPath || '',
+        configuredValid: c.llamaConfiguredPathValid
+      })
+    })
     void loadConversations()
     void loadWiki()
     void refreshRuntimeStatus()
@@ -377,6 +408,17 @@ export default function App(): React.ReactElement {
       }
     })
   }, [refreshPaths, loadConversations, loadWiki, refreshRuntimeStatus])
+
+  useEffect(() => {
+    if (drawer !== 'runtime') return
+    void refreshLlamaEnv()
+  }, [drawer, refreshLlamaEnv])
+
+  useEffect(() => {
+    if (runtimeKind !== 'llamacpp' || !llamaEnv?.detected || !llamaEnv.resolvedPath) return
+    if (llamaBin.trim()) return
+    setLlamaBin(llamaEnv.resolvedPath)
+  }, [runtimeKind, llamaEnv?.detected, llamaEnv?.resolvedPath, llamaBin])
 
   useEffect(() => {
     if (drawer !== 'runtime') return
@@ -798,7 +840,13 @@ export default function App(): React.ReactElement {
     try {
       const s = await window.api.runtimeStart({ kind: runtimeKind, modelPath })
       setRuntimeStatus(s)
-      await window.api.setConfig({ llamaBinaryPath: llamaBin, runtimeKind })
+      const pathForStore =
+        runtimeKind === 'llamacpp'
+          ? llamaBin.trim() || llamaEnv?.resolvedPath || ''
+          : llamaBin
+      await window.api.setConfig({ llamaBinaryPath: pathForStore, runtimeKind })
+      if (runtimeKind === 'llamacpp' && pathForStore) setLlamaBin(pathForStore)
+      void refreshLlamaEnv()
     } catch (e) {
       setErr(String(e))
     }
@@ -1553,6 +1601,36 @@ export default function App(): React.ReactElement {
                       <option value="llamacpp">llama.cpp server</option>
                     </select>
                   </div>
+                  {runtimeKind === 'llamacpp' && llamaEnv && !llamaEnv.detected && (
+                    <div className="runtime-llama-setup-banner" role="status">
+                      <p className="runtime-llama-setup-banner-title">llama-server not detected</p>
+                      <p className="muted" style={{ margin: '0 0 12px' }}>
+                        Install a release build, put <code className="inline-code">llama-server</code> on your PATH, or enter the full path under Binary below.
+                      </p>
+                      <div className="runtime-llama-setup-actions">
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          onClick={() => void window.api.openExternalUrl(LLAMA_CPP_RELEASES_URL)}
+                        >
+                          Open llama.cpp releases
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => void window.api.openExternalUrl(LLAMA_CPP_SERVER_DOC_URL)}
+                        >
+                          Server docs
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {runtimeKind === 'llamacpp' && llamaEnv?.detected && !llamaEnv.configuredValid && llamaEnv.resolvedPath ? (
+                    <p className="muted runtime-llama-path-note">
+                      No saved binary path on disk; using{' '}
+                      <code className="inline-code">{llamaEnv.resolvedPath}</code> from PATH. Save by pressing Start or paste a path under Binary.
+                    </p>
+                  ) : null}
                   <div className="drawer-section">
                     <h3>Model</h3>
                     <input
@@ -1636,6 +1714,9 @@ export default function App(): React.ReactElement {
                   {runtimeKind === 'llamacpp' && (
                     <div className="drawer-section">
                       <h3>Binary</h3>
+                      {llamaEnv?.detected && llamaEnv.configuredValid ? (
+                        <p className="muted runtime-llama-ok">llama-server binary path found.</p>
+                      ) : null}
                       <input className="input" value={llamaBin} onChange={(e) => setLlamaBin(e.target.value)} placeholder="llama-server path" />
                     </div>
                   )}

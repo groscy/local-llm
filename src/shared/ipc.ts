@@ -27,6 +27,7 @@ export const IPC = {
   RUNTIME_STOP: 'runtime:stop',
   RUNTIME_STATUS: 'runtime:status',
   RUNTIME_CHAT: 'runtime:chat',
+  OPEN_EXTERNAL_URL: 'shell:openExternalUrl',
 
   // Chat / persistence
   CONVERSATIONS_LIST: 'chat:conversationsList',

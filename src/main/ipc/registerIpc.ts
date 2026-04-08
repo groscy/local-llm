@@ -1,4 +1,4 @@
-import { ipcMain, dialog, safeStorage, BrowserWindow } from 'electron'
+import { ipcMain, dialog, safeStorage, BrowserWindow, shell } from 'electron'
 import { randomUUID } from 'crypto'
 import { join } from 'path'
 import { existsSync, mkdirSync } from 'fs'
@@ -21,6 +21,7 @@ import * as kbService from '../services/kbService'
 import * as metricsService from '../services/metricsService'
 import * as trainOrchestrator from '../services/trainOrchestrator'
 import { logLine } from '../logger'
+import { resolveLlamaBinary } from '../services/llamaDetect'
 
 const configSchema = z.object({
   /** Set to `null` to clear and use the app default under user data. */
@@ -177,10 +178,28 @@ export function registerIpc(ctx: IpcContext): void {
     { id: 'ollama', label: 'Ollama (local daemon)' }
   ])
 
-  ipcMain.handle(IPC.RUNTIME_INSTALL_PATH, () => ({
-    llamaBinary: (store.get('llamaBinaryPath') as string | undefined) ?? '',
-    ollamaBase: (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434'
-  }))
+  ipcMain.handle(IPC.RUNTIME_INSTALL_PATH, () => {
+    const configured = (store.get('llamaBinaryPath') as string | undefined) ?? ''
+    const trimmed = configured.trim()
+    const configuredValid = Boolean(trimmed && existsSync(trimmed))
+    const resolved = resolveLlamaBinary(configured.trim() ? configured : undefined)
+    return {
+      llamaBinary: configured,
+      ollamaBase: (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434',
+      llamaResolvedPath: resolved ?? '',
+      llamaDetected: Boolean(resolved),
+      llamaConfiguredPathValid: configuredValid
+    }
+  })
+
+  ipcMain.handle(IPC.OPEN_EXTERNAL_URL, (_e, raw: unknown) => {
+    const parsed = z.string().url().safeParse(raw)
+    if (!parsed.success || !parsed.data.startsWith('https://')) {
+      throw new Error('Only https URLs are allowed')
+    }
+    void shell.openExternal(parsed.data)
+    return { ok: true as const }
+  })
 
   ipcMain.handle(
     IPC.RUNTIME_START,
@@ -189,9 +208,14 @@ export function registerIpc(ctx: IpcContext): void {
       const adapter = createRuntime(opts.kind, {
         ollamaBaseUrl: (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434'
       })
+      const configuredBin = store.get('llamaBinaryPath') as string | undefined
+      const binaryPath =
+        opts.kind === 'llamacpp'
+          ? resolveLlamaBinary(typeof configuredBin === 'string' ? configuredBin : undefined)
+          : undefined
       await adapter.start({
         modelPath: opts.modelPath,
-        binaryPath: store.get('llamaBinaryPath') as string | undefined,
+        binaryPath,
         port: (store.get('llamaPort') as number | undefined) ?? 8080
       })
       setRuntime(adapter)

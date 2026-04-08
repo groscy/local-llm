@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('api', {
   downloadsList: () => invoke(IPC.DOWNLOADS_LIST),
   runtimeList: () => invoke(IPC.RUNTIME_LIST),
   runtimeInstallPath: () => invoke(IPC.RUNTIME_INSTALL_PATH),
+  openExternalUrl: (url: string) => invoke(IPC.OPEN_EXTERNAL_URL, url),
   runtimeStart: (p: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => invoke(IPC.RUNTIME_START, p),
   runtimeStop: () => invoke(IPC.RUNTIME_STOP),
   runtimeStatus: () => invoke(IPC.RUNTIME_STATUS),
