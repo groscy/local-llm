@@ -1132,6 +1132,9 @@ export default function App(): React.ReactElement {
                             <div className="hf-model-card-footer">
                               <span className="hf-model-card-meta">
                                 {(m.downloads ?? 0).toLocaleString()} downloads · {m.likes ?? 0} likes
+                                {typeof m.totalSizeBytes === 'number' && m.totalSizeBytes > 0
+                                  ? ` · ~${formatBytes(m.totalSizeBytes)}`
+                                  : ''}
                               </span>
                               <button
                                 type="button"

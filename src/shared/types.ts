@@ -16,6 +16,8 @@ export interface HfModelSummary {
   private?: boolean
   /** Short card blurb when available (e.g. recommendations). */
   description?: string
+  /** Sum of file sizes from the Hub file tree when listing succeeds (~download footprint). */
+  totalSizeBytes?: number
 }
 
 export interface HfModelDetail extends HfModelSummary {

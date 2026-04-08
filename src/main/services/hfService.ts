@@ -30,7 +30,7 @@ export async function hfSearch(query: string, limit: number, token?: string): Pr
     out.push(entryToSummary(m))
     if (out.length >= limit) break
   }
-  return enrichSummariesWithDescriptions(out, cred)
+  return enrichSummariesForHubCards(out, cred)
 }
 
 const RECOMMENDED_SEED_IDS = [
@@ -95,13 +95,35 @@ export async function hfRecommended(outLimit: number, token?: string): Promise<H
 
   const list = [...seen.values()].sort((a, b) => (b.downloads ?? 0) - (a.downloads ?? 0))
   const sliced = list.slice(0, outLimit)
-  return enrichSummariesWithDescriptions(sliced, cred)
+  return enrichSummariesForHubCards(sliced, cred)
 }
 
 function trimDescription(text: string, max = 420): string {
   const one = text.replace(/\s+/g, ' ').trim()
   if (one.length <= max) return one
   return one.slice(0, max - 1).trimEnd() + '…'
+}
+
+async function fetchRepoTotalSizeBytes(
+  repoId: string,
+  cred: { accessToken: string } | undefined
+): Promise<number> {
+  let total = 0
+  try {
+    const files = listFiles({
+      repo: { type: 'model', name: repoId },
+      recursive: true,
+      credentials: cred
+    })
+    for await (const f of files) {
+      if (f.type === 'file') {
+        total += f.lfs?.size ?? f.size ?? 0
+      }
+    }
+  } catch {
+    return 0
+  }
+  return total
 }
 
 async function fetchSummaryDescription(
@@ -123,8 +145,8 @@ async function fetchSummaryDescription(
   }
 }
 
-/** Batched model card fetches to avoid hammering the Hub API. */
-async function enrichSummariesWithDescriptions(
+/** Batched model card fetches: card blurb + total file size for list views. */
+async function enrichSummariesForHubCards(
   summaries: HfModelSummary[],
   cred: { accessToken: string } | undefined
 ): Promise<HfModelSummary[]> {
@@ -134,8 +156,15 @@ async function enrichSummariesWithDescriptions(
     const batch = summaries.slice(i, i + batchSize)
     const chunk = await Promise.all(
       batch.map(async (s) => {
-        const description = await fetchSummaryDescription(s.id, cred)
-        return description ? { ...s, description } : s
+        const [description, totalSizeBytes] = await Promise.all([
+          fetchSummaryDescription(s.id, cred),
+          fetchRepoTotalSizeBytes(s.id, cred)
+        ])
+        return {
+          ...s,
+          ...(description ? { description } : {}),
+          ...(totalSizeBytes > 0 ? { totalSizeBytes } : {})
+        }
       })
     )
     out.push(...chunk)
