@@ -1587,6 +1587,56 @@ body {
   margin-bottom: 12px;
 }
 
+.hf-library-filters {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.hf-library-filters-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px 14px;
+  align-items: end;
+}
+
+.hf-library-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hf-library-filter-field .select,
+.hf-library-filter-field .input {
+  width: 100%;
+}
+
+.hf-library-filter-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+
+.hf-library-filter-actions {
+  display: flex;
+  align-items: flex-end;
+}
+
+.hf-library-filter-actions .btn-secondary {
+  white-space: nowrap;
+}
+
+.hf-library-filters-hint {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .hf-model-cards-list {
   display: flex;
   flex-direction: column;

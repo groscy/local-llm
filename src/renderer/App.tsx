@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   DownloadRow,
   HfModelDetail,
@@ -28,6 +28,26 @@ function formatRefreshLabel(ms: number): string {
 type MainView = 'chat' | 'wiki'
 type ToolDrawer = 'hf' | 'runtime' | 'train' | 'metrics' | 'settings' | null
 type HfLibraryMode = 'recommended' | 'search'
+type HfModelSortKey = 'downloads' | 'likes' | 'size'
+
+const HF_RECOMMENDED_FETCH_LIMIT = 72
+
+function parseNonNegativeInt(raw: string): number | undefined {
+  const t = raw.trim()
+  if (!t) return undefined
+  const n = parseInt(t, 10)
+  if (!Number.isFinite(n) || n < 0) return undefined
+  return n
+}
+
+function parseNonNegativeFloat(raw: string): number | undefined {
+  const t = raw.trim()
+  if (!t) return undefined
+  const n = parseFloat(t)
+  if (!Number.isFinite(n) || n < 0) return undefined
+  return n
+}
+
 type PinnedWidgetsSide = 'left' | 'right' | 'top' | 'bottom'
 
 function parsePinnedWidgetsSide(raw: unknown): PinnedWidgetsSide {
@@ -215,6 +235,11 @@ export default function App(): React.ReactElement {
   const [recommendedLoading, setRecommendedLoading] = useState(false)
   const [hfLibraryMode, setHfLibraryMode] = useState<HfLibraryMode>('recommended')
   const [hfSearchLoading, setHfSearchLoading] = useState(false)
+  const [hfSortBy, setHfSortBy] = useState<HfModelSortKey>('downloads')
+  const [hfSortDir, setHfSortDir] = useState<'asc' | 'desc'>('desc')
+  const [hfFilterMinLikes, setHfFilterMinLikes] = useState('')
+  const [hfFilterMinDownloads, setHfFilterMinDownloads] = useState('')
+  const [hfFilterMaxSizeGb, setHfFilterMaxSizeGb] = useState('')
   const [quickDownloadRepo, setQuickDownloadRepo] = useState<string | null>(null)
   const [trainJobs, setTrainJobs] = useState<unknown[]>([])
   const [trainBase, setTrainBase] = useState('')
@@ -603,7 +628,7 @@ export default function App(): React.ReactElement {
       setDetail(null)
       setRecommendedLoading(true)
       void window.api
-        .hfRecommended(28)
+        .hfRecommended(HF_RECOMMENDED_FETCH_LIMIT)
         .then((r) => setRecommendedModels(r as HfModelSummary[]))
         .catch(() => setRecommendedModels([]))
         .finally(() => setRecommendedLoading(false))
@@ -612,6 +637,57 @@ export default function App(): React.ReactElement {
 
   const hfListModels = hfLibraryMode === 'search' ? hfResults : recommendedModels
   const hfListLoading = hfLibraryMode === 'search' ? hfSearchLoading : recommendedLoading
+
+  const hfDisplayModels = useMemo(() => {
+    let rows = hfListModels.slice()
+    const minLikes = parseNonNegativeInt(hfFilterMinLikes)
+    if (minLikes != null) rows = rows.filter((m) => (m.likes ?? 0) >= minLikes)
+    const minDl = parseNonNegativeInt(hfFilterMinDownloads)
+    if (minDl != null) rows = rows.filter((m) => (m.downloads ?? 0) >= minDl)
+    const maxGb = parseNonNegativeFloat(hfFilterMaxSizeGb)
+    if (maxGb != null) {
+      const maxBytes = maxGb * 1024 ** 3
+      rows = rows.filter((m) => {
+        const s = m.totalSizeBytes
+        return s != null && s > 0 && s <= maxBytes
+      })
+    }
+    const dir = hfSortDir === 'asc' ? 1 : -1
+    rows.sort((a, b) => {
+      const tie = a.id.localeCompare(b.id)
+      if (hfSortBy === 'downloads') {
+        const va = a.downloads ?? 0
+        const vb = b.downloads ?? 0
+        if (va !== vb) return dir * (va - vb)
+        return tie
+      }
+      if (hfSortBy === 'likes') {
+        const va = a.likes ?? 0
+        const vb = b.likes ?? 0
+        if (va !== vb) return dir * (va - vb)
+        return tie
+      }
+      const sa = a.totalSizeBytes
+      const sb = b.totalSizeBytes
+      const va = sa != null && sa > 0 ? sa : null
+      const vb = sb != null && sb > 0 ? sb : null
+      if (va == null && vb == null) return tie
+      if (va == null) return 1
+      if (vb == null) return -1
+      if (va !== vb) return dir * (va - vb)
+      return tie
+    })
+    return rows
+  }, [hfListModels, hfSortBy, hfSortDir, hfFilterMinLikes, hfFilterMinDownloads, hfFilterMaxSizeGb])
+
+  const hfFiltersActive =
+    hfFilterMinLikes.trim() !== '' || hfFilterMinDownloads.trim() !== '' || hfFilterMaxSizeGb.trim() !== ''
+
+  function clearHfListFilters(): void {
+    setHfFilterMinLikes('')
+    setHfFilterMinDownloads('')
+    setHfFilterMaxSizeGb('')
+  }
 
   function backToRecommendations(): void {
     setHfLibraryMode('recommended')
@@ -1261,14 +1337,87 @@ export default function App(): React.ReactElement {
                     </div>
                     {hfLibraryMode === 'recommended' && (
                       <p className="muted" style={{ margin: '0 0 12px' }}>
-                        Curated GGUF-friendly picks. Click a card for files, or Download to grab the first GGUF (or first file). Search replaces this list until you go back.
+                        Curated GGUF-friendly picks. Sort and filter by likes, downloads, or total repo size. Click a card for files, or Download to grab the first GGUF (or first file). Search replaces this list until you go back.
                       </p>
                     )}
                     {hfLibraryMode === 'search' && (
                       <p className="muted" style={{ margin: '0 0 12px' }}>
-                        Same layout as recommendations. Descriptions load from each model card. Download uses the first <code>.gguf</code> when available.
+                        Same layout as recommendations. Sort and filter apply to this result set. Download uses the first <code>.gguf</code> when available.
                       </p>
                     )}
+                    <div className="hf-library-filters" aria-label="Sort and filter models">
+                      <div className="hf-library-filters-grid">
+                        <label className="hf-library-filter-field">
+                          <span className="hf-library-filter-label">Sort by</span>
+                          <select
+                            className="select"
+                            value={hfSortBy}
+                            onChange={(e) => setHfSortBy(e.target.value as HfModelSortKey)}
+                          >
+                            <option value="downloads">Downloads</option>
+                            <option value="likes">Likes</option>
+                            <option value="size">Model size (repo total)</option>
+                          </select>
+                        </label>
+                        <label className="hf-library-filter-field">
+                          <span className="hf-library-filter-label">Order</span>
+                          <select
+                            className="select"
+                            value={hfSortDir}
+                            onChange={(e) => setHfSortDir(e.target.value as 'asc' | 'desc')}
+                          >
+                            <option value="desc">High → low</option>
+                            <option value="asc">Low → high</option>
+                          </select>
+                        </label>
+                        <label className="hf-library-filter-field">
+                          <span className="hf-library-filter-label">Min likes</span>
+                          <input
+                            className="input"
+                            type="number"
+                            min={0}
+                            step={1}
+                            placeholder="Any"
+                            value={hfFilterMinLikes}
+                            onChange={(e) => setHfFilterMinLikes(e.target.value)}
+                          />
+                        </label>
+                        <label className="hf-library-filter-field">
+                          <span className="hf-library-filter-label">Min downloads</span>
+                          <input
+                            className="input"
+                            type="number"
+                            min={0}
+                            step={1}
+                            placeholder="Any"
+                            value={hfFilterMinDownloads}
+                            onChange={(e) => setHfFilterMinDownloads(e.target.value)}
+                          />
+                        </label>
+                        <label className="hf-library-filter-field">
+                          <span className="hf-library-filter-label">Max size (GiB)</span>
+                          <input
+                            className="input"
+                            type="number"
+                            min={0}
+                            step={0.1}
+                            placeholder="Any"
+                            value={hfFilterMaxSizeGb}
+                            onChange={(e) => setHfFilterMaxSizeGb(e.target.value)}
+                          />
+                        </label>
+                        {hfFiltersActive && (
+                          <div className="hf-library-filter-actions">
+                            <button type="button" className="btn-secondary" onClick={clearHfListFilters}>
+                              Clear filters
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <p className="muted hf-library-filters-hint">
+                        Size uses the summed file sizes from the Hub listing when available; models without a size are omitted when a max size filter is set, and sort by size lists them last.
+                      </p>
+                    </div>
                     {hfListLoading && (
                       <div className="hf-library-loading">
                         {hfLibraryMode === 'search' ? 'Searching and loading descriptions…' : 'Loading recommendations and descriptions…'}
@@ -1280,8 +1429,11 @@ export default function App(): React.ReactElement {
                     {!hfListLoading && hfListModels.length === 0 && hfLibraryMode === 'search' && (
                       <p className="muted">No models matched. Try different keywords or return to recommendations.</p>
                     )}
+                    {!hfListLoading && hfListModels.length > 0 && hfDisplayModels.length === 0 && (
+                      <p className="muted">No models match the current filters. Clear filters or relax thresholds.</p>
+                    )}
                     <div className="hf-model-cards-list">
-                      {hfListModels.map((m) => {
+                      {hfDisplayModels.map((m) => {
                         const hfJob = hfDownloadJobs[m.id]
                         const hfPct = hfJob ? hfCardProgressPct(hfJob) : null
                         const hfMeta = hfJob
