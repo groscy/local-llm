@@ -1,9 +1,65 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { logLine } from '../../logger'
-import { httpPostJson, httpRequestRaw } from '../httpLocal'
+import { httpPostJson, httpPostStreamingResponse, httpRequestRaw } from '../httpLocal'
 import { processRssMb } from '../processMemory'
-import type { ChatMessage, RuntimeAdapter } from './types'
+import type { ChatMessage, RuntimeAdapter, RuntimeLoadProgress } from './types'
 import type { RuntimeStatus } from '@shared/types'
+
+/** Buffer OpenAI-style SSE (`data: {...}\\n\\n`) and extract `delta.content` chunks. */
+class SseChatBuffer {
+  private buf = ''
+  private out = ''
+
+  feed(chunk: string, onDelta: (s: string) => void): void {
+    this.buf += chunk
+    this.drainBlocks(onDelta)
+  }
+
+  finalize(onDelta: (s: string) => void): void {
+    if (this.buf.trim()) {
+      const tail = this.buf
+      this.buf = ''
+      for (const block of tail.split(/\n\n+/)) {
+        if (block.trim()) this.parseBlock(block, onDelta)
+      }
+    }
+  }
+
+  getAccumulated(): string {
+    return this.out
+  }
+
+  private drainBlocks(onDelta: (s: string) => void): void {
+    for (;;) {
+      const idx = this.buf.indexOf('\n\n')
+      if (idx < 0) break
+      const block = this.buf.slice(0, idx)
+      this.buf = this.buf.slice(idx + 2)
+      if (block.trim()) this.parseBlock(block, onDelta)
+    }
+  }
+
+  private parseBlock(block: string, onDelta: (s: string) => void): void {
+    for (const line of block.split('\n')) {
+      const t = line.trim()
+      if (!t.startsWith('data:')) continue
+      const payload = t.slice(5).trim()
+      if (payload === '[DONE]') continue
+      try {
+        const j = JSON.parse(payload) as {
+          choices?: { delta?: { content?: string }; message?: { content?: string } }[]
+        }
+        const c = j.choices?.[0]?.delta?.content ?? j.choices?.[0]?.message?.content
+        if (typeof c === 'string' && c) {
+          this.out += c
+          onDelta(c)
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
 
 export class LlamaCppAdapter implements RuntimeAdapter {
   readonly kind = 'llamacpp' as const
@@ -12,15 +68,22 @@ export class LlamaCppAdapter implements RuntimeAdapter {
   private modelPath = ''
   private lastError?: string
 
-  async start(opts: { modelPath: string; binaryPath?: string; port?: number }): Promise<void> {
+  async start(opts: {
+    modelPath: string
+    binaryPath?: string
+    port?: number
+    onLoadProgress?: (e: RuntimeLoadProgress) => void
+  }): Promise<void> {
     await this.stop()
     this.modelPath = opts.modelPath
     this.port = opts.port ?? 8080
+    const report = opts.onLoadProgress
     const bin = opts.binaryPath
     if (!bin) {
       this.lastError = 'llama-server binary path not configured'
       throw new Error(this.lastError)
     }
+    report?.({ phase: 'spawn', message: 'Starting llama-server…', percent: 5 })
     const args = ['-m', opts.modelPath, '--host', '127.0.0.1', '--port', String(this.port), '-c', '4096']
     const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     this.proc = child
@@ -33,7 +96,11 @@ export class LlamaCppAdapter implements RuntimeAdapter {
       logLine('info', 'llama_exit', { code })
       this.proc = null
     })
+    report?.({ phase: 'load', message: 'Loading weights into memory (this can take a while)…', percent: 25 })
     await new Promise((r) => setTimeout(r, 1500))
+    report?.({ phase: 'wait', message: `Listening on 127.0.0.1:${this.port} — finishing startup…`, percent: 85 })
+    await new Promise((r) => setTimeout(r, 500))
+    report?.({ phase: 'ready', message: 'llama-server should be ready.', percent: 100 })
   }
 
   async stop(): Promise<void> {
@@ -54,34 +121,69 @@ export class LlamaCppAdapter implements RuntimeAdapter {
     }
   }
 
-  async chat(messages: ChatMessage[], opts?: { maxTokens?: number }): Promise<string> {
+  async chat(
+    messages: ChatMessage[],
+    opts?: { maxTokens?: number; onStreamChunk?: (text: string) => void }
+  ): Promise<string> {
     const url = `http://127.0.0.1:${this.port}/v1/chat/completions`
+    const stream = Boolean(opts?.onStreamChunk)
     try {
-      const { statusCode, json, raw } = await httpPostJson<{
-        choices?: { message?: { content?: string } }[]
-        error?: { message?: string }
-      }>(
+      if (!stream) {
+        const { statusCode, json, raw } = await httpPostJson<{
+          choices?: { message?: { content?: string } }[]
+          error?: { message?: string }
+        }>(
+          url,
+          {
+            model: 'gpt-3.5-turbo',
+            messages,
+            max_tokens: opts?.maxTokens ?? 512,
+            stream: false
+          },
+          600_000
+        )
+        if (statusCode < 200 || statusCode >= 300) {
+          const errBody =
+            typeof json === 'object' && json?.error && typeof json.error.message === 'string'
+              ? json.error.message
+              : raw.slice(0, 400)
+          throw new Error(`llama.cpp server returned ${statusCode}: ${errBody}`)
+        }
+        const text = json.choices?.[0]?.message?.content
+        if (typeof text !== 'string') {
+          throw new Error(`Unexpected llama.cpp response: ${raw.slice(0, 300)}`)
+        }
+        return text
+      }
+
+      const streamOpts = opts!
+      const body = JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages,
+        max_tokens: streamOpts.maxTokens ?? 512,
+        stream: true
+      })
+      const sse = new SseChatBuffer()
+      const onDelta = streamOpts.onStreamChunk!
+      const { statusCode, tail } = await httpPostStreamingResponse({
         url,
-        {
-          model: 'gpt-3.5-turbo',
-          messages,
-          max_tokens: opts?.maxTokens ?? 512,
-          stream: false
+        body,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream'
         },
-        600_000
-      )
+        timeoutMs: 600_000,
+        onChunk: (c) => sse.feed(c, onDelta)
+      })
+      sse.finalize(onDelta)
       if (statusCode < 200 || statusCode >= 300) {
-        const errBody =
-          typeof json === 'object' && json?.error && typeof json.error.message === 'string'
-            ? json.error.message
-            : raw.slice(0, 400)
-        throw new Error(`llama.cpp server returned ${statusCode}: ${errBody}`)
+        throw new Error(`llama.cpp server returned ${statusCode}: ${tail.slice(0, 400)}`)
       }
-      const text = json.choices?.[0]?.message?.content
-      if (typeof text !== 'string') {
-        throw new Error(`Unexpected llama.cpp response: ${raw.slice(0, 300)}`)
+      const acc = sse.getAccumulated()
+      if (!acc.trim()) {
+        throw new Error(`Unexpected llama.cpp stream response: ${tail.slice(0, 300)}`)
       }
-      return text
+      return acc
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       if (msg.includes('Nothing is listening')) {

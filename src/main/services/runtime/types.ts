@@ -1,4 +1,6 @@
-import type { RuntimeStatus } from '@shared/types'
+import type { RuntimeLoadProgress, RuntimeStatus } from '@shared/types'
+
+export type { RuntimeLoadProgress }
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
@@ -8,10 +10,18 @@ export interface ChatMessage {
 export interface RuntimeAdapter {
   readonly kind: 'llamacpp' | 'ollama'
 
-  start(opts: { modelPath: string; binaryPath?: string; port?: number }): Promise<void>
+  start(opts: {
+    modelPath: string
+    binaryPath?: string
+    port?: number
+    onLoadProgress?: (e: RuntimeLoadProgress) => void
+  }): Promise<void>
   stop(): Promise<void>
   getStatus(): RuntimeStatus
-  chat(messages: ChatMessage[], opts?: { maxTokens?: number }): Promise<string>
+  chat(
+    messages: ChatMessage[],
+    opts?: { maxTokens?: number; onStreamChunk?: (text: string) => void }
+  ): Promise<string>
   /** Optional: probe health / metrics from server */
   fetchMetrics?(): Promise<{
     tokensPerSec?: number
