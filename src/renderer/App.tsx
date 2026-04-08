@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   DownloadRow,
+  HardwareSummary,
   HfModelDetail,
   HfModelSummary,
   MetricsSnapshot,
+  RuntimeLoadProgress,
   RuntimeStatus
 } from '@shared/types'
+import { evaluateModelForHardware } from '@shared/modelHardwareFit'
+import type { ColorSchemeId } from '@shared/colorScheme'
+import { COLOR_SCHEME_IDS, COLOR_SCHEME_LABELS, DEFAULT_COLOR_SCHEME, parseColorScheme } from '@shared/colorScheme'
 import { DownloadProgressBar, downloadRowProgressPct, fileNameFromPath, formatBytes } from './downloadProgressUi'
+import { ActivityPinnedWidget } from './ActivityPinnedWidget'
 import { DownloadsPinnedWidget } from './DownloadsPinnedWidget'
+import { FloatingDots } from './FloatingDots'
 import { MetricsTimeSeries } from './MetricsTimeSeries'
 import { MetricsPinnedWidget } from './MetricsPinnedWidget'
 
@@ -25,12 +32,61 @@ function formatRefreshLabel(ms: number): string {
   return `${ms}ms`
 }
 
+function applyColorSchemeToDocument(id: ColorSchemeId): void {
+  if (id === 'violet') {
+    document.documentElement.removeAttribute('data-color-scheme')
+  } else {
+    document.documentElement.setAttribute('data-color-scheme', id)
+  }
+}
+
 type MainView = 'chat' | 'wiki'
 type ToolDrawer = 'hf' | 'runtime' | 'train' | 'metrics' | 'settings' | null
 type HfLibraryMode = 'recommended' | 'search'
 type HfModelSortKey = 'downloads' | 'likes' | 'size'
 
 const HF_RECOMMENDED_FETCH_LIMIT = 72
+
+const LS_SLIDE_CONV_W = 'slideConvWidthPx'
+const LS_SLIDE_KB_W = 'slideKbWidthPx'
+const SLIDE_CONV_MIN = 220
+const SLIDE_CONV_DEFAULT = 300
+const SLIDE_KB_MIN = 240
+const SLIDE_KB_DEFAULT = 320
+
+function readSlideWidthPx(key: string, fallback: number): number {
+  if (typeof window === 'undefined') return fallback
+  try {
+    const n = parseInt(localStorage.getItem(key) ?? '', 10)
+    return Number.isFinite(n) ? n : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function clampSlideConv(px: number): number {
+  const max = Math.max(SLIDE_CONV_MIN, Math.floor(window.innerWidth * 0.92))
+  return Math.min(Math.max(Math.round(px), SLIDE_CONV_MIN), max)
+}
+
+function clampSlideKb(px: number): number {
+  const max = Math.max(SLIDE_KB_MIN, Math.floor(window.innerWidth * 0.92))
+  return Math.min(Math.max(Math.round(px), SLIDE_KB_MIN), max)
+}
+
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() =>
+    typeof window !== 'undefined' ? window.matchMedia(query).matches : false
+  )
+  useEffect(() => {
+    const mq = window.matchMedia(query)
+    const onChange = (): void => setMatches(mq.matches)
+    onChange()
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [query])
+  return matches
+}
 
 const LLAMA_CPP_RELEASES_URL = 'https://github.com/ggerganov/llama.cpp/releases'
 const LLAMA_CPP_SERVER_DOC_URL = 'https://github.com/ggerganov/llama.cpp/blob/master/tools/server/README.md'
@@ -39,6 +95,11 @@ type LlamaEnvInfo = {
   detected: boolean
   resolvedPath: string
   configuredValid: boolean
+}
+
+type OllamaHostStatus = {
+  reachable: boolean
+  baseUrl: string
 }
 
 function huggingFaceModelUrl(repoId: string): string {
@@ -195,15 +256,6 @@ function IconSend(): React.ReactElement {
   )
 }
 
-function IconPin(): React.ReactElement {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-      <path d="M12 11a2 2 0 100-4 2 2 0 000 4z" />
-      <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
-    </svg>
-  )
-}
-
 export default function App(): React.ReactElement {
   const [mainView, setMainView] = useState<MainView>('chat')
   const [drawer, setDrawer] = useState<ToolDrawer>(null)
@@ -222,8 +274,24 @@ export default function App(): React.ReactElement {
   const [modelPath, setModelPath] = useState('llama3.2')
   const [llamaBin, setLlamaBin] = useState('')
   const [llamaEnv, setLlamaEnv] = useState<LlamaEnvInfo | null>(null)
+  const [ollamaHost, setOllamaHost] = useState<OllamaHostStatus | null>(null)
+  const [ollamaInstallBusy, setOllamaInstallBusy] = useState(false)
+  const [ollamaInstallNote, setOllamaInstallNote] = useState<string | null>(null)
+  const [ollamaInstallNoteKind, setOllamaInstallNoteKind] = useState<'success' | 'info' | 'error' | null>(null)
+  const [ollamaInstallLog, setOllamaInstallLog] = useState<string[]>([])
+  const ollamaInstallLogRef = useRef<HTMLPreElement>(null)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
   const [localDownloads, setLocalDownloads] = useState<DownloadRow[]>([])
+  const [localModelFilePaths, setLocalModelFilePaths] = useState<string[]>([])
+
+  const matchedLocalModelPath = useMemo(() => {
+    const cur = modelPath.trim()
+    if (!cur || localModelFilePaths.length === 0) return ''
+    const win = paths?.platform === 'win32'
+    return (
+      localModelFilePaths.find((p) => (win ? p.toLowerCase() === cur.toLowerCase() : p === cur)) ?? ''
+    )
+  }, [localModelFilePaths, modelPath, paths?.platform])
 
   const [conversations, setConversations] = useState<{ id: string; title: string }[]>([])
   const [convId, setConvId] = useState<string | null>(null)
@@ -259,16 +327,98 @@ export default function App(): React.ReactElement {
   const [trainBase, setTrainBase] = useState('')
   const [trainDataset, setTrainDataset] = useState('')
   const [hfTokenInput, setHfTokenInput] = useState('')
+  const [colorScheme, setColorScheme] = useState<ColorSchemeId>(DEFAULT_COLOR_SCHEME)
   const [modelsInstallPathDraft, setModelsInstallPathDraft] = useState('')
   const [modelsDirSaveErr, setModelsDirSaveErr] = useState<string | null>(null)
-  const [downloadCacheClearBusy, setDownloadCacheClearBusy] = useState(false)
-  const [downloadCacheClearMessage, setDownloadCacheClearMessage] = useState<string | null>(null)
+  const [settingsMaintenanceBusy, setSettingsMaintenanceBusy] = useState<
+    false | 'caches' | 'models' | 'factory'
+  >(false)
+  const [settingsMaintenanceMessage, setSettingsMaintenanceMessage] = useState<string | null>(null)
+  const [settingsConfirmKind, setSettingsConfirmKind] = useState<null | 'caches' | 'models' | 'factory'>(
+    null
+  )
   const [hfDownloadJobs, setHfDownloadJobs] = useState<Record<string, HfCardDownloadState>>({})
   const hfDownloadJobsRef = useRef(hfDownloadJobs)
   hfDownloadJobsRef.current = hfDownloadJobs
 
+  const [hardwareSummary, setHardwareSummary] = useState<HardwareSummary | null>(null)
+
+  /** Slide-over panels for chat (narrow / medium breakpoints). */
+  const [mobileConvOpen, setMobileConvOpen] = useState(false)
+  const [mobileKbOpen, setMobileKbOpen] = useState(false)
+  const narrowSlideConv = useMediaQuery('(max-width: 720px)')
+  const narrowSlideKb = useMediaQuery('(max-width: 1100px)')
+  const [slideConvWidthPx, setSlideConvWidthPx] = useState(() =>
+    readSlideWidthPx(LS_SLIDE_CONV_W, SLIDE_CONV_DEFAULT)
+  )
+  const [slideKbWidthPx, setSlideKbWidthPx] = useState(() =>
+    readSlideWidthPx(LS_SLIDE_KB_W, SLIDE_KB_DEFAULT)
+  )
+  const [slidePanelResizing, setSlidePanelResizing] = useState<null | 'conv' | 'kb'>(null)
+  const convWRef = useRef(slideConvWidthPx)
+  const kbWRef = useRef(slideKbWidthPx)
+
+  useEffect(() => {
+    convWRef.current = slideConvWidthPx
+  }, [slideConvWidthPx])
+
+  useEffect(() => {
+    kbWRef.current = slideKbWidthPx
+  }, [slideKbWidthPx])
+
+  useEffect(() => {
+    const onResize = (): void => {
+      setSlideConvWidthPx((w) => clampSlideConv(w))
+      setSlideKbWidthPx((w) => clampSlideKb(w))
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  useEffect(() => {
+    if (!slidePanelResizing) return
+    const kind = slidePanelResizing
+    const onMove = (e: PointerEvent): void => {
+      if (kind === 'conv') {
+        const v = clampSlideConv(e.clientX)
+        convWRef.current = v
+        setSlideConvWidthPx(v)
+      } else {
+        const v = clampSlideKb(window.innerWidth - e.clientX)
+        kbWRef.current = v
+        setSlideKbWidthPx(v)
+      }
+    }
+    const onUp = (): void => {
+      try {
+        if (kind === 'conv') localStorage.setItem(LS_SLIDE_CONV_W, String(convWRef.current))
+        else localStorage.setItem(LS_SLIDE_KB_W, String(kbWRef.current))
+      } catch {
+        /* ignore */
+      }
+      setSlidePanelResizing(null)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp, true)
+    window.addEventListener('pointercancel', onUp, true)
+    document.body.style.cursor = 'ew-resize'
+    document.body.style.userSelect = 'none'
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp, true)
+      window.removeEventListener('pointercancel', onUp, true)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [slidePanelResizing])
+
   const [metricsPinned, setMetricsPinned] = useState(false)
   const [downloadsPinned, setDownloadsPinned] = useState(false)
+  const [activityPinned, setActivityPinned] = useState(false)
+  const [runtimeLoadProgress, setRuntimeLoadProgress] = useState<RuntimeLoadProgress | null>(null)
+  const [runtimeStarting, setRuntimeStarting] = useState(false)
+  const [chatSending, setChatSending] = useState(false)
+  const [chatStreamBuffer, setChatStreamBuffer] = useState('')
   const [pinnedWidgetsSide, setPinnedWidgetsSide] = useState<PinnedWidgetsSide>('left')
   const [pinnedDownloadsSnapshot, setPinnedDownloadsSnapshot] = useState<DownloadRow[]>([])
   const [metricsRefreshMs, setMetricsRefreshMs] = useState(3000)
@@ -278,6 +428,11 @@ export default function App(): React.ReactElement {
   const [widgetSeries, setWidgetSeries] = useState<MetricsSnapshot[]>([])
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!chatSending && !chatStreamBuffer) return
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [chatSending, chatStreamBuffer])
 
   const refreshPaths = useCallback(async () => {
     const p = await window.api.getPaths()
@@ -313,11 +468,98 @@ export default function App(): React.ReactElement {
     setRuntimeStatus(s)
   }, [])
 
-  const refreshRunDrawer = useCallback(async () => {
-    const [s, downloads] = await Promise.all([window.api.runtimeStatus(), window.api.downloadsList()])
+  const applyRuntimeInstallPaths = useCallback(
+    (c: Awaited<ReturnType<typeof window.api.runtimeInstallPath>>) => {
+      setLlamaEnv({
+        detected: c.llamaDetected,
+        resolvedPath: c.llamaResolvedPath || '',
+        configuredValid: c.llamaConfiguredPathValid
+      })
+      setOllamaHost({ reachable: c.ollamaReachable, baseUrl: c.ollamaBase })
+    },
+    []
+  )
+
+  const refreshRunDrawerQuick = useCallback(async () => {
+    const [s, downloads, install] = await Promise.all([
+      window.api.runtimeStatus(),
+      window.api.downloadsList(),
+      window.api.runtimeInstallPath()
+    ])
     setRuntimeStatus(s)
     setLocalDownloads(downloads)
+    applyRuntimeInstallPaths(install)
+  }, [applyRuntimeInstallPaths])
+
+  const refreshLocalModelFiles = useCallback(async () => {
+    try {
+      const r = await window.api.listLocalModelsInDownloadDir()
+      setLocalModelFilePaths(r.paths)
+    } catch {
+      setLocalModelFilePaths([])
+    }
   }, [])
+
+  const refreshRunDrawer = useCallback(async () => {
+    await refreshRunDrawerQuick()
+    await refreshLocalModelFiles()
+  }, [refreshRunDrawerQuick, refreshLocalModelFiles])
+
+  const runOllamaInstall = useCallback(async () => {
+    const maxLogLines = 120
+    setOllamaInstallBusy(true)
+    setOllamaInstallNote(null)
+    setOllamaInstallNoteKind(null)
+    setOllamaInstallLog([])
+    const unsub = window.api.onOllamaInstallProgress(({ message }) => {
+      setOllamaInstallLog((prev) => {
+        const next = [...prev, message]
+        return next.length > maxLogLines ? next.slice(-maxLogLines) : next
+      })
+    })
+    try {
+      const r = await window.api.installOllama()
+      if (r.ok) {
+        if ('needsManualFinish' in r) {
+          setOllamaInstallNote(r.hint)
+          setOllamaInstallNoteKind('info')
+        } else {
+          setOllamaInstallNote(r.detail ?? 'Ollama is ready to use with this app.')
+          setOllamaInstallNoteKind('success')
+        }
+      } else {
+        setOllamaInstallNote(r.error)
+        setOllamaInstallNoteKind('error')
+      }
+      await refreshRunDrawer()
+    } catch (e) {
+      setOllamaInstallNote(e instanceof Error ? e.message : String(e))
+      setOllamaInstallNoteKind('error')
+    } finally {
+      unsub()
+      setOllamaInstallBusy(false)
+    }
+  }, [refreshRunDrawer])
+
+  useEffect(() => {
+    if (ollamaHost?.reachable) {
+      setOllamaInstallNote(null)
+      setOllamaInstallNoteKind(null)
+      setOllamaInstallLog([])
+    }
+  }, [ollamaHost?.reachable])
+
+  useEffect(() => {
+    return window.api.onRuntimeLoadProgress((p) => {
+      setRuntimeLoadProgress(p)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (ollamaInstallLog.length === 0 || !ollamaInstallLogRef.current) return
+    const el = ollamaInstallLogRef.current
+    el.scrollTop = el.scrollHeight
+  }, [ollamaInstallLog])
 
   const cancelDownloadJob = useCallback(
     async (jobId: string) => {
@@ -345,15 +587,19 @@ export default function App(): React.ReactElement {
     [refreshRunDrawer, downloadsPinned]
   )
 
-  const clearDownloadCacheFromSettings = useCallback(async () => {
-    setDownloadCacheClearMessage(null)
+  const runClearAllCaches = useCallback(async () => {
+    setSettingsConfirmKind(null)
+    setSettingsMaintenanceMessage(null)
     setErr(null)
-    setDownloadCacheClearBusy(true)
+    setSettingsMaintenanceBusy('caches')
     try {
-      const r = await window.api.clearDownloadCache()
+      const r = await window.api.clearAllCaches()
       setHfDownloadJobs({})
-      setDownloadCacheClearMessage(
-        `Cleared ${r.downloadsRemoved} download registry row${r.downloadsRemoved === 1 ? '' : 's'} and ${r.hfCacheRemoved} Hugging Face cache entr${r.hfCacheRemoved === 1 ? 'y' : 'ies'}. Files on disk were not deleted.`
+      setSettingsMaintenanceMessage(
+        [
+          `Cleared ${r.downloadsRemoved} download registry row(s), ${r.hfCacheRemoved} Hugging Face metadata entr${r.hfCacheRemoved === 1 ? 'y' : 'ies'}, ${r.metricsRemoved} metrics sample(s), ${r.trainJobsRemoved} train job row(s), and ${r.vectorsEntriesCleared} entr${r.vectorsEntriesCleared === 1 ? 'y' : 'ies'} under the vectors folder.`,
+          `Stopped ${r.downloadsCancelled} active download job(s) and ${r.trainProcessesKilled} training process(es). Chats, knowledge base, wiki, and model files on disk were not removed.`
+        ].join(' ')
       )
       void refreshRunDrawer()
       if (downloadsPinned) {
@@ -366,33 +612,83 @@ export default function App(): React.ReactElement {
     } catch (e) {
       setErr(String(e))
     } finally {
-      setDownloadCacheClearBusy(false)
+      setSettingsMaintenanceBusy(false)
     }
   }, [refreshRunDrawer, downloadsPinned])
 
-  const refreshLlamaEnv = useCallback(async () => {
+  const runDeleteAllModels = useCallback(async () => {
+    setSettingsConfirmKind(null)
+    setSettingsMaintenanceMessage(null)
+    setErr(null)
+    setSettingsMaintenanceBusy('models')
     try {
-      const c = await window.api.runtimeInstallPath()
-      setLlamaEnv({
-        detected: c.llamaDetected,
-        resolvedPath: c.llamaResolvedPath || '',
-        configuredValid: c.llamaConfiguredPathValid
-      })
-    } catch {
-      setLlamaEnv(null)
+      const r = await window.api.deleteAllModels()
+      setHfDownloadJobs({})
+      setLastJobId(null)
+      const failHint =
+        r.errors.length > 0 ? ` Some items could not be removed: ${r.errors.slice(0, 4).join(' · ')}` : ''
+      setSettingsMaintenanceMessage(
+        `Deleted ${r.removed} top-level item(s) from the models folder. Removed ${r.downloadsRemoved} download registry row(s).${failHint}`
+      )
+      void refreshPaths()
+      void refreshRuntimeStatus()
+      void refreshRunDrawer()
+      if (downloadsPinned) {
+        try {
+          setPinnedDownloadsSnapshot(await window.api.downloadsList())
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setSettingsMaintenanceBusy(false)
+    }
+  }, [refreshRunDrawer, downloadsPinned, refreshPaths, refreshRuntimeStatus])
+
+  const runResetFactoryConfig = useCallback(async () => {
+    setSettingsConfirmKind(null)
+    setErr(null)
+    setSettingsMaintenanceBusy('factory')
+    try {
+      await window.api.resetFactoryConfig()
+      window.location.reload()
+    } catch (e) {
+      setErr(String(e))
+      setSettingsMaintenanceBusy(false)
     }
   }, [])
+
+  useEffect(() => {
+    const mq720 = window.matchMedia('(min-width: 721px)')
+    const mq1100 = window.matchMedia('(min-width: 1101px)')
+    const onWide = (): void => {
+      if (mq720.matches) setMobileConvOpen(false)
+      if (mq1100.matches) setMobileKbOpen(false)
+    }
+    onWide()
+    mq720.addEventListener('change', onWide)
+    mq1100.addEventListener('change', onWide)
+    return () => {
+      mq720.removeEventListener('change', onWide)
+      mq1100.removeEventListener('change', onWide)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (mainView !== 'chat') {
+      setMobileConvOpen(false)
+      setMobileKbOpen(false)
+    }
+  }, [mainView])
 
   useEffect(() => {
     void refreshPaths()
     void window.api.runtimeInstallPath().then((c) => {
       const initialBin = c.llamaBinary.trim() ? c.llamaBinary : c.llamaResolvedPath || ''
       setLlamaBin(initialBin)
-      setLlamaEnv({
-        detected: c.llamaDetected,
-        resolvedPath: c.llamaResolvedPath || '',
-        configuredValid: c.llamaConfiguredPathValid
-      })
+      applyRuntimeInstallPaths(c)
     })
     void loadConversations()
     void loadWiki()
@@ -400,19 +696,18 @@ export default function App(): React.ReactElement {
     void window.api.getConfig().then((c: Record<string, unknown>) => {
       if (typeof c.metricsPinned === 'boolean') setMetricsPinned(c.metricsPinned)
       if (typeof c.downloadsPinned === 'boolean') setDownloadsPinned(c.downloadsPinned)
+      if (typeof c.activityPinned === 'boolean') setActivityPinned(c.activityPinned)
       setPinnedWidgetsSide(parsePinnedWidgetsSide(c.pinnedWidgetsSide))
       if (typeof c.metricsRefreshMs === 'number') {
         const ms = clampMetricsRefreshMs(c.metricsRefreshMs)
         setMetricsRefreshMs(ms)
         setMetricsRefreshCustomMode(!(METRICS_REFRESH_PRESETS_MS as readonly number[]).includes(ms))
       }
+      const scheme = parseColorScheme(c.colorScheme)
+      setColorScheme(scheme)
+      applyColorSchemeToDocument(scheme)
     })
-  }, [refreshPaths, loadConversations, loadWiki, refreshRuntimeStatus])
-
-  useEffect(() => {
-    if (drawer !== 'runtime') return
-    void refreshLlamaEnv()
-  }, [drawer, refreshLlamaEnv])
+  }, [refreshPaths, loadConversations, loadWiki, refreshRuntimeStatus, applyRuntimeInstallPaths])
 
   useEffect(() => {
     if (runtimeKind !== 'llamacpp' || !llamaEnv?.detected || !llamaEnv.resolvedPath) return
@@ -423,9 +718,18 @@ export default function App(): React.ReactElement {
   useEffect(() => {
     if (drawer !== 'runtime') return
     void refreshRunDrawer()
-    const id = window.setInterval(() => void refreshRunDrawer(), 1000)
-    return () => window.clearInterval(id)
-  }, [drawer, refreshRunDrawer])
+    const quickId = window.setInterval(() => void refreshRunDrawerQuick(), 1000)
+    const modelsId = window.setInterval(() => void refreshLocalModelFiles(), 4000)
+    return () => {
+      window.clearInterval(quickId)
+      window.clearInterval(modelsId)
+    }
+  }, [drawer, refreshRunDrawer, refreshRunDrawerQuick, refreshLocalModelFiles])
+
+  useEffect(() => {
+    if (drawer !== 'runtime') return
+    void refreshLocalModelFiles()
+  }, [drawer, paths?.modelsDefault, refreshLocalModelFiles])
 
   useEffect(() => {
     if (drawer !== 'settings' || !paths) return
@@ -481,33 +785,66 @@ export default function App(): React.ReactElement {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, mainView])
 
-  const refreshMetricsBundle = useCallback(async () => {
+  const loadMetricsBundle = useCallback(async () => {
     const [snap, hist] = await Promise.all([
       window.api.metricsSnapshot({ persist: true }),
       window.api.metricsHistory(144)
     ])
-    setMetricsBundle({
+    return {
       snapshot: snap,
       history: (hist as MetricsSnapshot[]) ?? []
-    })
+    }
   }, [])
+
+  const refreshMetricsBundle = useCallback(async () => {
+    const bundle = await loadMetricsBundle()
+    setMetricsBundle(bundle)
+  }, [loadMetricsBundle])
+
+  useEffect(() => {
+    if (drawer !== 'metrics') return
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const bundle = await loadMetricsBundle()
+        if (cancelled) return
+        setMetricsBundle(bundle)
+      } catch {
+        /* ignore */
+      }
+    }
+    void tick()
+    const id = window.setInterval(tick, metricsRefreshMs)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [drawer, metricsRefreshMs, loadMetricsBundle])
 
   const saveMetricsWidgetConfig = useCallback(
     async (patch: {
       metricsPinned?: boolean
       downloadsPinned?: boolean
+      activityPinned?: boolean
       metricsRefreshMs?: number
       pinnedWidgetsSide?: PinnedWidgetsSide
     }) => {
       const body: Record<string, unknown> = {}
       if (patch.metricsPinned !== undefined) body.metricsPinned = patch.metricsPinned
       if (patch.downloadsPinned !== undefined) body.downloadsPinned = patch.downloadsPinned
+      if (patch.activityPinned !== undefined) body.activityPinned = patch.activityPinned
       if (patch.metricsRefreshMs !== undefined) body.metricsRefreshMs = clampMetricsRefreshMs(patch.metricsRefreshMs)
       if (patch.pinnedWidgetsSide !== undefined) body.pinnedWidgetsSide = patch.pinnedWidgetsSide
       await window.api.setConfig(body)
     },
     []
   )
+
+  const saveColorScheme = useCallback(async (id: ColorSchemeId) => {
+    setColorScheme(id)
+    applyColorSchemeToDocument(id)
+    await window.api.setConfig({ colorScheme: id })
+  }, [])
 
   useEffect(() => {
     if (!metricsPinned) {
@@ -582,6 +919,18 @@ export default function App(): React.ReactElement {
           }}
         />
         <span>Show Hub download progress in the Pinned widgets panel</span>
+      </label>
+      <label className="metrics-widget-check" style={{ marginTop: 14 }}>
+        <input
+          type="checkbox"
+          checked={activityPinned}
+          onChange={(e) => {
+            const v = e.target.checked
+            setActivityPinned(v)
+            void saveMetricsWidgetConfig({ activityPinned: v })
+          }}
+        />
+        <span>Show model load and reply progress in the Pinned widgets panel</span>
       </label>
       <label style={{ display: 'block', marginTop: 16 }}>
         <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
@@ -664,7 +1013,6 @@ export default function App(): React.ReactElement {
   )
 
   useEffect(() => {
-    if (drawer === 'metrics') void refreshMetricsBundle()
     if (drawer === 'train') void window.api.trainListJobs().then(setTrainJobs)
     if (drawer === 'hf') {
       setHfLibraryMode('recommended')
@@ -679,7 +1027,31 @@ export default function App(): React.ReactElement {
         .catch(() => setRecommendedModels([]))
         .finally(() => setRecommendedLoading(false))
     }
-  }, [drawer, refreshMetricsBundle])
+  }, [drawer])
+
+  useEffect(() => {
+    if (drawer !== 'hf') return
+    let cancelled = false
+    void window.api.hardwareSummary(destDir.trim() || undefined).then((h) => {
+      if (!cancelled) setHardwareSummary(h)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [drawer, destDir])
+
+  const hfSelectedFileSizeBytes = useMemo(() => {
+    if (!detail || !downloadFile) return undefined
+    const s = detail.siblings?.find((x) => x.path === downloadFile)?.size
+    return s != null && s > 0 ? s : undefined
+  }, [detail, downloadFile])
+
+  const hfHardwareEval = useMemo(() => {
+    if (!hardwareSummary) return null
+    return evaluateModelForHardware(hfSelectedFileSizeBytes, hardwareSummary, {
+      fileSelectedSizeMissing: Boolean(downloadFile) && hfSelectedFileSizeBytes == null
+    })
+  }, [hardwareSummary, hfSelectedFileSizeBytes, downloadFile])
 
   const hfListModels = hfLibraryMode === 'search' ? hfResults : recommendedModels
   const hfListLoading = hfLibraryMode === 'search' ? hfSearchLoading : recommendedLoading
@@ -837,6 +1209,8 @@ export default function App(): React.ReactElement {
 
   async function startRuntime(): Promise<void> {
     setErr(null)
+    setRuntimeStarting(true)
+    setRuntimeLoadProgress(null)
     try {
       const s = await window.api.runtimeStart({ kind: runtimeKind, modelPath })
       setRuntimeStatus(s)
@@ -846,9 +1220,12 @@ export default function App(): React.ReactElement {
           : llamaBin
       await window.api.setConfig({ llamaBinaryPath: pathForStore, runtimeKind })
       if (runtimeKind === 'llamacpp' && pathForStore) setLlamaBin(pathForStore)
-      void refreshLlamaEnv()
+      void refreshRunDrawer()
     } catch (e) {
       setErr(String(e))
+    } finally {
+      setRuntimeStarting(false)
+      setRuntimeLoadProgress(null)
     }
   }
 
@@ -886,11 +1263,12 @@ export default function App(): React.ReactElement {
   }
 
   async function sendChat(): Promise<void> {
-    if (!convId || !draft.trim()) return
+    if (!convId || !draft.trim() || chatSending) return
     setErr(null)
     const userText = draft.trim()
     setDraft('')
     await window.api.messageAppend(convId, 'user', userText)
+    setMessages((prev) => [...prev, { role: 'user', content: userText }])
     let context = userText
     if (ragSnippets.length) {
       context =
@@ -899,14 +1277,31 @@ export default function App(): React.ReactElement {
         '\n\nUser question:\n' +
         userText
     }
-    const msgs = [...messages.map((m) => ({ role: m.role, content: m.content })), { role: 'user', content: context }]
+    const historyForApi = messages.map((m) => ({ role: m.role, content: m.content }))
+    const msgs = [...historyForApi, { role: 'user' as const, content: context }]
+    const requestId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    setChatSending(true)
+    setChatStreamBuffer('')
+    const offChat = window.api.onRuntimeChatProgress((p) => {
+      if (p.requestId !== requestId) return
+      if (p.kind === 'token' && p.text) {
+        setChatStreamBuffer((prev) => prev + p.text)
+      }
+    })
     try {
-      const reply = await window.api.runtimeChat(msgs)
+      const reply = await window.api.runtimeChat(msgs, requestId)
       await window.api.messageAppend(convId, 'assistant', reply)
       const m = await window.api.conversationMessages(convId)
       setMessages(m as { role: string; content: string }[])
     } catch (e) {
       setErr(String(e))
+    } finally {
+      offChat()
+      setChatSending(false)
+      setChatStreamBuffer('')
     }
   }
 
@@ -914,11 +1309,13 @@ export default function App(): React.ReactElement {
     const c = (await window.api.conversationCreate()) as { id: string }
     setConvId(c.id)
     setMessages([])
+    setMobileConvOpen(false)
     await loadConversations()
   }
 
   async function loadConv(id: string): Promise<void> {
     setConvId(id)
+    setMobileConvOpen(false)
     const m = await window.api.conversationMessages(id)
     setMessages(m as { role: string; content: string }[])
   }
@@ -996,8 +1393,8 @@ export default function App(): React.ReactElement {
   return (
     <div className="shell">
       <aside className="nav-rail" aria-label="Primary navigation">
-        <div className="nav-brand" title="Local LLM">
-          LLM
+        <div className="nav-brand" title="Local LLM Desktop">
+          <img src="/app-icon.png" alt="" width={44} height={44} decoding="async" />
         </div>
         <nav className="nav-main">
           <button
@@ -1048,9 +1445,36 @@ export default function App(): React.ReactElement {
       </aside>
 
       <div className={`shell-content shell-content--pinned-${pinnedWidgetsSide}`}>
-        {(metricsPinned || downloadsPinned) && (
+        {(metricsPinned || downloadsPinned || activityPinned) && (
           <aside className="pinned-widgets-aside" aria-label="Pinned widgets">
-            <div className="pinned-widgets-aside-header">Pinned widgets</div>
+            <div className="pinned-widgets-aside-header">
+              <span className="pinned-widgets-aside-title">Pinned widgets</span>
+              <div className="pinned-widgets-dock-symbols" role="group" aria-label="Widget bar position">
+                {(
+                  [
+                    { side: 'left' as const, icon: 'fa-arrow-left', title: 'Dock bar on the left (beside nav)' },
+                    { side: 'right' as const, icon: 'fa-arrow-right', title: 'Dock bar on the right (after main)' },
+                    { side: 'top' as const, icon: 'fa-arrow-up', title: 'Dock bar on top (above main)' },
+                    { side: 'bottom' as const, icon: 'fa-arrow-down', title: 'Dock bar on the bottom (below main)' }
+                  ] as const
+                ).map(({ side, icon, title }) => (
+                  <button
+                    key={side}
+                    type="button"
+                    className={`pinned-widgets-dock-btn ${pinnedWidgetsSide === side ? 'pinned-widgets-dock-btn--active' : ''}`}
+                    title={title}
+                    aria-label={title}
+                    aria-pressed={pinnedWidgetsSide === side}
+                    onClick={() => {
+                      setPinnedWidgetsSide(side)
+                      void saveMetricsWidgetConfig({ pinnedWidgetsSide: side })
+                    }}
+                  >
+                    <i className={`fa-solid ${icon}`} aria-hidden />
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="pinned-widgets-aside-body">
               {metricsPinned && (
                 <MetricsPinnedWidget
@@ -1076,6 +1500,26 @@ export default function App(): React.ReactElement {
                   onCancelJob={cancelDownloadJob}
                 />
               )}
+              {activityPinned && (
+                <ActivityPinnedWidget
+                  modelLoad={
+                    runtimeStarting
+                      ? (runtimeLoadProgress ?? { phase: 'starting', message: 'Starting runtime…' })
+                      : null
+                  }
+                  chatSending={chatSending}
+                  chatStreamPreview={chatStreamBuffer}
+                  onUnpin={() => {
+                    setActivityPinned(false)
+                    void saveMetricsWidgetConfig({ activityPinned: false })
+                  }}
+                  onOpenChat={() => {
+                    setMainView('chat')
+                    setMobileConvOpen(false)
+                    setMobileKbOpen(false)
+                  }}
+                />
+              )}
             </div>
           </aside>
         )}
@@ -1086,6 +1530,32 @@ export default function App(): React.ReactElement {
             <div className="top-bar-sub">{topSub}</div>
           </div>
           <div className="top-bar-actions">
+            {mainView === 'chat' && (
+              <>
+                <button
+                  type="button"
+                  className="top-bar-mobile-toggle top-bar-mobile-toggle--conv"
+                  aria-expanded={mobileConvOpen}
+                  onClick={() => {
+                    setMobileKbOpen(false)
+                    setMobileConvOpen((o) => !o)
+                  }}
+                >
+                  Chats
+                </button>
+                <button
+                  type="button"
+                  className="top-bar-mobile-toggle top-bar-mobile-toggle--kb"
+                  aria-expanded={mobileKbOpen}
+                  onClick={() => {
+                    setMobileConvOpen(false)
+                    setMobileKbOpen((o) => !o)
+                  }}
+                >
+                  Knowledge
+                </button>
+              </>
+            )}
             <div className="top-bar-pin-group">
               <button
                 type="button"
@@ -1097,7 +1567,9 @@ export default function App(): React.ReactElement {
                   void saveMetricsWidgetConfig({ metricsPinned: next })
                 }}
               >
-                <IconPin />
+                <span className="top-bar-pin-icon" aria-hidden>
+                  <i className="fa-solid fa-thumbtack" />
+                </span>
                 <span className="top-bar-pin-label">{metricsPinned ? 'Metrics' : 'Pin metrics'}</span>
               </button>
               <button
@@ -1110,8 +1582,29 @@ export default function App(): React.ReactElement {
                   void saveMetricsWidgetConfig({ downloadsPinned: next })
                 }}
               >
-                <IconPin />
+                <span className="top-bar-pin-icon" aria-hidden>
+                  <i className="fa-solid fa-thumbtack" />
+                </span>
                 <span className="top-bar-pin-label">{downloadsPinned ? 'Downloads' : 'Pin downloads'}</span>
+              </button>
+              <button
+                type="button"
+                className={`top-bar-pin ${activityPinned ? 'active' : ''}`}
+                title={
+                  activityPinned
+                    ? 'Unpin activity from sidebar'
+                    : 'Pin model load & reply progress to Pinned widgets panel'
+                }
+                onClick={() => {
+                  const next = !activityPinned
+                  setActivityPinned(next)
+                  void saveMetricsWidgetConfig({ activityPinned: next })
+                }}
+              >
+                <span className="top-bar-pin-icon" aria-hidden>
+                  <i className="fa-solid fa-thumbtack" />
+                </span>
+                <span className="top-bar-pin-label">{activityPinned ? 'Activity' : 'Pin activity'}</span>
               </button>
             </div>
             <div
@@ -1166,14 +1659,99 @@ export default function App(): React.ReactElement {
           </div>
         )}
 
+        {settingsConfirmKind && (
+          <div
+            className="modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-destructive-title"
+            onClick={() => setSettingsConfirmKind(null)}
+          >
+            <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+              <h2 id="settings-destructive-title" className="modal-title">
+                {settingsConfirmKind === 'caches' && 'Clear all caches?'}
+                {settingsConfirmKind === 'models' && 'Delete all model files?'}
+                {settingsConfirmKind === 'factory' && 'Reset settings to factory defaults?'}
+              </h2>
+              {settingsConfirmKind === 'caches' ? (
+                <p className="muted modal-text">
+                  This cancels active downloads, clears the download registry and Hugging Face metadata cache in the database, wipes metrics history and training job records, and deletes files under the vectors index folder. Your conversations, knowledge base, wiki pages, and downloaded model weight files are kept.
+                </p>
+              ) : null}
+              {settingsConfirmKind === 'models' ? (
+                <p className="muted modal-text">
+                  Stops the runtime and cancels active downloads, then permanently deletes every file and folder inside your current models directory (
+                  <code className="inline-code">{paths?.modelsDefault ?? '—'}</code>
+                  ). The download registry is cleared. This cannot be undone.
+                </p>
+              ) : null}
+              {settingsConfirmKind === 'factory' ? (
+                <p className="muted modal-text">
+                  Stops the runtime and cancels in-flight downloads. All saved settings (including custom models folder, llama binary path, Ollama URL, ports, and pinned widgets) return to defaults, and your Hugging Face token is removed from this device. Chats, knowledge base, wiki, caches, and model files are not changed by this action alone.
+                </p>
+              ) : null}
+              <div className="modal-actions">
+                <button type="button" className="btn-secondary" onClick={() => setSettingsConfirmKind(null)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  disabled={settingsMaintenanceBusy !== false}
+                  onClick={() => {
+                    if (settingsConfirmKind === 'caches') void runClearAllCaches()
+                    else if (settingsConfirmKind === 'models') void runDeleteAllModels()
+                    else void runResetFactoryConfig()
+                  }}
+                >
+                  {settingsConfirmKind === 'caches' && 'Clear caches'}
+                  {settingsConfirmKind === 'models' && 'Delete models'}
+                  {settingsConfirmKind === 'factory' && 'Reset settings'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="workspace">
           {mainView === 'chat' && (
-            <div className="chat-layout">
-              <aside className="conv-sidebar">
+            <div
+              className="chat-layout"
+              style={
+                {
+                  ['--slide-conv-width' as string]: `${slideConvWidthPx}px`,
+                  ['--slide-kb-width' as string]: `${slideKbWidthPx}px`
+                } as React.CSSProperties
+              }
+            >
+              {(mobileConvOpen || mobileKbOpen) && (
+                <div
+                  className="chat-sidebar-backdrop"
+                  role="presentation"
+                  aria-hidden
+                  onClick={() => {
+                    setMobileConvOpen(false)
+                    setMobileKbOpen(false)
+                  }}
+                />
+              )}
+              <aside
+                className={`conv-sidebar ${mobileConvOpen ? 'conv-sidebar--open' : ''} ${slidePanelResizing === 'conv' ? 'slide-panel--resizing' : ''}`}
+              >
                 <div className="conv-sidebar-header">
-                  <button type="button" className="btn-new-chat" onClick={() => void newConversation()}>
-                    New chat
-                  </button>
+                  <div className="conv-sidebar-header-row">
+                    <button type="button" className="btn-new-chat" onClick={() => void newConversation()}>
+                      New chat
+                    </button>
+                    <button
+                      type="button"
+                      className="conv-sidebar-close btn-ghost-sm"
+                      aria-label="Close chat list"
+                      onClick={() => setMobileConvOpen(false)}
+                    >
+                      Done
+                    </button>
+                  </div>
                 </div>
                 <div className="conv-list">
                   {conversations.map((c) => (
@@ -1200,6 +1778,22 @@ export default function App(): React.ReactElement {
                     </div>
                   ))}
                 </div>
+                {narrowSlideConv && mobileConvOpen ? (
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize chat list width"
+                    className="slide-panel-resize-handle slide-panel-resize-handle--from-left-panel"
+                    onPointerDown={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const v = clampSlideConv(e.clientX)
+                      convWRef.current = v
+                      setSlideConvWidthPx(v)
+                      setSlidePanelResizing('conv')
+                    }}
+                  />
+                ) : null}
               </aside>
 
               <section className="chat-center" aria-label="Conversation">
@@ -1224,10 +1818,30 @@ export default function App(): React.ReactElement {
                       </div>
                     </div>
                   ))}
+                  {chatSending ? (
+                    <div className="msg-row assistant">
+                      <div className="msg-bubble msg-bubble--streaming">
+                        <div className="msg-role">assistant</div>
+                        {chatStreamBuffer ? (
+                          <div className="msg-stream-text">{chatStreamBuffer}</div>
+                        ) : (
+                          <FloatingDots label="Generating reply" />
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
                   <div ref={messagesEndRef} />
                 </div>
 
                 <div className="composer-wrap">
+                  {chatSending ? (
+                    <div className="chat-generating-floater" aria-live="polite">
+                      <FloatingDots label="Generating reply" />
+                      <span className="chat-generating-floater-label">
+                        {chatStreamBuffer ? 'Streaming reply…' : 'Waiting for reply…'}
+                      </span>
+                    </div>
+                  ) : null}
                   <div className="rag-inline">
                     <input
                       className="input"
@@ -1260,13 +1874,13 @@ export default function App(): React.ReactElement {
                       value={draft}
                       onChange={(e) => setDraft(e.target.value)}
                       onKeyDown={onComposerKeyDown}
-                      disabled={!convId}
+                      disabled={!convId || chatSending}
                       rows={2}
                     />
                     <button
                       type="button"
                       className="btn-send"
-                      disabled={!convId || !draft.trim()}
+                      disabled={!convId || !draft.trim() || chatSending}
                       onClick={() => void sendChat()}
                       title="Send"
                     >
@@ -1276,9 +1890,38 @@ export default function App(): React.ReactElement {
                 </div>
               </section>
 
-              <aside className="kb-sidebar" aria-label="Knowledge snippets">
+              <aside
+                className={`kb-sidebar ${mobileKbOpen ? 'kb-sidebar--open' : ''} ${slidePanelResizing === 'kb' ? 'slide-panel--resizing' : ''}`}
+                aria-label="Knowledge snippets"
+              >
+                {narrowSlideKb && mobileKbOpen ? (
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize knowledge panel width"
+                    className="slide-panel-resize-handle slide-panel-resize-handle--from-right-panel"
+                    onPointerDown={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const v = clampSlideKb(window.innerWidth - e.clientX)
+                      kbWRef.current = v
+                      setSlideKbWidthPx(v)
+                      setSlidePanelResizing('kb')
+                    }}
+                  />
+                ) : null}
                 <div className="kb-sidebar-header">
-                  <h3>Knowledge</h3>
+                  <div className="kb-sidebar-header-row">
+                    <h3>Knowledge</h3>
+                    <button
+                      type="button"
+                      className="kb-sidebar-close btn-ghost-sm"
+                      aria-label="Close knowledge panel"
+                      onClick={() => setMobileKbOpen(false)}
+                    >
+                      Done
+                    </button>
+                  </div>
                   <p>Pull matches from your wiki into the next message. Open Wiki to add documents.</p>
                 </div>
                 <div className="kb-snippet-list">
@@ -1549,6 +2192,22 @@ export default function App(): React.ReactElement {
                       <>
                         <p className="muted">{detail.description?.slice(0, 320) ?? '—'}</p>
                         <p className="muted">Total ~{(detail.totalSizeBytes / 1e9).toFixed(2)} GB (file sum)</p>
+                        {hfHardwareEval ? (
+                          <div
+                            className={`hf-model-fit hf-model-fit--${hfHardwareEval.verdict}`}
+                            role="status"
+                          >
+                            <p className="hf-model-fit-title">This machine vs selected file</p>
+                            <p className="hf-model-fit-headline">{hfHardwareEval.headline}</p>
+                            <ul className="hf-model-fit-notes">
+                              {hfHardwareEval.notes.map((n, i) => (
+                                <li key={i}>{n}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : (
+                          <p className="muted hf-model-fit-loading">Checking this machine…</p>
+                        )}
                         <select className="select" value={downloadFile} onChange={(e) => setDownloadFile(e.target.value)} style={{ marginBottom: 8 }}>
                           <option value="">Choose file</option>
                           {detail.siblings?.map((s) => (
@@ -1600,6 +2259,78 @@ export default function App(): React.ReactElement {
                       <option value="ollama">Ollama</option>
                       <option value="llamacpp">llama.cpp server</option>
                     </select>
+                    <div className="runtime-ollama-probe" role="status">
+                      <div className="runtime-ollama-probe-row">
+                        <span className="runtime-ollama-probe-label">Ollama on host</span>
+                        {ollamaHost == null ? (
+                          <span className="muted runtime-ollama-probe-pending">Checking…</span>
+                        ) : (
+                          <>
+                            <span
+                              className={`runtime-ollama-probe-mark ${ollamaHost.reachable ? 'runtime-ollama-probe-mark--ok' : 'runtime-ollama-probe-mark--bad'}`}
+                              aria-label={ollamaHost.reachable ? 'Ollama reachable' : 'Ollama not reachable'}
+                              title={ollamaHost.reachable ? 'Daemon responds at configured URL' : 'No Ollama API at configured URL'}
+                            >
+                              {ollamaHost.reachable ? '✓' : '✗'}
+                            </span>
+                            <code className="inline-code runtime-ollama-probe-url">{ollamaHost.baseUrl}</code>
+                          </>
+                        )}
+                      </div>
+                      {ollamaHost != null && !ollamaHost.reachable && (
+                        <div className="runtime-ollama-install">
+                          <p className="muted runtime-ollama-install-disclosure">
+                            Ollama is third-party software from{' '}
+                            <button type="button" className="btn-link-inline" onClick={() => void window.api.openExternalUrl('https://ollama.com/')}>
+                              ollama.com
+                            </button>
+                            . Install Ollama downloads the official script from ollama.com and runs it (PowerShell on Windows,{' '}
+                            <code className="inline-code">install.sh</code> on macOS and Linux). This app stays pointed at{' '}
+                            <code className="inline-code">{ollamaHost.baseUrl}</code>.
+                          </p>
+                          <div className="runtime-ollama-install-actions">
+                            <button
+                              type="button"
+                              className="btn-primary"
+                              disabled={ollamaInstallBusy}
+                              onClick={() => void runOllamaInstall()}
+                            >
+                              {ollamaInstallBusy ? 'Installing…' : 'Install Ollama'}
+                            </button>
+                          </div>
+                          {(ollamaInstallBusy || ollamaInstallLog.length > 0) && (
+                            <div className="runtime-ollama-install-progress" aria-live="polite" aria-label="Installation progress">
+                              <div className="runtime-ollama-install-progress-head">
+                                {ollamaInstallBusy ? 'Installation progress' : 'Last install output'}
+                              </div>
+                              <pre ref={ollamaInstallLogRef} className="runtime-ollama-install-log" tabIndex={0}>
+                                {ollamaInstallLog.length === 0
+                                  ? ollamaInstallBusy
+                                    ? 'Starting…'
+                                    : ''
+                                  : ollamaInstallLog.join('\n')}
+                              </pre>
+                            </div>
+                          )}
+                          {ollamaInstallNote ? (
+                            <p
+                              className={`runtime-ollama-install-note${
+                                ollamaInstallNoteKind === 'error'
+                                  ? ' runtime-ollama-install-note--error'
+                                  : ollamaInstallNoteKind === 'success'
+                                    ? ' runtime-ollama-install-note--success'
+                                    : ollamaInstallNoteKind === 'info'
+                                      ? ' runtime-ollama-install-note--info'
+                                      : ''
+                              }`}
+                              role="status"
+                            >
+                              {ollamaInstallNote}
+                            </p>
+                          ) : null}
+                        </div>
+                      )}
+                    </div>
                   </div>
                   {runtimeKind === 'llamacpp' && llamaEnv && !llamaEnv.detected && (
                     <div className="runtime-llama-setup-banner" role="status">
@@ -1633,12 +2364,43 @@ export default function App(): React.ReactElement {
                   ) : null}
                   <div className="drawer-section">
                     <h3>Model</h3>
+                    <label className="runtime-local-models-label" htmlFor="runtime-local-model-select">
+                      Download folder <span className="runtime-local-models-dir">({paths?.modelsDefault ?? '—'})</span>
+                    </label>
+                    <select
+                      id="runtime-local-model-select"
+                      className="select runtime-local-model-select"
+                      aria-label="Choose a downloaded GGUF model file"
+                      value={matchedLocalModelPath}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        if (v) setModelPath(v)
+                      }}
+                    >
+                      <option value="">
+                        {localModelFilePaths.length === 0
+                          ? '— No .gguf files in folder —'
+                          : '— Custom path or Ollama tag (below) —'}
+                      </option>
+                      {localModelFilePaths.map((p) => (
+                        <option key={p} value={p} title={p}>
+                          {fileNameFromPath(p)}
+                        </option>
+                      ))}
+                    </select>
                     <input
-                      className="input"
+                      id="runtime-model-path-input"
+                      className="input runtime-model-path-input"
                       value={modelPath}
                       onChange={(e) => setModelPath(e.target.value)}
                       placeholder={runtimeKind === 'ollama' ? 'e.g. llama3.2' : 'Path to .gguf'}
+                      aria-label={runtimeKind === 'ollama' ? 'Ollama model tag' : 'Path to model weights'}
                     />
+                    <p className="muted runtime-model-hint">
+                      {runtimeKind === 'ollama'
+                        ? 'Ollama expects a model tag. If it is not on disk yet, Start will run ollama pull for that tag (can take a while). The list above is .gguf files for llama.cpp only.'
+                        : 'Pick from the list or paste a full path. Subfolders are scanned.'}
+                    </p>
                   </div>
                   <div className="drawer-section">
                     <h3>Local downloads</h3>
@@ -1720,11 +2482,38 @@ export default function App(): React.ReactElement {
                       <input className="input" value={llamaBin} onChange={(e) => setLlamaBin(e.target.value)} placeholder="llama-server path" />
                     </div>
                   )}
+                  {runtimeStarting ? (
+                    <div className="runtime-load-progress-banner" role="status" aria-live="polite">
+                      {runtimeLoadProgress?.percent != null ? (
+                        <div className="runtime-load-progress-bar">
+                          <div
+                            className="runtime-load-progress-bar-fill"
+                            style={{
+                              width: `${Math.min(100, Math.max(0, runtimeLoadProgress.percent))}%`
+                            }}
+                          />
+                        </div>
+                      ) : null}
+                      <p className="runtime-load-progress-message">
+                        {runtimeLoadProgress?.message ?? 'Starting runtime…'}
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="row">
-                    <button type="button" className="btn-primary" onClick={() => void startRuntime()}>
-                      Start
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={runtimeStarting}
+                      onClick={() => void startRuntime()}
+                    >
+                      {runtimeStarting ? 'Starting…' : 'Start'}
                     </button>
-                    <button type="button" className="btn-secondary" onClick={() => void stopRuntime()}>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={runtimeStarting}
+                      onClick={() => void stopRuntime()}
+                    >
                       Stop
                     </button>
                     <button type="button" className="btn-secondary" onClick={() => void refreshRunDrawer()}>
@@ -1811,12 +2600,12 @@ export default function App(): React.ReactElement {
                 <>
                   {metricsWidgetControls}
                   <p className="muted" style={{ marginTop: 0 }}>
-                    History samples are recorded when you open this panel or use Record below. The pinned metrics panel polls without saving
-                    each tick.
+                    While this panel is open, a snapshot is saved and charts refresh every <strong>{formatRefreshLabel(metricsRefreshMs)}</strong>{' '}
+                    (same as Pinned widgets; adjust there). The pinned panel polls without writing history each tick.
                   </p>
                   <div className="row" style={{ marginBottom: 16 }}>
                     <button type="button" className="btn-primary" onClick={() => void refreshMetricsBundle()}>
-                      Record snapshot &amp; refresh charts
+                      Record snapshot &amp; refresh now
                     </button>
                   </div>
                   {metricsBundle && (
@@ -1833,6 +2622,30 @@ export default function App(): React.ReactElement {
 
               {drawer === 'settings' && (
                 <>
+                  <div className="drawer-section">
+                    <h3>Appearance</h3>
+                    <p className="muted" style={{ marginTop: 0 }}>
+                      Accent palette for buttons, highlights, and chat accents. Secondary panels use a light glass treatment so the backdrop shows
+                      through.
+                    </p>
+                    <label style={{ display: 'block', marginTop: 12 }}>
+                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                        Color scheme
+                      </span>
+                      <select
+                        className="select"
+                        style={{ width: '100%', maxWidth: 320 }}
+                        value={colorScheme}
+                        onChange={(e) => void saveColorScheme(parseColorScheme(e.target.value))}
+                      >
+                        {COLOR_SCHEME_IDS.map((id) => (
+                          <option key={id} value={id}>
+                            {COLOR_SCHEME_LABELS[id]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
                   {metricsWidgetControls}
                   <div className="drawer-section">
                     <h3>Model install location</h3>
@@ -1882,22 +2695,39 @@ export default function App(): React.ReactElement {
                     </button>
                   </div>
                   <div className="drawer-section">
-                    <h3>Download cache</h3>
+                    <h3>Caches, models, and reset</h3>
                     <p className="muted" style={{ marginTop: 0 }}>
-                      Remove the in-app download registry and cached Hugging Face model metadata from the database. Active downloads are
-                      cancelled first. This does not delete model files from your disk.
+                      Destructive actions are confirmed in a dialog. Use them when troubleshooting or reclaiming disk space.
                     </p>
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={downloadCacheClearBusy}
-                      onClick={() => void clearDownloadCacheFromSettings()}
-                    >
-                      {downloadCacheClearBusy ? 'Clearing…' : 'Clear download cache'}
-                    </button>
-                    {downloadCacheClearMessage ? (
+                    <div className="settings-danger-actions">
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={settingsMaintenanceBusy !== false}
+                        onClick={() => setSettingsConfirmKind('caches')}
+                      >
+                        {settingsMaintenanceBusy === 'caches' ? 'Working…' : 'Clear all caches'}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-danger"
+                        disabled={settingsMaintenanceBusy !== false}
+                        onClick={() => setSettingsConfirmKind('models')}
+                      >
+                        {settingsMaintenanceBusy === 'models' ? 'Deleting…' : 'Delete all models'}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-danger"
+                        disabled={settingsMaintenanceBusy !== false}
+                        onClick={() => setSettingsConfirmKind('factory')}
+                      >
+                        {settingsMaintenanceBusy === 'factory' ? 'Resetting…' : 'Reset settings to defaults'}
+                      </button>
+                    </div>
+                    {settingsMaintenanceMessage ? (
                       <p className="settings-action-success" role="status">
-                        {downloadCacheClearMessage}
+                        {settingsMaintenanceMessage}
                       </p>
                     ) : null}
                   </div>
