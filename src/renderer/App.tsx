@@ -294,6 +294,33 @@ export default function App(): React.ReactElement {
     )
   }, [localModelFilePaths, modelPath, paths?.platform])
 
+  const localModelDefaultSyncRef = useRef<{ kind: typeof runtimeKind; localLen: number }>({
+    kind: runtimeKind,
+    localLen: 0
+  })
+
+  useEffect(() => {
+    const prev = localModelDefaultSyncRef.current
+    const switchedToLlama = prev.kind !== 'llamacpp' && runtimeKind === 'llamacpp'
+    const listBecameAvailable = prev.localLen === 0 && localModelFilePaths.length > 0
+    localModelDefaultSyncRef.current = {
+      kind: runtimeKind,
+      localLen: localModelFilePaths.length
+    }
+
+    if (runtimeKind !== 'llamacpp') return
+    const files = localModelFilePaths
+    if (files.length === 0) return
+
+    const win = paths?.platform === 'win32'
+    const cur = modelPath.trim()
+    const matched = files.some((p) => (win ? p.toLowerCase() === cur.toLowerCase() : p === cur))
+    if (matched) return
+    if (switchedToLlama || listBecameAvailable) {
+      setModelPath(files[0])
+    }
+  }, [runtimeKind, localModelFilePaths, paths?.platform, modelPath])
+
   const [conversations, setConversations] = useState<{ id: string; title: string }[]>([])
   const [convId, setConvId] = useState<string | null>(null)
   const [deleteConvId, setDeleteConvId] = useState<string | null>(null)
