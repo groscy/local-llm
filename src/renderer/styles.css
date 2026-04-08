@@ -1763,6 +1763,25 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.hf-model-card-footer-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hf-model-card-hub-link {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-bright);
+  text-decoration: none;
+}
+
+.hf-model-card-hub-link:hover {
+  text-decoration: underline;
+}
+
 .btn-card-download {
   flex-shrink: 0;
   padding: 8px 16px;

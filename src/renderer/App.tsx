@@ -32,6 +32,10 @@ type HfModelSortKey = 'downloads' | 'likes' | 'size'
 
 const HF_RECOMMENDED_FETCH_LIMIT = 72
 
+function huggingFaceModelUrl(repoId: string): string {
+  return `https://huggingface.co/${repoId.split('/').map(encodeURIComponent).join('/')}`
+}
+
 function parseNonNegativeInt(raw: string): number | undefined {
   const t = raw.trim()
   if (!t) return undefined
@@ -1464,12 +1468,22 @@ export default function App(): React.ReactElement {
                               </div>
                             ) : null}
                             <div className="hf-model-card-footer">
-                              <span className="hf-model-card-meta">
-                                {(m.downloads ?? 0).toLocaleString()} downloads · {m.likes ?? 0} likes
-                                {typeof m.totalSizeBytes === 'number' && m.totalSizeBytes > 0
-                                  ? ` · ~${formatBytes(m.totalSizeBytes)}`
-                                  : ''}
-                              </span>
+                              <div className="hf-model-card-footer-info">
+                                <span className="hf-model-card-meta">
+                                  {(m.downloads ?? 0).toLocaleString()} downloads · {m.likes ?? 0} likes
+                                  {typeof m.totalSizeBytes === 'number' && m.totalSizeBytes > 0
+                                    ? ` · ~${formatBytes(m.totalSizeBytes)}`
+                                    : ''}
+                                </span>
+                                <a
+                                  href={huggingFaceModelUrl(m.id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="hf-model-card-hub-link"
+                                >
+                                  View on Hugging Face
+                                </a>
+                              </div>
                               <button
                                 type="button"
                                 className="btn-card-download"
