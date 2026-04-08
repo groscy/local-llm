@@ -1451,11 +1451,7 @@ export default function App(): React.ReactElement {
                           <div key={m.id} className={`hf-model-card ${selectedModel === m.id ? 'selected' : ''}`}>
                             <button type="button" className="hf-model-card-main" onClick={() => void loadDetail(m.id)}>
                               <div className="hf-model-card-title">{m.id}</div>
-                              {m.description ? (
-                                <p className="hf-model-card-desc">{m.description}</p>
-                              ) : (
-                                <p className="hf-model-card-desc hf-model-card-desc--empty">No description on the model card.</p>
-                              )}
+                              {m.description ? <p className="hf-model-card-desc">{m.description}</p> : null}
                             </button>
                             {hfJob ? (
                               <div className="hf-model-card-progress">

@@ -1723,12 +1723,6 @@ body {
   text-align: left;
 }
 
-.hf-model-card-desc--empty {
-  color: var(--text-tertiary);
-  font-style: italic;
-  -webkit-line-clamp: 2;
-}
-
 .hf-model-card-progress {
   padding: 0 22px;
   margin-top: 10px;
