@@ -14,6 +14,7 @@ type Api = {
   setConfig: (c: unknown) => Promise<{ ok: boolean; error?: string }>
   /** Native folder picker; returns absolute path or null if cancelled. */
   pickModelsDirectory: () => Promise<string | null>
+  clearDownloadCache: () => Promise<{ downloadsRemoved: number; hfCacheRemoved: number }>
   hfSearch: (q: string, limit?: number) => Promise<unknown[]>
   hfRecommended: (limit?: number) => Promise<unknown[]>
   hfModelInfo: (id: string) => Promise<unknown>

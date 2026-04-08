@@ -6,6 +6,7 @@ export const IPC = {
   GET_CONFIG: 'app:getConfig',
   SET_CONFIG: 'app:setConfig',
   PICK_MODELS_DIRECTORY: 'app:pickModelsDirectory',
+  CLEAR_DOWNLOAD_CACHE: 'app:clearDownloadCache',
   LOG: 'app:log',
 
   // Hugging Face

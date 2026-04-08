@@ -213,6 +213,8 @@ export default function App(): React.ReactElement {
   const [hfTokenInput, setHfTokenInput] = useState('')
   const [modelsInstallPathDraft, setModelsInstallPathDraft] = useState('')
   const [modelsDirSaveErr, setModelsDirSaveErr] = useState<string | null>(null)
+  const [downloadCacheClearBusy, setDownloadCacheClearBusy] = useState(false)
+  const [downloadCacheClearMessage, setDownloadCacheClearMessage] = useState<string | null>(null)
   const [hfDownloadJobs, setHfDownloadJobs] = useState<Record<string, HfCardDownloadState>>({})
   const hfDownloadJobsRef = useRef(hfDownloadJobs)
   hfDownloadJobsRef.current = hfDownloadJobs
@@ -280,6 +282,31 @@ export default function App(): React.ReactElement {
     },
     [refreshRunDrawer, downloadsPinned]
   )
+
+  const clearDownloadCacheFromSettings = useCallback(async () => {
+    setDownloadCacheClearMessage(null)
+    setErr(null)
+    setDownloadCacheClearBusy(true)
+    try {
+      const r = await window.api.clearDownloadCache()
+      setHfDownloadJobs({})
+      setDownloadCacheClearMessage(
+        `Cleared ${r.downloadsRemoved} download registry row${r.downloadsRemoved === 1 ? '' : 's'} and ${r.hfCacheRemoved} Hugging Face cache entr${r.hfCacheRemoved === 1 ? 'y' : 'ies'}. Files on disk were not deleted.`
+      )
+      void refreshRunDrawer()
+      if (downloadsPinned) {
+        try {
+          setPinnedDownloadsSnapshot(await window.api.downloadsList())
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setDownloadCacheClearBusy(false)
+    }
+  }, [refreshRunDrawer, downloadsPinned])
 
   useEffect(() => {
     void refreshPaths()
@@ -1425,6 +1452,26 @@ export default function App(): React.ReactElement {
                     >
                       Save
                     </button>
+                  </div>
+                  <div className="drawer-section">
+                    <h3>Download cache</h3>
+                    <p className="muted" style={{ marginTop: 0 }}>
+                      Remove the in-app download registry and cached Hugging Face model metadata from the database. Active downloads are
+                      cancelled first. This does not delete model files from your disk.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={downloadCacheClearBusy}
+                      onClick={() => void clearDownloadCacheFromSettings()}
+                    >
+                      {downloadCacheClearBusy ? 'Clearing…' : 'Clear download cache'}
+                    </button>
+                    {downloadCacheClearMessage ? (
+                      <p className="settings-action-success" role="status">
+                        {downloadCacheClearMessage}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="drawer-section">
                     <h3>Data paths</h3>

@@ -227,3 +227,17 @@ export function cancelDownload(jobId: string): boolean {
 export function getActiveDownload(jobId: string): DownloadJob | undefined {
   return active.get(jobId)?.job
 }
+
+/** Cancel in-flight downloads, clear the download registry, and drop Hugging Face model JSON cache. Does not delete files on disk. */
+export function clearDownloadRegistryAndHfCache(db: Database.Database): {
+  downloadsRemoved: number
+  hfCacheRemoved: number
+} {
+  for (const id of [...active.keys()]) {
+    cancelDownload(id)
+  }
+  const downloadsRemoved = db.prepare('DELETE FROM downloads').run().changes
+  const hfCacheRemoved = db.prepare('DELETE FROM hf_model_cache').run().changes
+  logLine('info', 'download_cache_cleared', { downloadsRemoved, hfCacheRemoved })
+  return { downloadsRemoved, hfCacheRemoved }
+}

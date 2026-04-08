@@ -12,7 +12,8 @@ import {
   startDownload,
   cancelDownload,
   listDownloadsWithProgress,
-  getActiveDownload
+  getActiveDownload,
+  clearDownloadRegistryAndHfCache
 } from '../services/downloadManager'
 import { createRuntime, type RuntimeAdapter } from '../services/runtime'
 import * as chatService from '../services/chatService'
@@ -167,6 +168,8 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(IPC.HF_CANCEL_DOWNLOAD, (_e, jobId: string) => cancelDownload(jobId))
 
   ipcMain.handle(IPC.DOWNLOADS_LIST, () => listDownloadsWithProgress(db))
+
+  ipcMain.handle(IPC.CLEAR_DOWNLOAD_CACHE, () => clearDownloadRegistryAndHfCache(db))
 
   ipcMain.handle(IPC.RUNTIME_LIST, () => [
     { id: 'llamacpp', label: 'llama.cpp server' },

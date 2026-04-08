@@ -1581,6 +1581,13 @@ body {
   margin-top: 3px;
 }
 
+.settings-action-success {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #8fd4a4;
+}
+
 /* Pinned downloads widget */
 .downloads-pinned-widget {
   position: fixed;

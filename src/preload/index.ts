@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('api', {
   getConfig: () => invoke(IPC.GET_CONFIG),
   setConfig: (c: unknown) => invoke(IPC.SET_CONFIG, c),
   pickModelsDirectory: () => invoke<string | null>(IPC.PICK_MODELS_DIRECTORY),
+  clearDownloadCache: () =>
+    invoke<{ downloadsRemoved: number; hfCacheRemoved: number }>(IPC.CLEAR_DOWNLOAD_CACHE),
   hfSearch: (q: string, limit?: number) => invoke(IPC.HF_SEARCH, q, limit),
   hfRecommended: (limit?: number) => invoke(IPC.HF_RECOMMENDED, limit),
   hfModelInfo: (id: string) => invoke(IPC.HF_MODEL_INFO, id),
