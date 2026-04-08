@@ -287,7 +287,11 @@ export class OllamaAdapter implements RuntimeAdapter {
 
   async chat(
     messages: ChatMessage[],
-    opts?: { maxTokens?: number; onStreamChunk?: (text: string) => void }
+    opts?: {
+      maxTokens?: number
+      onStreamChunk?: (text: string) => void
+      onStreamUsage?: (u: { promptTokens?: number; completionTokens?: number }) => void
+    }
   ): Promise<string> {
     const url = `${this.baseUrl}/api/chat`
     const stream = Boolean(opts?.onStreamChunk)
@@ -333,6 +337,17 @@ export class OllamaAdapter implements RuntimeAdapter {
         timeoutMs: 600_000,
         onObject: (obj) => {
           if (typeof obj.error === 'string' && obj.error.trim()) streamErr = obj.error
+          if (obj.done === true) {
+            const o = obj as Record<string, unknown>
+            const pt = o.prompt_eval_count
+            const ct = o.eval_count
+            if (typeof pt === 'number' || typeof ct === 'number') {
+              opts?.onStreamUsage?.({
+                promptTokens: typeof pt === 'number' ? pt : undefined,
+                completionTokens: typeof ct === 'number' ? ct : undefined
+              })
+            }
+          }
           const msg = obj.message as { content?: string } | undefined
           const piece = typeof msg?.content === 'string' ? msg.content : ''
           if (piece) {

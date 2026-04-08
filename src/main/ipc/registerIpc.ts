@@ -313,14 +313,27 @@ export function registerIpc(ctx: IpcContext): void {
       const rt = getRuntime()
       if (!rt) throw new Error('Runtime not started')
       const requestId = typeof payload.requestId === 'string' ? payload.requestId : ''
-      const emit = (data: { kind: 'token'; text: string } | { kind: 'error'; message: string }): void => {
+      const emit = (
+        data:
+          | { kind: 'token'; text: string }
+          | { kind: 'error'; message: string }
+          | { kind: 'usage'; promptTokens?: number; completionTokens?: number }
+      ): void => {
         if (!requestId) return
         event.sender.send(IPC.RUNTIME_CHAT_PROGRESS, { requestId, ...data })
       }
       try {
         return await rt.chat(payload.messages, {
           ...(requestId
-            ? { onStreamChunk: (text: string) => emit({ kind: 'token', text }) }
+            ? {
+                onStreamChunk: (text: string) => emit({ kind: 'token', text }),
+                onStreamUsage: (u) =>
+                  emit({
+                    kind: 'usage',
+                    promptTokens: u.promptTokens,
+                    completionTokens: u.completionTokens
+                  })
+              }
             : {})
         })
       } catch (err) {
@@ -334,6 +347,18 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(IPC.CONVERSATIONS_LIST, () => chatService.listConversations(db))
   ipcMain.handle(IPC.CONVERSATION_CREATE, (_e, title?: string) => chatService.createConversation(db, title ?? ''))
   ipcMain.handle(IPC.CONVERSATION_MESSAGES, (_e, id: string) => chatService.listMessages(db, id))
+  ipcMain.handle(IPC.CONVERSATION_RENAME, (_e, payload: unknown) => {
+    const parsed = z
+      .object({
+        id: z.string().min(1),
+        title: z.string().max(512)
+      })
+      .safeParse(payload)
+    if (!parsed.success) throw new Error('Invalid conversation rename payload')
+    const row = chatService.renameConversation(db, parsed.data.id, parsed.data.title)
+    if (!row) throw new Error('Conversation not found')
+    return row
+  })
   ipcMain.handle(
     IPC.MESSAGE_APPEND,
     (_e, cid: string, role: 'user' | 'assistant' | 'system', content: string, modelId?: string) =>

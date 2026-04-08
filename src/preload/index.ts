@@ -58,6 +58,8 @@ contextBridge.exposeInMainWorld('api', {
   conversationsList: () => invoke(IPC.CONVERSATIONS_LIST),
   conversationCreate: (title?: string) => invoke(IPC.CONVERSATION_CREATE, title),
   conversationMessages: (id: string) => invoke(IPC.CONVERSATION_MESSAGES, id),
+  conversationRename: (id: string, title: string) =>
+    invoke(IPC.CONVERSATION_RENAME, { id, title }),
   conversationDelete: (payload: { id: string; removeLinkedKnowledge: boolean }) =>
     invoke(IPC.CONVERSATION_DELETE, payload),
   messageAppend: (cid: string, role: 'user' | 'assistant' | 'system', content: string, modelId?: string) =>

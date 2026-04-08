@@ -10,6 +10,10 @@ class SseChatBuffer {
   private buf = ''
   private out = ''
 
+  constructor(
+    private readonly onUsage?: (u: { promptTokens?: number; completionTokens?: number }) => void
+  ) {}
+
   feed(chunk: string, onDelta: (s: string) => void): void {
     this.buf += chunk
     this.drainBlocks(onDelta)
@@ -48,6 +52,18 @@ class SseChatBuffer {
       try {
         const j = JSON.parse(payload) as {
           choices?: { delta?: { content?: string }; message?: { content?: string } }[]
+          usage?: { prompt_tokens?: number; completion_tokens?: number }
+        }
+        const u = j.usage
+        if (u && typeof u === 'object') {
+          const pt = u.prompt_tokens
+          const ct = u.completion_tokens
+          if (typeof pt === 'number' || typeof ct === 'number') {
+            this.onUsage?.({
+              promptTokens: typeof pt === 'number' ? pt : undefined,
+              completionTokens: typeof ct === 'number' ? ct : undefined
+            })
+          }
         }
         const c = j.choices?.[0]?.delta?.content ?? j.choices?.[0]?.message?.content
         if (typeof c === 'string' && c) {
@@ -123,7 +139,11 @@ export class LlamaCppAdapter implements RuntimeAdapter {
 
   async chat(
     messages: ChatMessage[],
-    opts?: { maxTokens?: number; onStreamChunk?: (text: string) => void }
+    opts?: {
+      maxTokens?: number
+      onStreamChunk?: (text: string) => void
+      onStreamUsage?: (u: { promptTokens?: number; completionTokens?: number }) => void
+    }
   ): Promise<string> {
     const url = `http://127.0.0.1:${this.port}/v1/chat/completions`
     const stream = Boolean(opts?.onStreamChunk)
@@ -163,7 +183,7 @@ export class LlamaCppAdapter implements RuntimeAdapter {
         max_tokens: streamOpts.maxTokens ?? 512,
         stream: true
       })
-      const sse = new SseChatBuffer()
+      const sse = new SseChatBuffer(streamOpts.onStreamUsage)
       const onDelta = streamOpts.onStreamChunk!
       const { statusCode, tail } = await httpPostStreamingResponse({
         url,

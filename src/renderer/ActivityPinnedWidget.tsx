@@ -1,22 +1,27 @@
 import type { ReactElement } from 'react'
 import type { RuntimeLoadProgress } from '@shared/types'
-import { FloatingDots } from './FloatingDots'
 
-function clipPreview(s: string, max = 220): string {
-  const t = s.replace(/\s+/g, ' ').trim()
-  if (t.length <= max) return t
-  return `${t.slice(0, max)}…`
+export type ActivityChatTokens = {
+  prompt: number
+  completion: number
+  promptIsEstimate: boolean
+  completionIsEstimate: boolean
 }
 
 export function ActivityPinnedWidget(props: {
   modelLoad: RuntimeLoadProgress | null
   chatSending: boolean
-  chatStreamPreview: string
+  chatTokens: ActivityChatTokens | null
   onUnpin: () => void
   onOpenChat: () => void
 }): ReactElement {
-  const { modelLoad, chatSending, chatStreamPreview, onUnpin, onOpenChat } = props
+  const { modelLoad, chatSending, chatTokens, onUnpin, onOpenChat } = props
   const busy = modelLoad != null || chatSending
+
+  function formatCount(n: number, isEst: boolean): string {
+    const v = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0
+    return isEst ? `~${v}` : String(v)
+  }
 
   return (
     <aside className="activity-pinned-widget" aria-label="Generation activity">
@@ -50,22 +55,23 @@ export function ActivityPinnedWidget(props: {
               <p className="activity-pinned-message">{modelLoad.message}</p>
             </div>
           ) : null}
-          {chatSending ? (
+          {chatSending && chatTokens ? (
             <div className="activity-pinned-block">
-              <div className="activity-pinned-block-title">
-                Reply
-                {!chatStreamPreview ? (
-                  <>
-                    {' '}
-                    <FloatingDots label="Generating reply" />
-                  </>
-                ) : null}
-              </div>
-              {chatStreamPreview ? (
-                <p className="activity-pinned-stream-preview">{clipPreview(chatStreamPreview)}</p>
-              ) : (
-                <p className="activity-pinned-message muted">Waiting for first token…</p>
-              )}
+              <div className="activity-pinned-block-title">Reply</div>
+              <dl className="activity-pinned-tokens">
+                <div className="activity-pinned-tokens-row">
+                  <dt>Sent</dt>
+                  <dd title="Prompt tokens (exact when the runtime reports them)">
+                    {formatCount(chatTokens.prompt, chatTokens.promptIsEstimate)} tok
+                  </dd>
+                </div>
+                <div className="activity-pinned-tokens-row">
+                  <dt>Generated</dt>
+                  <dd title="Completion tokens (estimated while streaming, then exact if reported)">
+                    {formatCount(chatTokens.completion, chatTokens.completionIsEstimate)} tok
+                  </dd>
+                </div>
+              </dl>
             </div>
           ) : null}
         </div>

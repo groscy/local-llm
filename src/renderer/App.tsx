@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   DownloadRow,
   HardwareSummary,
@@ -12,7 +12,8 @@ import { evaluateModelForHardware } from '@shared/modelHardwareFit'
 import type { ColorSchemeId } from '@shared/colorScheme'
 import { COLOR_SCHEME_IDS, COLOR_SCHEME_LABELS, DEFAULT_COLOR_SCHEME, parseColorScheme } from '@shared/colorScheme'
 import { DownloadProgressBar, downloadRowProgressPct, fileNameFromPath, formatBytes } from './downloadProgressUi'
-import { ActivityPinnedWidget } from './ActivityPinnedWidget'
+import { ActivityPinnedWidget, type ActivityChatTokens } from './ActivityPinnedWidget'
+import { ChatRichContent } from './ChatRichContent'
 import { DownloadsPinnedWidget } from './DownloadsPinnedWidget'
 import { FloatingDots } from './FloatingDots'
 import { MetricsTimeSeries } from './MetricsTimeSeries'
@@ -297,6 +298,8 @@ export default function App(): React.ReactElement {
   const [convId, setConvId] = useState<string | null>(null)
   const [deleteConvId, setDeleteConvId] = useState<string | null>(null)
   const [deleteConvRemoveKb, setDeleteConvRemoveKb] = useState(false)
+  const [renamingConvId, setRenamingConvId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
   const [saveChatKbBusy, setSaveChatKbBusy] = useState(false)
   const [messages, setMessages] = useState<{ role: string; content: string }[]>([])
   const [draft, setDraft] = useState('')
@@ -419,6 +422,7 @@ export default function App(): React.ReactElement {
   const [runtimeStarting, setRuntimeStarting] = useState(false)
   const [chatSending, setChatSending] = useState(false)
   const [chatStreamBuffer, setChatStreamBuffer] = useState('')
+  const [activityChatTokens, setActivityChatTokens] = useState<ActivityChatTokens | null>(null)
   const [pinnedWidgetsSide, setPinnedWidgetsSide] = useState<PinnedWidgetsSide>('left')
   const [pinnedDownloadsSnapshot, setPinnedDownloadsSnapshot] = useState<DownloadRow[]>([])
   const [metricsRefreshMs, setMetricsRefreshMs] = useState(3000)
@@ -428,6 +432,7 @@ export default function App(): React.ReactElement {
   const [widgetSeries, setWidgetSeries] = useState<MetricsSnapshot[]>([])
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const renameInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (!chatSending && !chatStreamBuffer) return
@@ -444,6 +449,34 @@ export default function App(): React.ReactElement {
     const c = await window.api.conversationsList()
     setConversations(c as { id: string; title: string }[])
   }, [])
+
+  const cancelRenameConv = useCallback(() => {
+    setRenamingConvId(null)
+    setRenameDraft('')
+  }, [])
+
+  const commitRenameConv = useCallback(async () => {
+    if (!renamingConvId) return
+    const id = renamingConvId
+    const title = renameDraft.trim() || 'New chat'
+    setErr(null)
+    try {
+      await window.api.conversationRename(id, title)
+      cancelRenameConv()
+      await loadConversations()
+    } catch (e) {
+      setErr(String(e))
+    }
+  }, [renamingConvId, renameDraft, loadConversations, cancelRenameConv])
+
+  useLayoutEffect(() => {
+    if (!renamingConvId) return
+    const el = renameInputRef.current
+    if (el) {
+      el.focus()
+      el.select()
+    }
+  }, [renamingConvId])
 
   const loadWiki = useCallback(async () => {
     const t = await window.api.kbWikiTopics()
@@ -1283,12 +1316,44 @@ export default function App(): React.ReactElement {
       typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const totalChars = msgs.reduce((acc, m) => acc + m.content.length, 0)
+    const promptTokenEstimate = Math.max(1, Math.ceil(totalChars / 4))
     setChatSending(true)
     setChatStreamBuffer('')
+    setActivityChatTokens({
+      prompt: promptTokenEstimate,
+      completion: 0,
+      promptIsEstimate: true,
+      completionIsEstimate: true,
+    })
     const offChat = window.api.onRuntimeChatProgress((p) => {
       if (p.requestId !== requestId) return
       if (p.kind === 'token' && p.text) {
-        setChatStreamBuffer((prev) => prev + p.text)
+        const chunk = p.text
+        setChatStreamBuffer((prev) => prev + chunk)
+        setActivityChatTokens((prev) => {
+          if (!prev || !prev.completionIsEstimate) return prev
+          const delta = Math.max(1, Math.ceil(chunk.length / 4))
+          return { ...prev, completion: prev.completion + delta }
+        })
+      }
+      if (p.kind === 'usage') {
+        setActivityChatTokens((prev) => {
+          const base =
+            prev ??
+            ({
+              prompt: promptTokenEstimate,
+              completion: 0,
+              promptIsEstimate: true,
+              completionIsEstimate: true,
+            } satisfies ActivityChatTokens)
+          return {
+            prompt: p.promptTokens != null ? p.promptTokens : base.prompt,
+            completion: p.completionTokens != null ? p.completionTokens : base.completion,
+            promptIsEstimate: p.promptTokens != null ? false : base.promptIsEstimate,
+            completionIsEstimate: p.completionTokens != null ? false : base.completionIsEstimate,
+          }
+        })
       }
     })
     try {
@@ -1302,10 +1367,12 @@ export default function App(): React.ReactElement {
       offChat()
       setChatSending(false)
       setChatStreamBuffer('')
+      setActivityChatTokens(null)
     }
   }
 
   async function newConversation(): Promise<void> {
+    cancelRenameConv()
     const c = (await window.api.conversationCreate()) as { id: string }
     setConvId(c.id)
     setMessages([])
@@ -1314,6 +1381,7 @@ export default function App(): React.ReactElement {
   }
 
   async function loadConv(id: string): Promise<void> {
+    cancelRenameConv()
     setConvId(id)
     setMobileConvOpen(false)
     const m = await window.api.conversationMessages(id)
@@ -1384,6 +1452,18 @@ export default function App(): React.ReactElement {
   }
 
   const runtimeOn = Boolean(runtimeStatus?.running)
+  const assistantResponderLabel = useMemo(() => {
+    if (!runtimeStatus?.running) return 'Assistant'
+    const raw = runtimeStatus.modelPath?.trim()
+    if (!raw) return 'Assistant'
+    if (
+      runtimeStatus.kind === 'llamacpp' &&
+      (raw.includes('/') || raw.includes('\\') || /^[a-zA-Z]:[\\/]/.test(raw))
+    ) {
+      return fileNameFromPath(raw) || raw
+    }
+    return raw
+  }, [runtimeStatus])
   const topTitle = mainView === 'chat' ? 'Chat' : 'Knowledge wiki'
   const topSub =
     mainView === 'chat'
@@ -1508,7 +1588,7 @@ export default function App(): React.ReactElement {
                       : null
                   }
                   chatSending={chatSending}
-                  chatStreamPreview={chatStreamBuffer}
+                  chatTokens={activityChatTokens}
                   onUnpin={() => {
                     setActivityPinned(false)
                     void saveMetricsWidgetConfig({ activityPinned: false })
@@ -1755,26 +1835,86 @@ export default function App(): React.ReactElement {
                 </div>
                 <div className="conv-list">
                   {conversations.map((c) => (
-                    <div key={c.id} className="conv-item-row">
-                      <button
-                        type="button"
-                        className={`conv-item ${convId === c.id ? 'active' : ''}`}
-                        onClick={() => void loadConv(c.id)}
-                      >
-                        {c.title || c.id.slice(0, 8)}
-                      </button>
-                      <button
-                        type="button"
-                        className="conv-item-delete"
-                        title="Delete chat"
-                        aria-label={`Delete chat ${c.title || c.id.slice(0, 8)}`}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setDeleteConvId(c.id)
-                        }}
-                      >
-                        ×
-                      </button>
+                    <div
+                      key={c.id}
+                      className={`conv-item-row ${renamingConvId === c.id ? 'conv-item-row--editing' : ''}`}
+                    >
+                      {renamingConvId === c.id ? (
+                        <>
+                          <input
+                            ref={renameInputRef}
+                            type="text"
+                            className="conv-item-rename-input"
+                            value={renameDraft}
+                            maxLength={512}
+                            onChange={(e) => setRenameDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                void commitRenameConv()
+                              }
+                              if (e.key === 'Escape') {
+                                e.preventDefault()
+                                cancelRenameConv()
+                              }
+                            }}
+                            aria-label="Rename chat"
+                          />
+                          <button
+                            type="button"
+                            className="conv-item-rename-action conv-item-rename-action--save"
+                            title="Save name"
+                            aria-label="Save chat name"
+                            onClick={() => void commitRenameConv()}
+                          >
+                            <i className="fa-solid fa-check" aria-hidden />
+                          </button>
+                          <button
+                            type="button"
+                            className="conv-item-rename-action conv-item-rename-action--cancel"
+                            title="Cancel"
+                            aria-label="Cancel rename"
+                            onClick={cancelRenameConv}
+                          >
+                            <i className="fa-solid fa-xmark" aria-hidden />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className={`conv-item ${convId === c.id ? 'active' : ''}`}
+                            onClick={() => void loadConv(c.id)}
+                          >
+                            {c.title || c.id.slice(0, 8)}
+                          </button>
+                          <button
+                            type="button"
+                            className="conv-item-rename"
+                            title="Rename chat"
+                            aria-label={`Rename chat ${c.title || c.id.slice(0, 8)}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setRenamingConvId(c.id)
+                              setRenameDraft(c.title || '')
+                            }}
+                          >
+                            <i className="fa-solid fa-pen" aria-hidden />
+                          </button>
+                          <button
+                            type="button"
+                            className="conv-item-delete"
+                            title="Delete chat"
+                            aria-label={`Delete chat ${c.title || c.id.slice(0, 8)}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setDeleteConvId(c.id)
+                            }}
+                          >
+                            ×
+                          </button>
+                        </>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1813,17 +1953,39 @@ export default function App(): React.ReactElement {
                   {messages.map((m, i) => (
                     <div key={i} className={`msg-row ${m.role === 'user' ? 'user' : 'assistant'}`}>
                       <div className="msg-bubble">
-                        <div className="msg-role">{m.role}</div>
-                        {m.content}
+                        <div
+                          className="msg-role"
+                          title={
+                            m.role === 'assistant' && runtimeStatus?.running && runtimeStatus.modelPath
+                              ? runtimeStatus.modelPath
+                              : undefined
+                          }
+                        >
+                          {m.role === 'assistant'
+                            ? assistantResponderLabel
+                            : m.role === 'user'
+                              ? 'you'
+                              : m.role}
+                        </div>
+                        <ChatRichContent content={m.content} />
                       </div>
                     </div>
                   ))}
                   {chatSending ? (
                     <div className="msg-row assistant">
                       <div className="msg-bubble msg-bubble--streaming">
-                        <div className="msg-role">assistant</div>
+                        <div
+                          className="msg-role"
+                          title={
+                            runtimeStatus?.running && runtimeStatus.modelPath
+                              ? runtimeStatus.modelPath
+                              : undefined
+                          }
+                        >
+                          {assistantResponderLabel}
+                        </div>
                         {chatStreamBuffer ? (
-                          <div className="msg-stream-text">{chatStreamBuffer}</div>
+                          <ChatRichContent content={chatStreamBuffer} plainStreaming />
                         ) : (
                           <FloatingDots label="Generating reply" />
                         )}

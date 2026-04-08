@@ -45,6 +45,7 @@ export const IPC = {
   CONVERSATIONS_LIST: 'chat:conversationsList',
   CONVERSATION_CREATE: 'chat:conversationCreate',
   CONVERSATION_MESSAGES: 'chat:conversationMessages',
+  CONVERSATION_RENAME: 'chat:conversationRename',
   MESSAGE_APPEND: 'chat:messageAppend',
   CONVERSATION_DELETE: 'chat:conversationDelete',
 

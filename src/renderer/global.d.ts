@@ -83,6 +83,7 @@ type Api = {
   conversationsList: () => Promise<unknown[]>
   conversationCreate: (title?: string) => Promise<unknown>
   conversationMessages: (id: string) => Promise<unknown[]>
+  conversationRename: (id: string, title: string) => Promise<unknown>
   conversationDelete: (payload: { id: string; removeLinkedKnowledge: boolean }) => Promise<{ ok: boolean }>
   messageAppend: (
     cid: string,

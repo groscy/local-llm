@@ -30,6 +30,20 @@ export function deleteConversation(db: Database.Database, id: string): void {
   db.prepare('DELETE FROM conversations WHERE id = ?').run(id)
 }
 
+export function renameConversation(
+  db: Database.Database,
+  id: string,
+  title: string
+): ConversationRow | undefined {
+  const row = db
+    .prepare('SELECT id, title, created_at as createdAt, updated_at as updatedAt FROM conversations WHERE id = ?')
+    .get(id) as ConversationRow | undefined
+  if (!row) return undefined
+  const nextTitle = title.trim() || 'New chat'
+  db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(nextTitle, id)
+  return { ...row, title: nextTitle }
+}
+
 export function appendMessage(
   db: Database.Database,
   conversationId: string,

@@ -20,7 +20,12 @@ export interface RuntimeAdapter {
   getStatus(): RuntimeStatus
   chat(
     messages: ChatMessage[],
-    opts?: { maxTokens?: number; onStreamChunk?: (text: string) => void }
+    opts?: {
+      maxTokens?: number
+      onStreamChunk?: (text: string) => void
+      /** Fired when the backend reports final token counts (streaming end). */
+      onStreamUsage?: (u: { promptTokens?: number; completionTokens?: number }) => void
+    }
   ): Promise<string>
   /** Optional: probe health / metrics from server */
   fetchMetrics?(): Promise<{

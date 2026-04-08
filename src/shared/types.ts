@@ -153,7 +153,10 @@ export interface RuntimeLoadProgress {
 /** Main → renderer while a chat completion is streaming. */
 export interface RuntimeChatProgress {
   requestId: string
-  kind: 'token' | 'error'
+  kind: 'token' | 'error' | 'usage'
   text?: string
   message?: string
+  /** From Ollama / llama.cpp when the stream finishes (exact counts). */
+  promptTokens?: number
+  completionTokens?: number
 }
