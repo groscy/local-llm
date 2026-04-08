@@ -3336,6 +3336,160 @@ select.select optgroup {
   color: var(--text-secondary);
 }
 
+/* Run drawer: loaded model (hero) */
+.runtime-loaded-hero {
+  margin: 0 0 20px;
+  padding: 18px 18px 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid color-mix(in srgb, #5bd38a 35%, var(--border));
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, #5bd38a 12%, var(--surface-elevated)) 0%,
+    var(--surface-elevated) 55%
+  );
+  box-shadow: 0 0 0 1px color-mix(in srgb, #5bd38a 18%, transparent);
+}
+
+.runtime-loaded-hero-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.runtime-loaded-hero-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #8ee9b0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, #5bd38a 22%, transparent);
+  border: 1px solid color-mix(in srgb, #5bd38a 45%, transparent);
+}
+
+.runtime-loaded-hero-kicker {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.runtime-loaded-hero-title {
+  margin: 0 0 10px;
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.runtime-loaded-hero-meta {
+  margin: 0 0 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.runtime-loaded-hero-meta .inline-code {
+  font-size: 11px;
+}
+
+.runtime-loaded-hero-meta-sep {
+  opacity: 0.6;
+}
+
+.runtime-loaded-hero-pid {
+  margin: 0 0 14px;
+  font-size: 11px;
+}
+
+.runtime-loaded-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.drawer-section.runtime-load-card {
+  margin-bottom: 8px;
+}
+
+.runtime-load-card-title {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.runtime-load-card-lead {
+  margin: 0 0 16px;
+  line-height: 1.45;
+}
+
+.runtime-field-label {
+  display: block;
+  margin: 14px 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.runtime-field-label:first-of-type {
+  margin-top: 0;
+}
+
+.runtime-field-hint-inline {
+  margin: -2px 0 8px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.runtime-load-primary-actions {
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+
+.runtime-drawer-advanced {
+  margin: 12px 0 8px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-deep) 40%, transparent);
+  padding: 0 12px 10px;
+}
+
+.runtime-drawer-advanced > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 10px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.runtime-drawer-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.runtime-drawer-advanced-body {
+  margin-top: 0;
+  padding-top: 0;
+}
+
+.runtime-runtime-footnote {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
 /* Pinned activity widget */
 .activity-pinned-widget {
   position: relative;
