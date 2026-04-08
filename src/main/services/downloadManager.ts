@@ -224,6 +224,12 @@ export function cancelDownload(jobId: string): boolean {
   return true
 }
 
+export function cancelAllActiveDownloads(): number {
+  const ids = [...active.keys()]
+  for (const id of ids) cancelDownload(id)
+  return ids.length
+}
+
 export function getActiveDownload(jobId: string): DownloadJob | undefined {
   return active.get(jobId)?.job
 }
@@ -232,12 +238,14 @@ export function getActiveDownload(jobId: string): DownloadJob | undefined {
 export function clearDownloadRegistryAndHfCache(db: Database.Database): {
   downloadsRemoved: number
   hfCacheRemoved: number
+  downloadsCancelled: number
 } {
+  let downloadsCancelled = 0
   for (const id of [...active.keys()]) {
-    cancelDownload(id)
+    if (cancelDownload(id)) downloadsCancelled++
   }
   const downloadsRemoved = db.prepare('DELETE FROM downloads').run().changes
   const hfCacheRemoved = db.prepare('DELETE FROM hf_model_cache').run().changes
-  logLine('info', 'download_cache_cleared', { downloadsRemoved, hfCacheRemoved })
-  return { downloadsRemoved, hfCacheRemoved }
+  logLine('info', 'download_cache_cleared', { downloadsRemoved, hfCacheRemoved, downloadsCancelled })
+  return { downloadsRemoved, hfCacheRemoved, downloadsCancelled }
 }

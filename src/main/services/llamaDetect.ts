@@ -1,5 +1,6 @@
 import { execFileSync } from 'child_process'
 import { existsSync } from 'fs'
+import { join } from 'path'
 
 /**
  * Returns a usable llama-server path: configured path if it exists, otherwise a binary found on PATH.
@@ -10,19 +11,41 @@ export function resolveLlamaBinary(configuredPath: string | undefined): string |
   return findLlamaServerOnPath()
 }
 
+/**
+ * Windows: avoid `where.exe` — when the binary is missing it prints
+ * "INFO: Could not find files for the given pattern(s)." to the console even from a GUI app,
+ * which spams logs every time the Run drawer polls PATH.
+ */
+function findLlamaServerOnPathWindows(): string | undefined {
+  const pathVar = process.env.Path ?? process.env.PATH ?? ''
+  const dirs = pathVar
+    .split(';')
+    .map((d) => d.trim())
+    .filter(Boolean)
+  const candidates = ['llama-server.exe', 'llama-server']
+  for (const dir of dirs) {
+    for (const name of candidates) {
+      const full = join(dir, name)
+      try {
+        if (existsSync(full)) return full
+      } catch {
+        /* invalid path segment */
+      }
+    }
+  }
+  return undefined
+}
+
 function findLlamaServerOnPath(): string | undefined {
   try {
     if (process.platform === 'win32') {
-      const out = execFileSync('where.exe', ['llama-server'], {
-        encoding: 'utf8',
-        windowsHide: true
-      }).trim()
-      const line = out.split(/\r?\n/).find((l) => l.trim().length > 0)?.trim()
-      if (line && existsSync(line)) return line
-    } else {
-      const out = execFileSync('which', ['llama-server'], { encoding: 'utf8' }).trim()
-      if (out && existsSync(out)) return out
+      return findLlamaServerOnPathWindows()
     }
+    const out = execFileSync('which', ['llama-server'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    }).trim()
+    if (out && existsSync(out)) return out
   } catch {
     /* not on PATH */
   }

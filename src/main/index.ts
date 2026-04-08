@@ -1,4 +1,5 @@
 import { app, BrowserWindow, shell, safeStorage } from 'electron'
+import { existsSync } from 'fs'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import Store from 'electron-store'
@@ -7,16 +8,10 @@ import { openDatabase, dbPathForUserData } from './db'
 import { initLogger, logLine } from './logger'
 import { registerIpc, type IpcContext } from './ipc/registerIpc'
 import type { RuntimeAdapter } from './services/runtime/types'
+import { ELECTRON_STORE_DEFAULTS } from './storeDefaults'
 
 const store = new Store<Record<string, unknown>>({
-  defaults: {
-    ollamaBaseUrl: 'http://127.0.0.1:11434',
-    llamaPort: 8080,
-    metricsPinned: false,
-    metricsRefreshMs: 3000,
-    downloadsPinned: false,
-    pinnedWidgetsSide: 'left'
-  }
+  defaults: { ...ELECTRON_STORE_DEFAULTS }
 })
 
 let mainWindow: BrowserWindow | null = null
@@ -42,12 +37,25 @@ function loadHfTokenFromStore(): void {
   }
 }
 
+function windowIconPath(): string | undefined {
+  if (is.dev) {
+    const dev = join(process.cwd(), 'src/renderer/public/app-icon.png')
+    if (existsSync(dev)) return dev
+    return undefined
+  }
+  const prod = join(__dirname, '../renderer/app-icon.png')
+  if (existsSync(prod)) return prod
+  return undefined
+}
+
 function createWindow(): void {
+  const icon = windowIconPath()
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 840,
     show: false,
     autoHideMenuBar: true,
+    ...(icon ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       sandbox: false,
@@ -65,7 +73,10 @@ function createWindow(): void {
 
   if (is.dev && process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
-    mainWindow.webContents.openDevTools({ mode: 'detach' })
+    // DevTools triggers harmless CDP noise (e.g. Autofill.setAddresses). Set DISABLE_DEVTOOLS=1 to skip.
+    if (process.env.DISABLE_DEVTOOLS !== '1') {
+      mainWindow.webContents.openDevTools({ mode: 'detach' })
+    }
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }

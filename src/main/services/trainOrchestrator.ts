@@ -96,6 +96,21 @@ export function startTrainJob(
   return job
 }
 
+/** Best-effort stop for in-flight training processes (does not update DB rows). */
+export function cancelAllRunningTrainJobs(): number {
+  let n = 0
+  for (const [jobId, proc] of [...running.entries()]) {
+    try {
+      proc.kill()
+      n++
+    } catch {
+      /* ignore */
+    }
+    running.delete(jobId)
+  }
+  return n
+}
+
 export function getTrainJob(db: Database.Database, id: string): TrainJob | undefined {
   return db
     .prepare(
