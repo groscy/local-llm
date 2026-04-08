@@ -1051,17 +1051,20 @@ body {
 
 .drawer {
   position: fixed;
-  top: 0;
+  left: 0;
   right: 0;
-  width: min(440px, 100vw);
-  height: 100%;
+  bottom: 0;
+  top: auto;
+  width: 100%;
+  max-height: min(92vh, 100%);
   background: var(--surface);
-  border-left: 1px solid var(--border-strong);
+  border-top: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   z-index: 101;
   display: flex;
   flex-direction: column;
-  box-shadow: var(--shadow-lg);
-  animation: slideIn 0.22s ease;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
+  animation: drawerSlideUp 0.24s ease;
 }
 
 @keyframes fadeIn {
@@ -1073,12 +1076,12 @@ body {
   }
 }
 
-@keyframes slideIn {
+@keyframes drawerSlideUp {
   from {
-    transform: translateX(100%);
+    transform: translateY(100%);
   }
   to {
-    transform: translateX(0);
+    transform: translateY(0);
   }
 }
 
