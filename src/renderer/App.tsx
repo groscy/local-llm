@@ -187,6 +187,9 @@ export default function App(): React.ReactElement {
 
   const [conversations, setConversations] = useState<{ id: string; title: string }[]>([])
   const [convId, setConvId] = useState<string | null>(null)
+  const [deleteConvId, setDeleteConvId] = useState<string | null>(null)
+  const [deleteConvRemoveKb, setDeleteConvRemoveKb] = useState(false)
+  const [saveChatKbBusy, setSaveChatKbBusy] = useState(false)
   const [messages, setMessages] = useState<{ role: string; content: string }[]>([])
   const [draft, setDraft] = useState('')
   const [ragQuery, setRagQuery] = useState('')
@@ -245,6 +248,19 @@ export default function App(): React.ReactElement {
     const t = await window.api.kbWikiTopics()
     setWikiTopics(t as { id: string; title: string; chunkCount: number }[])
   }, [])
+
+  useEffect(() => {
+    if (deleteConvId) setDeleteConvRemoveKb(false)
+  }, [deleteConvId])
+
+  useEffect(() => {
+    if (!deleteConvId) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setDeleteConvId(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [deleteConvId])
 
   const refreshRuntimeStatus = useCallback(async () => {
     const s = await window.api.runtimeStatus()
@@ -745,6 +761,44 @@ export default function App(): React.ReactElement {
     setMessages(m as { role: string; content: string }[])
   }
 
+  async function confirmDeleteConversation(): Promise<void> {
+    if (!deleteConvId) return
+    const id = deleteConvId
+    const removeKb = deleteConvRemoveKb
+    setErr(null)
+    try {
+      await window.api.conversationDelete({ id, removeLinkedKnowledge: removeKb })
+      setDeleteConvId(null)
+      if (convId === id) {
+        setConvId(null)
+        setMessages([])
+      }
+      await loadConversations()
+      if (removeKb) {
+        await loadWiki()
+        setWikiSelectedId(null)
+        setWikiBody('')
+        setWikiTitle('')
+      }
+    } catch (e) {
+      setErr(String(e))
+    }
+  }
+
+  async function saveCurrentChatToKb(): Promise<void> {
+    if (!convId) return
+    setSaveChatKbBusy(true)
+    setErr(null)
+    try {
+      await window.api.kbIngestConversation(convId)
+      await loadWiki()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setSaveChatKbBusy(false)
+    }
+  }
+
   async function runRag(): Promise<void> {
     if (!ragQuery.trim()) return
     setRagLoading(true)
@@ -883,6 +937,41 @@ export default function App(): React.ReactElement {
 
         {err && <div className="err-banner">{err}</div>}
 
+        {deleteConvId && (
+          <div
+            className="modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-conv-title"
+            onClick={() => setDeleteConvId(null)}
+          >
+            <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+              <h2 id="delete-conv-title" className="modal-title">
+                Delete this chat?
+              </h2>
+              <p className="muted modal-text">
+                The conversation and its messages will be removed from this device. This cannot be undone.
+              </p>
+              <label className="modal-check">
+                <input
+                  type="checkbox"
+                  checked={deleteConvRemoveKb}
+                  onChange={(e) => setDeleteConvRemoveKb(e.target.checked)}
+                />
+                <span>Also delete knowledge base content saved from this chat (via &quot;Save chat to knowledge base&quot;)</span>
+              </label>
+              <div className="modal-actions">
+                <button type="button" className="btn-secondary" onClick={() => setDeleteConvId(null)}>
+                  Cancel
+                </button>
+                <button type="button" className="btn-danger" onClick={() => void confirmDeleteConversation()}>
+                  Delete chat
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="workspace">
           {mainView === 'chat' && (
             <div className="chat-layout">
@@ -894,14 +983,27 @@ export default function App(): React.ReactElement {
                 </div>
                 <div className="conv-list">
                   {conversations.map((c) => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      className={`conv-item ${convId === c.id ? 'active' : ''}`}
-                      onClick={() => void loadConv(c.id)}
-                    >
-                      {c.title || c.id.slice(0, 8)}
-                    </button>
+                    <div key={c.id} className="conv-item-row">
+                      <button
+                        type="button"
+                        className={`conv-item ${convId === c.id ? 'active' : ''}`}
+                        onClick={() => void loadConv(c.id)}
+                      >
+                        {c.title || c.id.slice(0, 8)}
+                      </button>
+                      <button
+                        type="button"
+                        className="conv-item-delete"
+                        title="Delete chat"
+                        aria-label={`Delete chat ${c.title || c.id.slice(0, 8)}`}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setDeleteConvId(c.id)
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
                   ))}
                 </div>
               </aside>
@@ -945,6 +1047,19 @@ export default function App(): React.ReactElement {
                     </button>
                     {ragSnippets.length > 0 && <span className="rag-badge">{ragSnippets.length} snippets active</span>}
                   </div>
+                  {convId && messages.length > 0 && (
+                    <div className="save-chat-kb-row">
+                      <button
+                        type="button"
+                        className="btn-secondary btn-save-chat-kb"
+                        disabled={saveChatKbBusy}
+                        onClick={() => void saveCurrentChatToKb()}
+                        title="Adds this thread as a wiki source so it can be removed with the chat if you choose"
+                      >
+                        {saveChatKbBusy ? 'Saving…' : 'Save chat to knowledge base'}
+                      </button>
+                    </div>
+                  )}
                   <div className="composer-box">
                     <textarea
                       placeholder={convId ? 'Message… (Enter to send, Shift+Enter for line)' : 'Pick or create a chat first'}

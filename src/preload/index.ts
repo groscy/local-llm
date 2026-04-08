@@ -29,9 +29,12 @@ contextBridge.exposeInMainWorld('api', {
   conversationsList: () => invoke(IPC.CONVERSATIONS_LIST),
   conversationCreate: (title?: string) => invoke(IPC.CONVERSATION_CREATE, title),
   conversationMessages: (id: string) => invoke(IPC.CONVERSATION_MESSAGES, id),
+  conversationDelete: (payload: { id: string; removeLinkedKnowledge: boolean }) =>
+    invoke(IPC.CONVERSATION_DELETE, payload),
   messageAppend: (cid: string, role: 'user' | 'assistant' | 'system', content: string, modelId?: string) =>
     invoke(IPC.MESSAGE_APPEND, cid, role, content, modelId),
   kbIngestText: (title: string, uri: string, body: string) => invoke(IPC.KB_INGEST_TEXT, title, uri, body),
+  kbIngestConversation: (conversationId: string) => invoke(IPC.KB_INGEST_CONVERSATION, conversationId),
   kbIngestFile: () => invoke(IPC.KB_INGEST_FILE),
   kbSources: () => invoke(IPC.KB_SOURCES),
   kbSearch: (query: string, limit?: number) => invoke(IPC.KB_SEARCH, query, limit),

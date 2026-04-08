@@ -26,6 +26,10 @@ export function listMessages(db: Database.Database, conversationId: string): Mes
     .all(conversationId) as MessageRow[]
 }
 
+export function deleteConversation(db: Database.Database, id: string): void {
+  db.prepare('DELETE FROM conversations WHERE id = ?').run(id)
+}
+
 export function appendMessage(
   db: Database.Database,
   conversationId: string,

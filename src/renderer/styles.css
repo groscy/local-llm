@@ -351,8 +351,17 @@ body {
   padding: 8px;
 }
 
+.conv-item-row {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+
 .conv-item {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
+  width: auto;
   text-align: left;
   padding: 10px 12px;
   margin-bottom: 4px;
@@ -374,6 +383,109 @@ body {
 .conv-item.active {
   background: var(--accent-dim);
   color: var(--accent-bright);
+}
+
+.conv-item-delete {
+  flex-shrink: 0;
+  width: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.conv-item-delete:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+}
+
+.modal-box {
+  width: 100%;
+  max-width: 420px;
+  padding: 22px 24px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+}
+
+.modal-title {
+  margin: 0 0 10px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.modal-text {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.modal-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 20px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.modal-check input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.btn-danger {
+  padding: 9px 16px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: linear-gradient(135deg, #b91c1c 0%, #dc2626 100%);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.btn-danger:hover {
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+
+.save-chat-kb-row {
+  margin-top: 8px;
+}
+
+.btn-save-chat-kb {
+  font-size: 12px;
+  padding: 7px 12px;
 }
 
 .chat-center {

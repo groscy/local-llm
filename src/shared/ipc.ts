@@ -33,10 +33,12 @@ export const IPC = {
   CONVERSATION_CREATE: 'chat:conversationCreate',
   CONVERSATION_MESSAGES: 'chat:conversationMessages',
   MESSAGE_APPEND: 'chat:messageAppend',
+  CONVERSATION_DELETE: 'chat:conversationDelete',
 
   // Knowledge / RAG
   KB_INGEST_TEXT: 'kb:ingestText',
   KB_INGEST_FILE: 'kb:ingestFile',
+  KB_INGEST_CONVERSATION: 'kb:ingestConversation',
   KB_SOURCES: 'kb:sources',
   KB_SEARCH: 'kb:search',
   KB_CHUNKS: 'kb:chunks',

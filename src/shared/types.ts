@@ -87,6 +87,8 @@ export interface KbSource {
   title: string
   uri: string
   createdAt: number
+  /** When set, this source was created from a chat thread; removable with that conversation. */
+  conversationId?: string | null
 }
 
 export interface KbChunk {

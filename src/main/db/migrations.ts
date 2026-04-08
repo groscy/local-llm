@@ -106,6 +106,13 @@ const MIGRATIONS: { version: number; sql: string }[] = [
         created_at INTEGER NOT NULL
       );
     `
+  },
+  {
+    version: 2,
+    sql: `
+      ALTER TABLE kb_sources ADD COLUMN conversation_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_kb_sources_conversation_id ON kb_sources(conversation_id);
+    `
   }
 ]
 

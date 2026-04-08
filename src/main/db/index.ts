@@ -5,6 +5,7 @@ import { migrate } from './migrations'
 export function openDatabase(dbPath: string): Database.Database {
   const db = new Database(dbPath)
   migrate(db)
+  db.pragma('foreign_keys = ON')
   return db
 }
 

@@ -27,16 +27,14 @@ export function ingestText(
   title: string,
   uri: string,
   body: string,
-  heading?: string
+  heading?: string,
+  conversationId?: string | null
 ): KbSource {
   const sourceId = randomUUID()
   const t = Date.now()
-  db.prepare('INSERT INTO kb_sources (id, title, uri, created_at) VALUES (?, ?, ?, ?)').run(
-    sourceId,
-    title,
-    uri,
-    t
-  )
+  db.prepare(
+    'INSERT INTO kb_sources (id, title, uri, created_at, conversation_id) VALUES (?, ?, ?, ?, ?)'
+  ).run(sourceId, title, uri, t, conversationId ?? null)
   const chunks = chunkText(body, heading)
   let ord = 0
   const ins = db.prepare(
@@ -52,7 +50,45 @@ export function ingestText(
 export function ingestFile(db: Database.Database, filePath: string, title?: string): KbSource {
   const raw = readFileSync(filePath, 'utf8')
   const name = title ?? filePath.split(/[/\\]/).pop() ?? filePath
-  return ingestText(db, name, `file://${filePath}`, raw)
+  return ingestText(db, name, `file://${filePath}`, raw, undefined, null)
+}
+
+/** Chunk and index the full message thread of a conversation into the knowledge base (linked for later bulk delete). */
+export function ingestConversationThread(db: Database.Database, conversationId: string): KbSource {
+  const conv = db.prepare('SELECT title FROM conversations WHERE id = ?').get(conversationId) as
+    | { title: string }
+    | undefined
+  if (!conv) throw new Error('Conversation not found')
+  const rows = db
+    .prepare(
+      `SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`
+    )
+    .all(conversationId) as { role: string; content: string }[]
+  if (rows.length === 0) throw new Error('No messages to save')
+  const body = rows.map((r) => `### ${r.role}\n\n${r.content}`).join('\n\n---\n\n')
+  const title = `Chat: ${conv.title}`
+  const uri = `chat:${conversationId}`
+  return ingestText(db, title, uri, body, undefined, conversationId)
+}
+
+/** Remove one KB source and its wiki links, chunks, and FTS rows (via triggers). */
+export function deleteKbSource(db: Database.Database, sourceId: string): void {
+  const chunkIds = db.prepare('SELECT id FROM kb_chunks WHERE source_id = ?').all(sourceId) as { id: string }[]
+  const delWpcByChunk = db.prepare('DELETE FROM wiki_page_chunks WHERE chunk_id = ?')
+  for (const r of chunkIds) delWpcByChunk.run(r.id)
+  const pageId = `src:${sourceId}`
+  db.prepare('DELETE FROM wiki_page_chunks WHERE page_id = ?').run(pageId)
+  db.prepare('DELETE FROM wiki_pages WHERE id = ?').run(pageId)
+  db.prepare('DELETE FROM kb_sources WHERE id = ?').run(sourceId)
+}
+
+/** Delete all knowledge sources tied to a conversation (from "Save chat to wiki"). */
+export function deleteKbSourcesForConversation(db: Database.Database, conversationId: string): number {
+  const sources = db
+    .prepare('SELECT id FROM kb_sources WHERE conversation_id = ?')
+    .all(conversationId) as { id: string }[]
+  for (const { id } of sources) deleteKbSource(db, id)
+  return sources.length
 }
 
 function ftsEscape(q: string): string {
@@ -90,7 +126,10 @@ export function searchChunks(db: Database.Database, query: string, limit: number
 
 export function listSources(db: Database.Database): KbSource[] {
   return db
-    .prepare('SELECT id, title, uri, created_at as createdAt FROM kb_sources ORDER BY created_at DESC')
+    .prepare(
+      `SELECT id, title, uri, created_at as createdAt, conversation_id as conversationId
+       FROM kb_sources ORDER BY created_at DESC`
+    )
     .all() as KbSource[]
 }
 

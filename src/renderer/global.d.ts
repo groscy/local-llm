@@ -36,6 +36,7 @@ type Api = {
   conversationsList: () => Promise<unknown[]>
   conversationCreate: (title?: string) => Promise<unknown>
   conversationMessages: (id: string) => Promise<unknown[]>
+  conversationDelete: (payload: { id: string; removeLinkedKnowledge: boolean }) => Promise<{ ok: boolean }>
   messageAppend: (
     cid: string,
     role: 'user' | 'assistant' | 'system',
@@ -43,6 +44,7 @@ type Api = {
     modelId?: string
   ) => Promise<unknown>
   kbIngestText: (title: string, uri: string, body: string) => Promise<unknown>
+  kbIngestConversation: (conversationId: string) => Promise<unknown>
   kbIngestFile: () => Promise<unknown>
   kbSources: () => Promise<unknown[]>
   kbSearch: (query: string, limit?: number) => Promise<string[]>

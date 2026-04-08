@@ -225,9 +225,26 @@ export function registerIpc(ctx: IpcContext): void {
       chatService.appendMessage(db, cid, role, content, modelId)
   )
 
+  ipcMain.handle(
+    IPC.CONVERSATION_DELETE,
+    (_e, payload: { id: string; removeLinkedKnowledge: boolean }) => {
+      const id = typeof payload?.id === 'string' ? payload.id : ''
+      if (!id) throw new Error('conversation id required')
+      const removeKb = Boolean(payload?.removeLinkedKnowledge)
+      if (removeKb) kbService.deleteKbSourcesForConversation(db, id)
+      chatService.deleteConversation(db, id)
+      return { ok: true as const }
+    }
+  )
+
   ipcMain.handle(IPC.KB_INGEST_TEXT, (_e, title: string, uri: string, body: string) =>
     kbService.ingestText(db, title, uri, body)
   )
+
+  ipcMain.handle(IPC.KB_INGEST_CONVERSATION, (_e, conversationId: string) => {
+    if (typeof conversationId !== 'string' || !conversationId) throw new Error('conversation id required')
+    return kbService.ingestConversationThread(db, conversationId)
+  })
 
   ipcMain.handle(IPC.KB_INGEST_FILE, async () => {
     const r = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Text', extensions: ['txt', 'md', 'html'] }] })
