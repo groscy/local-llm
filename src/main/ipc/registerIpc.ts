@@ -1,0 +1,281 @@
+import { ipcMain, dialog, safeStorage, BrowserWindow } from 'electron'
+import { randomUUID } from 'crypto'
+import { join } from 'path'
+import { existsSync, mkdirSync } from 'fs'
+import type Store from 'electron-store'
+import { z } from 'zod'
+import type Database from 'better-sqlite3'
+import { is } from '@electron-toolkit/utils'
+import { IPC } from '@shared/ipc'
+import { hfSearch, hfModelDetail, hfRecommended } from '../services/hfService'
+import {
+  startDownload,
+  cancelDownload,
+  listDownloadsWithProgress,
+  getActiveDownload
+} from '../services/downloadManager'
+import { createRuntime, type RuntimeAdapter } from '../services/runtime'
+import * as chatService from '../services/chatService'
+import * as kbService from '../services/kbService'
+import * as metricsService from '../services/metricsService'
+import * as trainOrchestrator from '../services/trainOrchestrator'
+import { logLine } from '../logger'
+
+const configSchema = z.object({
+  /** Set to `null` to clear and use the app default under user data. */
+  modelsDir: z.union([z.string().min(1), z.null()]).optional(),
+  llamaBinaryPath: z.string().optional(),
+  runtimeKind: z.enum(['llamacpp', 'ollama']).optional(),
+  ollamaBaseUrl: z.string().optional(),
+  llamaPort: z.number().optional(),
+  hfTokenEncrypted: z.string().optional(),
+  metricsPinned: z.boolean().optional(),
+  metricsRefreshMs: z.number().min(500).max(3_600_000).optional(),
+  downloadsPinned: z.boolean().optional()
+})
+
+function trainingScriptPath(): string {
+  if (is.dev) return join(process.cwd(), 'training', 'train_lora.py')
+  return join(process.resourcesPath, 'training', 'train_lora.py')
+}
+
+export interface IpcContext {
+  db: Database.Database
+  store: Store<Record<string, unknown>>
+  userData: string
+  getHfToken: () => string | undefined
+  setHfToken: (t: string | undefined) => void
+  getRuntime: () => RuntimeAdapter | null
+  setRuntime: (r: RuntimeAdapter | null) => void
+}
+
+export function registerIpc(ctx: IpcContext): void {
+  const { db, store, userData, getHfToken, setHfToken, getRuntime, setRuntime } = ctx
+
+  const modelsDir = (): string => {
+    const m = (store.get('modelsDir') as string | undefined)?.trim()
+    if (m) {
+      try {
+        if (!existsSync(m)) mkdirSync(m, { recursive: true })
+      } catch (e) {
+        logLine('error', 'models_dir_mkdir', {
+          path: m,
+          error: e instanceof Error ? e.message : String(e)
+        })
+      }
+      if (existsSync(m)) return m
+      logLine('warn', 'models_dir_unusable', { path: m })
+      store.delete('modelsDir')
+    }
+    const d = join(userData, 'models')
+    if (!existsSync(d)) mkdirSync(d, { recursive: true })
+    return d
+  }
+
+  ipcMain.handle(IPC.GET_PATHS, () => ({
+    userData,
+    logs: join(userData, 'logs'),
+    modelsDefault: modelsDir(),
+    db: join(userData, 'app.sqlite'),
+    vectors: join(userData, 'vectors')
+  }))
+
+  ipcMain.handle(IPC.GET_CONFIG, () => ({
+    ...store.store,
+    hfTokenSet: !!getHfToken()
+  }))
+
+  ipcMain.handle(IPC.SET_CONFIG, (_e, raw: unknown) => {
+    const parsed = configSchema.partial().safeParse(raw)
+    if (!parsed.success) return { ok: false, error: parsed.error.message }
+    Object.entries(parsed.data).forEach(([k, v]) => {
+      if (v === undefined || k === 'hfTokenEncrypted') return
+      if (k === 'modelsDir' && v === null) {
+        store.delete('modelsDir')
+        return
+      }
+      store.set(k, v as never)
+    })
+    return { ok: true }
+  })
+
+  ipcMain.handle(IPC.PICK_MODELS_DIRECTORY, async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const r = win
+      ? await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] })
+      : await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return null
+    return r.filePaths[0]
+  })
+
+  ipcMain.handle(IPC.LOG, (_e, level: string, msg: string, meta?: Record<string, unknown>) => {
+    logLine(level, msg, meta)
+  })
+
+  ipcMain.handle(IPC.HF_SEARCH, async (_e, query: string, limit?: number) => {
+    return hfSearch(query, limit ?? 30, getHfToken())
+  })
+
+  ipcMain.handle(IPC.HF_RECOMMENDED, async (_e, limit?: number) => {
+    return hfRecommended(limit ?? 24, getHfToken())
+  })
+
+  ipcMain.handle(IPC.HF_MODEL_INFO, async (_e, repoId: string) => {
+    return hfModelDetail(db, repoId, getHfToken())
+  })
+
+  ipcMain.handle(
+    IPC.HF_DOWNLOAD,
+    async (_e, payload: { repoId: string; revision: string; filename: string; destDir?: string }) => {
+      const destBase = payload.destDir ?? modelsDir()
+      if (!existsSync(destBase)) mkdirSync(destBase, { recursive: true })
+      const destPath = join(destBase, payload.filename.split('/').pop() ?? payload.filename)
+      const job = {
+        id: randomUUID(),
+        repoId: payload.repoId,
+        revision: payload.revision || 'main',
+        destPath,
+        status: 'pending' as const,
+        progress: 0,
+        bytesReceived: 0,
+        bytesTotal: 0
+      }
+      const token = getHfToken()
+      const url = `https://huggingface.co/${payload.repoId}/resolve/${encodeURIComponent(job.revision)}/${payload.filename
+        .split('/')
+        .map((s) => encodeURIComponent(s))
+        .join('/')}`
+
+      startDownload(
+        db,
+        { ...job, status: 'downloading' },
+        async () => url,
+        () => {},
+        token
+      )
+      return job
+    }
+  )
+
+  ipcMain.handle(IPC.HF_DOWNLOAD_STATUS, (_e, jobId: string) => {
+    const j = getActiveDownload(jobId)
+    if (j) return j
+    const row = db.prepare('SELECT * FROM downloads WHERE id = ?').get(jobId)
+    return row ?? null
+  })
+
+  ipcMain.handle(IPC.HF_CANCEL_DOWNLOAD, (_e, jobId: string) => cancelDownload(jobId))
+
+  ipcMain.handle(IPC.DOWNLOADS_LIST, () => listDownloadsWithProgress(db))
+
+  ipcMain.handle(IPC.RUNTIME_LIST, () => [
+    { id: 'llamacpp', label: 'llama.cpp server' },
+    { id: 'ollama', label: 'Ollama (local daemon)' }
+  ])
+
+  ipcMain.handle(IPC.RUNTIME_INSTALL_PATH, () => ({
+    llamaBinary: (store.get('llamaBinaryPath') as string | undefined) ?? '',
+    ollamaBase: (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434'
+  }))
+
+  ipcMain.handle(
+    IPC.RUNTIME_START,
+    async (_e, opts: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => {
+      await getRuntime()?.stop()
+      const adapter = createRuntime(opts.kind, {
+        ollamaBaseUrl: (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434'
+      })
+      await adapter.start({
+        modelPath: opts.modelPath,
+        binaryPath: store.get('llamaBinaryPath') as string | undefined,
+        port: (store.get('llamaPort') as number | undefined) ?? 8080
+      })
+      setRuntime(adapter)
+      store.set('runtimeKind', opts.kind)
+      return adapter.getStatus()
+    }
+  )
+
+  ipcMain.handle(IPC.RUNTIME_STOP, async () => {
+    await getRuntime()?.stop()
+    setRuntime(null)
+    return { running: false, kind: 'none' as const }
+  })
+
+  ipcMain.handle(IPC.RUNTIME_STATUS, () => getRuntime()?.getStatus() ?? { running: false, kind: 'none' as const })
+
+  ipcMain.handle(
+    IPC.RUNTIME_CHAT,
+    async (_e, payload: { messages: { role: 'user' | 'assistant' | 'system'; content: string }[] }) => {
+      const rt = getRuntime()
+      if (!rt) throw new Error('Runtime not started')
+      return rt.chat(payload.messages)
+    }
+  )
+
+  ipcMain.handle(IPC.CONVERSATIONS_LIST, () => chatService.listConversations(db))
+  ipcMain.handle(IPC.CONVERSATION_CREATE, (_e, title?: string) => chatService.createConversation(db, title ?? ''))
+  ipcMain.handle(IPC.CONVERSATION_MESSAGES, (_e, id: string) => chatService.listMessages(db, id))
+  ipcMain.handle(
+    IPC.MESSAGE_APPEND,
+    (_e, cid: string, role: 'user' | 'assistant' | 'system', content: string, modelId?: string) =>
+      chatService.appendMessage(db, cid, role, content, modelId)
+  )
+
+  ipcMain.handle(IPC.KB_INGEST_TEXT, (_e, title: string, uri: string, body: string) =>
+    kbService.ingestText(db, title, uri, body)
+  )
+
+  ipcMain.handle(IPC.KB_INGEST_FILE, async () => {
+    const r = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Text', extensions: ['txt', 'md', 'html'] }] })
+    if (r.canceled || !r.filePaths[0]) return null
+    return kbService.ingestFile(db, r.filePaths[0])
+  })
+
+  ipcMain.handle(IPC.KB_SOURCES, () => kbService.listSources(db))
+  ipcMain.handle(IPC.KB_SEARCH, (_e, query: string, limit?: number) =>
+    kbService.searchChunks(db, query, limit ?? 8).map((c) => c.text)
+  )
+  ipcMain.handle(IPC.KB_CHUNKS, (_e, sourceId: string) => kbService.listChunksForSource(db, sourceId))
+  ipcMain.handle(IPC.KB_WIKI_TOPICS, () => kbService.listWikiTopics(db))
+  ipcMain.handle(IPC.KB_WIKI_PAGE, (_e, sourceId: string) => kbService.ensureWikiPageForSource(db, sourceId))
+
+  ipcMain.handle(IPC.METRICS_SNAPSHOT, async (_e, opts?: { persist?: boolean }) => {
+    if (opts?.persist === false) {
+      return metricsService.peekSnapshot(getRuntime())
+    }
+    return metricsService.collectSnapshot(db, getRuntime())
+  })
+  ipcMain.handle(IPC.METRICS_HISTORY, (_e, limit?: number) => metricsService.recentHistory(db, limit ?? 60))
+
+  ipcMain.handle(
+    IPC.TRAIN_START,
+    (_e, opts: { baseModelPath: string; datasetPath: string; pythonPath?: string }) =>
+      trainOrchestrator.startTrainJob(db, userData, trainingScriptPath(), {
+        baseModelPath: opts.baseModelPath,
+        datasetPath: opts.datasetPath,
+        pythonPath: opts.pythonPath
+      })
+  )
+
+  ipcMain.handle(IPC.TRAIN_STATUS, (_e, id: string) => trainOrchestrator.getTrainJob(db, id))
+  ipcMain.handle(IPC.TRAIN_LIST_JOBS, () => trainOrchestrator.listTrainJobs(db))
+
+  /** Persist HF token with safeStorage */
+  ipcMain.handle(IPC.SECRETS_SET_HF_TOKEN, (_e, token: string | null) => {
+    if (!token) {
+      store.delete('hfTokenEncrypted')
+      setHfToken(undefined)
+      return { ok: true }
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      store.set('hfTokenEncrypted', token)
+      setHfToken(token)
+      return { ok: true, warn: 'encryption_unavailable' }
+    }
+    const buf = safeStorage.encryptString(token)
+    store.set('hfTokenEncrypted', Buffer.from(buf).toString('base64'))
+    setHfToken(token)
+    return { ok: true }
+  })
+}
