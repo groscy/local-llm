@@ -164,6 +164,78 @@ body {
   font-size: 9px;
 }
 
+/* Content area: optional pinned rail + main */
+.shell-content {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  min-width: 0;
+  min-height: 0;
+}
+
+.pinned-widgets-aside {
+  display: flex;
+  flex-direction: column;
+  width: min(308px, 36vw);
+  max-width: 100%;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: rgba(12, 14, 20, 0.88);
+  backdrop-filter: blur(12px);
+  min-height: 0;
+}
+
+.pinned-widgets-aside-header {
+  flex-shrink: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-tertiary);
+}
+
+.pinned-widgets-aside-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.pinned-widgets-aside-body > .metrics-pinned-widget {
+  flex-shrink: 0;
+}
+
+.pinned-widgets-aside-body > .downloads-pinned-widget {
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 720px) {
+  .shell-content {
+    flex-direction: column;
+  }
+
+  .pinned-widgets-aside {
+    width: 100%;
+    max-height: min(42vh, 360px);
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    order: -1;
+  }
+
+  .pinned-widgets-aside-body > .downloads-pinned-widget {
+    flex: 1 1 auto;
+    min-height: 120px;
+    max-height: 220px;
+  }
+}
+
 /* Main column */
 .main-column {
   flex: 1;
@@ -1572,18 +1644,15 @@ body {
   padding: 12px 0;
 }
 
-/* Pinned metrics widget */
+/* Pinned metrics widget (docked in .pinned-widgets-aside) */
 .metrics-pinned-widget {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  width: min(280px, calc(100vw - 32px));
-  z-index: 90;
+  position: relative;
+  width: 100%;
   border-radius: var(--radius-lg);
   border: 1px solid var(--border-strong);
   background: rgba(18, 21, 30, 0.92);
   backdrop-filter: blur(14px);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-sm);
   padding: 12px 14px 14px;
 }
 
@@ -1700,19 +1769,17 @@ body {
   color: #8fd4a4;
 }
 
-/* Pinned downloads widget */
+/* Pinned downloads widget (docked in .pinned-widgets-aside) */
 .downloads-pinned-widget {
-  position: fixed;
-  left: 16px;
-  bottom: 16px;
-  width: min(300px, calc(100vw - 32px));
-  max-height: min(320px, 45vh);
-  z-index: 90;
+  position: relative;
+  width: 100%;
+  min-height: 0;
+  max-height: none;
   border-radius: var(--radius-lg);
   border: 1px solid var(--border-strong);
   background: rgba(18, 21, 30, 0.92);
   backdrop-filter: blur(14px);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-sm);
   padding: 12px 14px 14px;
   display: flex;
   flex-direction: column;
@@ -1787,6 +1854,10 @@ body {
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+}
+
+.downloads-pinned-widget .downloads-pinned-list {
+  flex: 1;
 }
 
 .downloads-pinned-item {

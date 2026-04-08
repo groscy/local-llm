@@ -484,7 +484,7 @@ export default function App(): React.ReactElement {
             void saveMetricsWidgetConfig({ metricsPinned: v })
           }}
         />
-        <span>Show floating live metrics (does not write to history each tick)</span>
+        <span>Show live metrics in the Pinned widgets panel (does not write to history each tick)</span>
       </label>
       <label className="metrics-widget-check" style={{ marginTop: 14 }}>
         <input
@@ -496,7 +496,7 @@ export default function App(): React.ReactElement {
             void saveMetricsWidgetConfig({ downloadsPinned: v })
           }}
         />
-        <span>Show floating download progress (Hub jobs; pinned bottom-left)</span>
+        <span>Show Hub download progress in the Pinned widgets panel</span>
       </label>
       <p className="muted" style={{ margin: '10px 0 6px' }}>
         Widget refresh rate (500 ms – 1 hour). Full stats drawer still records samples when you open it or press Record.
@@ -885,7 +885,39 @@ export default function App(): React.ReactElement {
         </nav>
       </aside>
 
-      <div className="main-column">
+      <div className="shell-content">
+        {(metricsPinned || downloadsPinned) && (
+          <aside className="pinned-widgets-aside" aria-label="Pinned widgets">
+            <div className="pinned-widgets-aside-header">Pinned widgets</div>
+            <div className="pinned-widgets-aside-body">
+              {metricsPinned && (
+                <MetricsPinnedWidget
+                  snapshot={widgetSnap}
+                  series={widgetSeries}
+                  refreshMs={metricsRefreshMs}
+                  runtimeOn={runtimeOn}
+                  onUnpin={() => {
+                    setMetricsPinned(false)
+                    void saveMetricsWidgetConfig({ metricsPinned: false })
+                  }}
+                  onOpenStats={() => setDrawer('metrics')}
+                />
+              )}
+              {downloadsPinned && (
+                <DownloadsPinnedWidget
+                  downloads={pinnedDownloadsSnapshot}
+                  onUnpin={() => {
+                    setDownloadsPinned(false)
+                    void saveMetricsWidgetConfig({ downloadsPinned: false })
+                  }}
+                  onOpenRun={() => setDrawer('runtime')}
+                  onCancelJob={cancelDownloadJob}
+                />
+              )}
+            </div>
+          </aside>
+        )}
+        <div className="main-column">
         <header className="top-bar">
           <div>
             <div className="top-bar-title">{topTitle}</div>
@@ -896,7 +928,7 @@ export default function App(): React.ReactElement {
               <button
                 type="button"
                 className={`top-bar-pin ${metricsPinned ? 'active' : ''}`}
-                title={metricsPinned ? 'Unpin metrics widget' : 'Pin live metrics widget'}
+                title={metricsPinned ? 'Unpin metrics from sidebar' : 'Pin live metrics to Pinned widgets panel'}
                 onClick={() => {
                   const next = !metricsPinned
                   setMetricsPinned(next)
@@ -909,7 +941,7 @@ export default function App(): React.ReactElement {
               <button
                 type="button"
                 className={`top-bar-pin ${downloadsPinned ? 'active' : ''}`}
-                title={downloadsPinned ? 'Unpin downloads widget' : 'Pin download progress widget'}
+                title={downloadsPinned ? 'Unpin downloads from sidebar' : 'Pin download progress to Pinned widgets panel'}
                 onClick={() => {
                   const next = !downloadsPinned
                   setDownloadsPinned(next)
@@ -1145,6 +1177,7 @@ export default function App(): React.ReactElement {
             </div>
           )}
         </div>
+      </div>
       </div>
 
       {drawer && (
@@ -1501,8 +1534,8 @@ export default function App(): React.ReactElement {
                 <>
                   {metricsWidgetControls}
                   <p className="muted" style={{ marginTop: 0 }}>
-                    History samples are recorded when you open this panel or use Record below. The pinned widget polls without saving each
-                    tick.
+                    History samples are recorded when you open this panel or use Record below. The pinned metrics panel polls without saving
+                    each tick.
                   </p>
                   <div className="row" style={{ marginBottom: 16 }}>
                     <button type="button" className="btn-primary" onClick={() => void refreshMetricsBundle()}>
@@ -1600,31 +1633,6 @@ export default function App(): React.ReactElement {
             </div>
           </div>
         </>
-      )}
-
-      {metricsPinned && (
-        <MetricsPinnedWidget
-          snapshot={widgetSnap}
-          series={widgetSeries}
-          refreshMs={metricsRefreshMs}
-          runtimeOn={runtimeOn}
-          onUnpin={() => {
-            setMetricsPinned(false)
-            void saveMetricsWidgetConfig({ metricsPinned: false })
-          }}
-          onOpenStats={() => setDrawer('metrics')}
-        />
-      )}
-      {downloadsPinned && (
-        <DownloadsPinnedWidget
-          downloads={pinnedDownloadsSnapshot}
-          onUnpin={() => {
-            setDownloadsPinned(false)
-            void saveMetricsWidgetConfig({ downloadsPinned: false })
-          }}
-          onOpenRun={() => setDrawer('runtime')}
-          onCancelJob={cancelDownloadJob}
-        />
       )}
     </div>
   )
