@@ -1,4 +1,10 @@
-import type { DownloadRow, RuntimeStatus } from '@shared/types'
+import type {
+  DownloadRow,
+  HardwareSummary,
+  RuntimeChatProgress,
+  RuntimeLoadProgress,
+  RuntimeStatus
+} from '@shared/types'
 
 export {}
 
@@ -9,12 +15,30 @@ type Api = {
     modelsDefault: string
     db: string
     vectors: string
+    platform: NodeJS.Platform
   }>
   getConfig: () => Promise<Record<string, unknown> & { hfTokenSet?: boolean }>
   setConfig: (c: unknown) => Promise<{ ok: boolean; error?: string }>
   /** Native folder picker; returns absolute path or null if cancelled. */
   pickModelsDirectory: () => Promise<string | null>
-  clearDownloadCache: () => Promise<{ downloadsRemoved: number; hfCacheRemoved: number }>
+  clearDownloadCache: () => Promise<{
+    downloadsRemoved: number
+    hfCacheRemoved: number
+    downloadsCancelled: number
+  }>
+  clearAllCaches: () => Promise<{
+    downloadsRemoved: number
+    hfCacheRemoved: number
+    metricsRemoved: number
+    trainJobsRemoved: number
+    vectorsEntriesCleared: number
+    downloadsCancelled: number
+    trainProcessesKilled: number
+  }>
+  deleteAllModels: () => Promise<{ removed: number; errors: string[]; downloadsRemoved: number }>
+  resetFactoryConfig: () => Promise<{ ok: boolean }>
+  /** Optional destDir: when set and the path exists, free-disk is measured on that volume. */
+  hardwareSummary: (destDir?: string) => Promise<HardwareSummary>
   hfSearch: (q: string, limit?: number) => Promise<unknown[]>
   hfRecommended: (limit?: number) => Promise<unknown[]>
   hfModelInfo: (id: string) => Promise<unknown>
@@ -28,18 +52,34 @@ type Api = {
   hfCancelDownload: (id: string) => Promise<boolean>
   downloadsList: () => Promise<DownloadRow[]>
   runtimeList: () => Promise<{ id: string; label: string }[]>
+  /** `.gguf` files under the configured models / download directory (recursive). */
+  listLocalModelsInDownloadDir: () => Promise<{ modelsDir: string; paths: string[] }>
   runtimeInstallPath: () => Promise<{
     llamaBinary: string
     ollamaBase: string
     llamaResolvedPath: string
     llamaDetected: boolean
     llamaConfiguredPathValid: boolean
+    /** Ollama daemon responds at `ollamaBase` (/api/tags). */
+    ollamaReachable: boolean
   }>
+  /** Download / install Ollama from ollama.com where supported; ensures default API URL works with this app. */
+  installOllama: () => Promise<
+    | { ok: true; detail?: string }
+    | { ok: false; error: string }
+    | { ok: true; needsManualFinish: true; hint: string }
+  >
+  /** Subscribe to install log lines; returns unsubscribe. */
+  onOllamaInstallProgress: (callback: (payload: { message: string }) => void) => () => void
+  /** Subscribe to model load progress during `runtimeStart`; returns unsubscribe. */
+  onRuntimeLoadProgress: (callback: (payload: RuntimeLoadProgress) => void) => () => void
+  /** Subscribe to streamed assistant tokens; correlate with `requestId` passed to `runtimeChat`. */
+  onRuntimeChatProgress: (callback: (payload: RuntimeChatProgress) => void) => () => void
   openExternalUrl: (url: string) => Promise<{ ok: boolean }>
   runtimeStart: (p: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => Promise<RuntimeStatus>
   runtimeStop: () => Promise<RuntimeStatus>
   runtimeStatus: () => Promise<RuntimeStatus>
-  runtimeChat: (messages: { role: string; content: string }[]) => Promise<string>
+  runtimeChat: (messages: { role: string; content: string }[], requestId: string) => Promise<string>
   conversationsList: () => Promise<unknown[]>
   conversationCreate: (title?: string) => Promise<unknown>
   conversationMessages: (id: string) => Promise<unknown[]>

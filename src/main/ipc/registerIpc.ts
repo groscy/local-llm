@@ -13,15 +13,22 @@ import {
   cancelDownload,
   listDownloadsWithProgress,
   getActiveDownload,
-  clearDownloadRegistryAndHfCache
+  clearDownloadRegistryAndHfCache,
+  cancelAllActiveDownloads
 } from '../services/downloadManager'
 import { createRuntime, type RuntimeAdapter } from '../services/runtime'
+import { installOllamaForPlatform } from '../services/ollamaInstaller'
+import { probeOllamaReachable } from '../services/runtime/ollamaAdapter'
 import * as chatService from '../services/chatService'
 import * as kbService from '../services/kbService'
 import * as metricsService from '../services/metricsService'
 import * as trainOrchestrator from '../services/trainOrchestrator'
 import { logLine } from '../logger'
 import { resolveLlamaBinary } from '../services/llamaDetect'
+import { collectHardwareSummary } from '../services/hardwareSummary'
+import { clearAllAppCaches, deleteAllChildrenInDirectory } from '../services/dataMaintenance'
+import { resetElectronStoreToFactory } from '../storeDefaults'
+import { listGgufModelsInDir } from '../services/localModelsScan'
 
 const configSchema = z.object({
   /** Set to `null` to clear and use the app default under user data. */
@@ -34,7 +41,9 @@ const configSchema = z.object({
   metricsPinned: z.boolean().optional(),
   metricsRefreshMs: z.number().min(500).max(3_600_000).optional(),
   downloadsPinned: z.boolean().optional(),
-  pinnedWidgetsSide: z.enum(['left', 'right', 'top', 'bottom']).optional()
+  activityPinned: z.boolean().optional(),
+  pinnedWidgetsSide: z.enum(['left', 'right', 'top', 'bottom']).optional(),
+  colorScheme: z.enum(['violet', 'teal', 'amber', 'rose', 'sky']).optional()
 })
 
 function trainingScriptPath(): string {
@@ -80,8 +89,19 @@ export function registerIpc(ctx: IpcContext): void {
     logs: join(userData, 'logs'),
     modelsDefault: modelsDir(),
     db: join(userData, 'app.sqlite'),
-    vectors: join(userData, 'vectors')
+    vectors: join(userData, 'vectors'),
+    platform: process.platform
   }))
+
+  ipcMain.handle(IPC.HARDWARE_SUMMARY, (_e, destDir?: unknown) => {
+    const base = modelsDir()
+    let diskPath = base
+    if (typeof destDir === 'string') {
+      const t = destDir.trim()
+      if (t && existsSync(t)) diskPath = t
+    }
+    return collectHardwareSummary(diskPath)
+  })
 
   ipcMain.handle(IPC.GET_CONFIG, () => ({
     ...store.store,
@@ -173,23 +193,68 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle(IPC.CLEAR_DOWNLOAD_CACHE, () => clearDownloadRegistryAndHfCache(db))
 
+  ipcMain.handle(IPC.CLEAR_ALL_CACHES, () => {
+    const vectorsDir = join(userData, 'vectors')
+    return clearAllAppCaches(db, vectorsDir)
+  })
+
+  ipcMain.handle(IPC.DELETE_ALL_MODELS, async () => {
+    await getRuntime()?.stop()
+    setRuntime(null)
+    cancelAllActiveDownloads()
+    const dir = modelsDir()
+    const r = deleteAllChildrenInDirectory(dir)
+    const downloadsRemoved = db.prepare('DELETE FROM downloads').run().changes
+    logLine('info', 'all_models_deleted', { dir, removed: r.removed, errors: r.errors, downloadsRemoved })
+    return { ...r, downloadsRemoved }
+  })
+
+  ipcMain.handle(IPC.RESET_FACTORY_CONFIG, async () => {
+    await getRuntime()?.stop()
+    setRuntime(null)
+    cancelAllActiveDownloads()
+    resetElectronStoreToFactory(store)
+    setHfToken(undefined)
+    logLine('info', 'factory_config_reset')
+    return { ok: true as const }
+  })
+
   ipcMain.handle(IPC.RUNTIME_LIST, () => [
     { id: 'llamacpp', label: 'llama.cpp server' },
     { id: 'ollama', label: 'Ollama (local daemon)' }
   ])
 
-  ipcMain.handle(IPC.RUNTIME_INSTALL_PATH, () => {
+  ipcMain.handle(IPC.RUNTIME_LIST_LOCAL_MODELS, () => {
+    const dir = modelsDir()
+    const paths = listGgufModelsInDir(dir)
+    return { modelsDir: dir, paths }
+  })
+
+  ipcMain.handle(IPC.RUNTIME_INSTALL_PATH, async () => {
     const configured = (store.get('llamaBinaryPath') as string | undefined) ?? ''
     const trimmed = configured.trim()
     const configuredValid = Boolean(trimmed && existsSync(trimmed))
     const resolved = resolveLlamaBinary(configured.trim() ? configured : undefined)
+    const ollamaBase = (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434'
+    const ollamaReachable = await probeOllamaReachable(ollamaBase)
     return {
       llamaBinary: configured,
-      ollamaBase: (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434',
+      ollamaBase,
       llamaResolvedPath: resolved ?? '',
       llamaDetected: Boolean(resolved),
-      llamaConfiguredPathValid: configuredValid
+      llamaConfiguredPathValid: configuredValid,
+      ollamaReachable
     }
+  })
+
+  ipcMain.handle(IPC.RUNTIME_INSTALL_OLLAMA, async (event) => {
+    const raw = (store.get('ollamaBaseUrl') as string | undefined)?.trim()
+    const ollamaBase = raw || 'http://127.0.0.1:11434'
+    if (!raw) store.set('ollamaBaseUrl', ollamaBase)
+    const sendProgress = (message: string): void => {
+      event.sender.send(IPC.RUNTIME_INSTALL_OLLAMA_PROGRESS, { message })
+    }
+    return installOllamaForPlatform(ollamaBase, sendProgress)
   })
 
   ipcMain.handle(IPC.OPEN_EXTERNAL_URL, (_e, raw: unknown) => {
@@ -203,7 +268,7 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle(
     IPC.RUNTIME_START,
-    async (_e, opts: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => {
+    async (event, opts: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => {
       await getRuntime()?.stop()
       const adapter = createRuntime(opts.kind, {
         ollamaBaseUrl: (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434'
@@ -213,10 +278,14 @@ export function registerIpc(ctx: IpcContext): void {
         opts.kind === 'llamacpp'
           ? resolveLlamaBinary(typeof configuredBin === 'string' ? configuredBin : undefined)
           : undefined
+      const sendLoad = (p: { phase: string; message: string; percent?: number }): void => {
+        event.sender.send(IPC.RUNTIME_LOAD_PROGRESS, p)
+      }
       await adapter.start({
         modelPath: opts.modelPath,
         binaryPath,
-        port: (store.get('llamaPort') as number | undefined) ?? 8080
+        port: (store.get('llamaPort') as number | undefined) ?? 8080,
+        onLoadProgress: sendLoad
       })
       setRuntime(adapter)
       store.set('runtimeKind', opts.kind)
@@ -234,10 +303,31 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle(
     IPC.RUNTIME_CHAT,
-    async (_e, payload: { messages: { role: 'user' | 'assistant' | 'system'; content: string }[] }) => {
+    async (
+      event,
+      payload: {
+        messages: { role: 'user' | 'assistant' | 'system'; content: string }[]
+        requestId?: string
+      }
+    ) => {
       const rt = getRuntime()
       if (!rt) throw new Error('Runtime not started')
-      return rt.chat(payload.messages)
+      const requestId = typeof payload.requestId === 'string' ? payload.requestId : ''
+      const emit = (data: { kind: 'token'; text: string } | { kind: 'error'; message: string }): void => {
+        if (!requestId) return
+        event.sender.send(IPC.RUNTIME_CHAT_PROGRESS, { requestId, ...data })
+      }
+      try {
+        return await rt.chat(payload.messages, {
+          ...(requestId
+            ? { onStreamChunk: (text: string) => emit({ kind: 'token', text }) }
+            : {})
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        emit({ kind: 'error', message })
+        throw err
+      }
     }
   )
 

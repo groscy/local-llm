@@ -1,5 +1,6 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { IPC } from '@shared/ipc'
+import type { RuntimeChatProgress, RuntimeLoadProgress } from '@shared/types'
 
 function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   return ipcRenderer.invoke(channel, ...args)
@@ -11,7 +12,13 @@ contextBridge.exposeInMainWorld('api', {
   setConfig: (c: unknown) => invoke(IPC.SET_CONFIG, c),
   pickModelsDirectory: () => invoke<string | null>(IPC.PICK_MODELS_DIRECTORY),
   clearDownloadCache: () =>
-    invoke<{ downloadsRemoved: number; hfCacheRemoved: number }>(IPC.CLEAR_DOWNLOAD_CACHE),
+    invoke<{ downloadsRemoved: number; hfCacheRemoved: number; downloadsCancelled: number }>(
+      IPC.CLEAR_DOWNLOAD_CACHE
+    ),
+  clearAllCaches: () => invoke(IPC.CLEAR_ALL_CACHES),
+  deleteAllModels: () => invoke(IPC.DELETE_ALL_MODELS),
+  resetFactoryConfig: () => invoke(IPC.RESET_FACTORY_CONFIG),
+  hardwareSummary: (destDir?: string) => invoke(IPC.HARDWARE_SUMMARY, destDir),
   hfSearch: (q: string, limit?: number) => invoke(IPC.HF_SEARCH, q, limit),
   hfRecommended: (limit?: number) => invoke(IPC.HF_RECOMMENDED, limit),
   hfModelInfo: (id: string) => invoke(IPC.HF_MODEL_INFO, id),
@@ -22,11 +29,32 @@ contextBridge.exposeInMainWorld('api', {
   downloadsList: () => invoke(IPC.DOWNLOADS_LIST),
   runtimeList: () => invoke(IPC.RUNTIME_LIST),
   runtimeInstallPath: () => invoke(IPC.RUNTIME_INSTALL_PATH),
+  listLocalModelsInDownloadDir: () => invoke<{ modelsDir: string; paths: string[] }>(IPC.RUNTIME_LIST_LOCAL_MODELS),
+  installOllama: () => invoke(IPC.RUNTIME_INSTALL_OLLAMA),
+  onOllamaInstallProgress: (callback: (payload: { message: string }) => void) => {
+    const channel = IPC.RUNTIME_INSTALL_OLLAMA_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: { message: string }) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
+  onRuntimeLoadProgress: (callback: (payload: RuntimeLoadProgress) => void) => {
+    const channel = IPC.RUNTIME_LOAD_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: RuntimeLoadProgress) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
+  onRuntimeChatProgress: (callback: (payload: RuntimeChatProgress) => void) => {
+    const channel = IPC.RUNTIME_CHAT_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: RuntimeChatProgress) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
   openExternalUrl: (url: string) => invoke(IPC.OPEN_EXTERNAL_URL, url),
   runtimeStart: (p: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => invoke(IPC.RUNTIME_START, p),
   runtimeStop: () => invoke(IPC.RUNTIME_STOP),
   runtimeStatus: () => invoke(IPC.RUNTIME_STATUS),
-  runtimeChat: (messages: { role: string; content: string }[]) => invoke(IPC.RUNTIME_CHAT, { messages }),
+  runtimeChat: (messages: { role: string; content: string }[], requestId: string) =>
+    invoke(IPC.RUNTIME_CHAT, { messages, requestId }),
   conversationsList: () => invoke(IPC.CONVERSATIONS_LIST),
   conversationCreate: (title?: string) => invoke(IPC.CONVERSATION_CREATE, title),
   conversationMessages: (id: string) => invoke(IPC.CONVERSATION_MESSAGES, id),
