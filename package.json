@@ -1,6 +1,7 @@
 {
   "name": "local-llm-desktop",
   "version": "0.1.0",
+  "author": "Local",
   "description": "Local LLM desktop app with Hugging Face, RAG wiki, and optional LoRA training",
   "main": "out/main/index.js",
   "type": "module",
@@ -9,10 +10,13 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
+    "dist:zip": "node scripts/package-zip.mjs",
+    "icons": "node scripts/generate-icons.mjs",
     "postinstall": "electron-rebuild -f -w better-sqlite3"
   },
   "dependencies": {
     "@electron-toolkit/utils": "^3.0.0",
+    "@fortawesome/fontawesome-free": "^7.2.0",
     "@huggingface/hub": "^1.0.1",
     "better-sqlite3": "^11.7.0",
     "electron-store": "^10.0.0",
@@ -26,9 +30,12 @@
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
+    "png2icons": "^2.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "sharp": "^0.34.5",
     "typescript": "^5.7.2",
     "vite": "^5.4.11"
   }
