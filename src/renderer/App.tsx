@@ -1268,6 +1268,7 @@ export default function App(): React.ReactElement {
   }
 
   async function startRuntime(): Promise<void> {
+    if (runtimeStatus?.running || runtimeStarting) return
     setErr(null)
     setRuntimeStarting(true)
     setRuntimeLoadProgress(null)
@@ -1290,8 +1291,14 @@ export default function App(): React.ReactElement {
   }
 
   async function stopRuntime(): Promise<void> {
-    const s = await window.api.runtimeStop()
-    setRuntimeStatus(s)
+    setErr(null)
+    try {
+      const s = await window.api.runtimeStop()
+      setRuntimeStatus(s)
+      void refreshRunDrawer()
+    } catch (e) {
+      setErr(String(e))
+    }
   }
 
   async function applyModelsInstallLocation(dir: string | null): Promise<void> {
