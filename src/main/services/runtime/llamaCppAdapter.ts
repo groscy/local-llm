@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { logLine } from '../../logger'
 import { httpPostJson, httpRequestRaw } from '../httpLocal'
+import { processRssMb } from '../processMemory'
 import type { ChatMessage, RuntimeAdapter } from './types'
 import type { RuntimeStatus } from '@shared/types'
 
@@ -92,21 +93,29 @@ export class LlamaCppAdapter implements RuntimeAdapter {
     }
   }
 
-  async fetchMetrics(): Promise<{ tokensPerSec?: number; ctxUsed?: number }> {
+  async fetchMetrics(): Promise<{
+    tokensPerSec?: number
+    ctxUsed?: number
+    modelMemoryMb?: number
+  }> {
+    let tokensPerSec: number | undefined
+    let ctxUsed: number | undefined
     try {
       const { statusCode, body } = await httpRequestRaw({
         url: `http://127.0.0.1:${this.port}/health`,
         method: 'GET',
         timeoutMs: 5000
       })
-      if (statusCode < 200 || statusCode >= 300) return {}
-      const j = JSON.parse(body) as Record<string, unknown>
-      return {
-        tokensPerSec: typeof j.tokens_per_second === 'number' ? j.tokens_per_second : undefined,
-        ctxUsed: typeof j.ctx_used === 'number' ? j.ctx_used : undefined
+      if (statusCode >= 200 && statusCode < 300) {
+        const j = JSON.parse(body) as Record<string, unknown>
+        tokensPerSec = typeof j.tokens_per_second === 'number' ? j.tokens_per_second : undefined
+        ctxUsed = typeof j.ctx_used === 'number' ? j.ctx_used : undefined
       }
     } catch {
-      return {}
+      /* ignore */
     }
+    const pid = this.proc?.pid
+    const modelMemoryMb = processRssMb(pid)
+    return { tokensPerSec, ctxUsed, modelMemoryMb }
   }
 }

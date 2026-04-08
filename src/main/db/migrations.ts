@@ -113,6 +113,12 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       ALTER TABLE kb_sources ADD COLUMN conversation_id TEXT;
       CREATE INDEX IF NOT EXISTS idx_kb_sources_conversation_id ON kb_sources(conversation_id);
     `
+  },
+  {
+    version: 3,
+    sql: `
+      ALTER TABLE metrics_samples ADD COLUMN model_memory_mb REAL;
+    `
   }
 ]
 

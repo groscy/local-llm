@@ -113,6 +113,8 @@ export interface MetricsSnapshot {
   processRssMb?: number
   gpuMemUsedMb?: number
   gpuMemTotalMb?: number
+  /** llama.cpp child RSS or Ollama model size (approx.), MiB */
+  modelMemoryMb?: number
 }
 
 export interface TrainJob {

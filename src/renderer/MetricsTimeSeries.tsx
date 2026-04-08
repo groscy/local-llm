@@ -125,9 +125,27 @@ export function MetricsTimeSeries({ history }: { history: MetricsSnapshot[] }): 
   const cpu = useMemo(() => chron.map((h) => h.processCpuPercent), [chron])
   const tok = useMemo(() => chron.map((h) => h.runtimeTokensPerSec), [chron])
   const ctx = useMemo(() => chron.map((h) => h.runtimeCtxUsed), [chron])
+  const gpuUsed = useMemo(() => chron.map((h) => h.gpuMemUsedMb), [chron])
+  const modelMem = useMemo(() => chron.map((h) => h.modelMemoryMb), [chron])
 
   const hasTok = tok.some((v) => v !== undefined && v !== null)
   const hasCtx = ctx.some((v) => v !== undefined && v !== null)
+  const hasGpu = gpuUsed.some((v) => v != null && !Number.isNaN(v) && v > 0)
+  const hasModelMem = modelMem.some((v) => v != null && !Number.isNaN(v) && v > 0)
+  const gpuUtilPct = useMemo(
+    () =>
+      chron.map((h) =>
+        h.gpuMemUsedMb != null &&
+        h.gpuMemTotalMb != null &&
+        h.gpuMemTotalMb > 0 &&
+        !Number.isNaN(h.gpuMemUsedMb) &&
+        !Number.isNaN(h.gpuMemTotalMb)
+          ? (100 * h.gpuMemUsedMb) / h.gpuMemTotalMb
+          : undefined
+      ),
+    [chron]
+  )
+  const hasGpuUtil = gpuUtilPct.some((v) => v != null && !Number.isNaN(v))
 
   if (chron.length === 0) {
     return <p className="muted">No history yet. Open Stats again after using the app to collect samples.</p>
@@ -136,6 +154,10 @@ export function MetricsTimeSeries({ history }: { history: MetricsSnapshot[] }): 
   return (
     <div className="metric-charts">
       <p className="muted metric-charts-hint">{chron.length} sample(s), oldest → newest (left to right).</p>
+      <p className="muted metric-charts-hint metric-charts-hint--sub">
+        GPU charts appear when <code className="inline-code">nvidia-smi</code> is available. Model memory is the llama-server process RSS
+        (llama.cpp) or loaded model size from Ollama&apos;s <code className="inline-code">/api/ps</code> when the runtime is running.
+      </p>
       <MiniChart
         title="Process memory (RSS)"
         unit="MB"
@@ -152,6 +174,36 @@ export function MetricsTimeSeries({ history }: { history: MetricsSnapshot[] }): 
         ts={ts}
         formatTick={(v) => v.toFixed(0)}
       />
+      {hasGpu && (
+        <MiniChart
+          title="GPU memory used (NVIDIA)"
+          unit="MiB"
+          color="#5a8dee"
+          values={gpuUsed}
+          ts={ts}
+          formatTick={(v) => v.toFixed(0)}
+        />
+      )}
+      {hasGpuUtil && (
+        <MiniChart
+          title="GPU memory utilization"
+          unit="%"
+          color="#8b7ae8"
+          values={gpuUtilPct}
+          ts={ts}
+          formatTick={(v) => v.toFixed(0)}
+        />
+      )}
+      {hasModelMem && (
+        <MiniChart
+          title="Model memory (runtime)"
+          unit="MiB"
+          color="#e878b8"
+          values={modelMem}
+          ts={ts}
+          formatTick={(v) => v.toFixed(0)}
+        />
+      )}
       {hasTok && (
         <MiniChart
           title="Runtime tokens / sec"

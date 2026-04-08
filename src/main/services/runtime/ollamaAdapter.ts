@@ -1,5 +1,5 @@
 import { logLine } from '../../logger'
-import { httpPostJson } from '../httpLocal'
+import { httpPostJson, httpRequestRaw } from '../httpLocal'
 import type { ChatMessage, RuntimeAdapter } from './types'
 import type { RuntimeStatus } from '@shared/types'
 
@@ -69,6 +69,36 @@ export class OllamaAdapter implements RuntimeAdapter {
         )
       }
       throw e instanceof Error ? e : new Error(msg)
+    }
+  }
+
+  async fetchMetrics(): Promise<{ modelMemoryMb?: number }> {
+    if (!this.modelName) return {}
+    try {
+      const { statusCode, body } = await httpRequestRaw({
+        url: `${this.baseUrl}/api/ps`,
+        method: 'GET',
+        timeoutMs: 5000
+      })
+      if (statusCode < 200 || statusCode >= 300) return {}
+      const j = JSON.parse(body) as {
+        models?: { name: string; size?: number; size_vram?: number }[]
+      }
+      const want = this.modelName.trim()
+      const list = j.models ?? []
+      const row =
+        list.find((m) => m.name === want) ??
+        list.find((m) => m.name.startsWith(`${want}:`)) ??
+        list.find((m) => want.startsWith(m.name)) ??
+        list[0]
+      if (!row) return {}
+      const vram = typeof row.size_vram === 'number' ? row.size_vram : 0
+      const ram = typeof row.size === 'number' ? row.size : 0
+      const bytes = vram > 0 ? vram : ram
+      if (bytes <= 0) return {}
+      return { modelMemoryMb: bytes / (1024 * 1024) }
+    } catch {
+      return {}
     }
   }
 }

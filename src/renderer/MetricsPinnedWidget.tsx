@@ -88,6 +88,20 @@ export function MetricsPinnedWidget(props: {
           </span>
         </div>
         <div className="metrics-pinned-stat">
+          <span className="metrics-pinned-label">GPU</span>
+          <span className="metrics-pinned-value">
+            {snapshot?.gpuMemUsedMb != null && snapshot?.gpuMemTotalMb != null
+              ? `${snapshot.gpuMemUsedMb.toFixed(0)} / ${snapshot.gpuMemTotalMb.toFixed(0)}`
+              : '—'}
+          </span>
+        </div>
+        <div className="metrics-pinned-stat">
+          <span className="metrics-pinned-label">Model</span>
+          <span className="metrics-pinned-value">
+            {snapshot?.modelMemoryMb != null ? `${snapshot.modelMemoryMb.toFixed(0)} MB` : '—'}
+          </span>
+        </div>
+        <div className="metrics-pinned-stat">
           <span className="metrics-pinned-label">Runtime</span>
           <span className={`metrics-pinned-value ${runtimeOn ? 'on' : ''}`}>{runtimeOn ? 'On' : 'Off'}</span>
         </div>

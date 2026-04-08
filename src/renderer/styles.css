@@ -1553,6 +1553,12 @@ body {
   margin: 0 0 4px;
 }
 
+.metric-charts-hint--sub {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .metric-chart-row {
   display: flex;
   flex-direction: column;
@@ -1935,8 +1941,14 @@ body {
 
 .metrics-pinned-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px 12px;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px 10px;
+}
+
+@media (max-width: 340px) {
+  .metrics-pinned-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 .metrics-pinned-stat {

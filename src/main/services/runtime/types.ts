@@ -13,5 +13,10 @@ export interface RuntimeAdapter {
   getStatus(): RuntimeStatus
   chat(messages: ChatMessage[], opts?: { maxTokens?: number }): Promise<string>
   /** Optional: probe health / metrics from server */
-  fetchMetrics?(): Promise<{ tokensPerSec?: number; ctxUsed?: number }>
+  fetchMetrics?(): Promise<{
+    tokensPerSec?: number
+    ctxUsed?: number
+    /** Loaded model footprint (llama child RSS or Ollama-reported size), MiB */
+    modelMemoryMb?: number
+  }>
 }
