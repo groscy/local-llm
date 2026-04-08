@@ -1486,6 +1486,17 @@ export default function App(): React.ReactElement {
   }
 
   const runtimeOn = Boolean(runtimeStatus?.running)
+  const loadedModelTitle = useMemo(() => {
+    if (!runtimeStatus?.modelPath?.trim()) return 'Model ready'
+    const raw = runtimeStatus.modelPath.trim()
+    if (
+      runtimeStatus.kind === 'llamacpp' &&
+      (raw.includes('/') || raw.includes('\\') || /^[a-zA-Z]:[\\/]/.test(raw))
+    ) {
+      return fileNameFromPath(raw) || raw
+    }
+    return raw
+  }, [runtimeStatus])
   const assistantResponderLabel = useMemo(() => {
     if (!runtimeStatus?.running) return 'Assistant'
     const raw = runtimeStatus.modelPath?.trim()
@@ -2449,9 +2460,90 @@ export default function App(): React.ReactElement {
 
               {drawer === 'runtime' && (
                 <>
-                  <div className="drawer-section">
-                    <h3>Backend</h3>
-                    <select className="select" value={runtimeKind} onChange={(e) => setRuntimeKind(e.target.value as 'llamacpp' | 'ollama')}>
+                  {runtimeStarting ? (
+                    <div className="runtime-load-progress-banner" role="status" aria-live="polite">
+                      {runtimeLoadProgress?.percent != null ? (
+                        <div className="runtime-load-progress-bar">
+                          <div
+                            className="runtime-load-progress-bar-fill"
+                            style={{
+                              width: `${Math.min(100, Math.max(0, runtimeLoadProgress.percent))}%`
+                            }}
+                          />
+                        </div>
+                      ) : null}
+                      <p className="runtime-load-progress-message">
+                        {runtimeLoadProgress?.message ?? 'Starting runtime…'}
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {runtimeOn ? (
+                    <div className="runtime-loaded-hero" role="region" aria-label="Loaded model">
+                      <div className="runtime-loaded-hero-header">
+                        <span className="runtime-loaded-hero-badge">Active</span>
+                        <button type="button" className="btn-ghost-sm" onClick={() => void refreshRunDrawer()}>
+                          Refresh
+                        </button>
+                      </div>
+                      <p className="runtime-loaded-hero-kicker">Model in memory</p>
+                      <h3 className="runtime-loaded-hero-title">{loadedModelTitle}</h3>
+                      <p className="runtime-loaded-hero-meta">
+                        {runtimeStatus ? (
+                          <>
+                            <span>{runtimeKindLabel(runtimeStatus.kind)}</span>
+                            {runtimeStatus.endpoint ? (
+                              <>
+                                <span className="runtime-loaded-hero-meta-sep"> · </span>
+                                <code className="inline-code">{runtimeStatus.endpoint}</code>
+                              </>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span className="muted">Loading…</span>
+                        )}
+                      </p>
+                      {runtimeStatus && typeof runtimeStatus.pid === 'number' ? (
+                        <p className="muted runtime-loaded-hero-pid">Process PID {runtimeStatus.pid}</p>
+                      ) : null}
+                      <div className="runtime-loaded-hero-actions">
+                        <button type="button" className="btn-primary" onClick={() => void stopRuntime()}>
+                          Unload model
+                        </button>
+                      </div>
+                      {runtimeStatus?.lastError ? (
+                        <p className="runtime-status-error" role="alert">
+                          {runtimeStatus.lastError}
+                        </p>
+                      ) : null}
+                      {runtimeStatus ? (
+                        <details className="runtime-raw-toggle">
+                          <summary>Technical details</summary>
+                          <pre className="code-block" style={{ marginTop: 8 }}>
+                            {JSON.stringify(runtimeStatus, null, 2)}
+                          </pre>
+                        </details>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {!runtimeOn ? (
+                    <>
+                  <div className="drawer-section runtime-load-card">
+                    <h3 className="runtime-load-card-title">Load a model</h3>
+                    <p className="muted runtime-load-card-lead">
+                      Choose backend and model, then start. Unload when you want to switch.
+                    </p>
+                    <label className="runtime-field-label" htmlFor="runtime-backend-select">
+                      Backend
+                    </label>
+                    <select
+                      id="runtime-backend-select"
+                      className="select"
+                      value={runtimeKind}
+                      disabled={runtimeStarting}
+                      onChange={(e) => setRuntimeKind(e.target.value as 'llamacpp' | 'ollama')}
+                    >
                       <option value="ollama">Ollama</option>
                       <option value="llamacpp">llama.cpp server</option>
                     </select>
@@ -2527,7 +2619,6 @@ export default function App(): React.ReactElement {
                         </div>
                       )}
                     </div>
-                  </div>
                   {runtimeKind === 'llamacpp' && llamaEnv && !llamaEnv.detected && (
                     <div className="runtime-llama-setup-banner" role="status">
                       <p className="runtime-llama-setup-banner-title">llama-server not detected</p>
@@ -2555,18 +2646,21 @@ export default function App(): React.ReactElement {
                   {runtimeKind === 'llamacpp' && llamaEnv?.detected && !llamaEnv.configuredValid && llamaEnv.resolvedPath ? (
                     <p className="muted runtime-llama-path-note">
                       No saved binary path on disk; using{' '}
-                      <code className="inline-code">{llamaEnv.resolvedPath}</code> from PATH. Save by pressing Start or paste a path under Binary.
+                      <code className="inline-code">{llamaEnv.resolvedPath}</code> from PATH. Save by loading a model or paste a path below.
                     </p>
                   ) : null}
-                  <div className="drawer-section">
-                    <h3>Model</h3>
-                    <label className="runtime-local-models-label" htmlFor="runtime-local-model-select">
-                      Download folder <span className="runtime-local-models-dir">({paths?.modelsDefault ?? '—'})</span>
+                    <label className="runtime-field-label" htmlFor="runtime-local-model-select">
+                      {runtimeKind === 'ollama' ? 'Model' : 'Weights file'}
                     </label>
+                    <p className="muted runtime-field-hint-inline">
+                      Folder scanned for .gguf:{' '}
+                      <span className="runtime-local-models-dir">{paths?.modelsDefault ?? '—'}</span>
+                    </p>
                     <select
                       id="runtime-local-model-select"
                       className="select runtime-local-model-select"
                       aria-label="Choose a downloaded GGUF model file"
+                      disabled={runtimeStarting}
                       value={matchedLocalModelPath}
                       onChange={(e) => {
                         const v = e.target.value
@@ -2576,7 +2670,7 @@ export default function App(): React.ReactElement {
                       <option value="">
                         {localModelFilePaths.length === 0
                           ? '— No .gguf files in folder —'
-                          : '— Custom path or Ollama tag (below) —'}
+                          : '— Pick file or type path below —'}
                       </option>
                       {localModelFilePaths.map((p) => (
                         <option key={p} value={p} title={p}>
@@ -2588,185 +2682,139 @@ export default function App(): React.ReactElement {
                       id="runtime-model-path-input"
                       className="input runtime-model-path-input"
                       value={modelPath}
+                      disabled={runtimeStarting}
                       onChange={(e) => setModelPath(e.target.value)}
-                      placeholder={runtimeKind === 'ollama' ? 'e.g. llama3.2' : 'Path to .gguf'}
+                      placeholder={runtimeKind === 'ollama' ? 'e.g. llama3.2' : 'Full path to .gguf'}
                       aria-label={runtimeKind === 'ollama' ? 'Ollama model tag' : 'Path to model weights'}
                     />
                     <p className="muted runtime-model-hint">
                       {runtimeKind === 'ollama'
-                        ? 'Ollama expects a model tag. If it is not on disk yet, Start will run ollama pull for that tag (can take a while). The list above is .gguf files for llama.cpp only.'
-                        : 'Pick from the list or paste a full path. Subfolders are scanned.'}
+                        ? 'Use a tag; pull runs on Start if needed. The list is only for llama.cpp.'
+                        : 'Pick from the list or paste a path (subfolders included).'}
                     </p>
-                  </div>
-                  <div className="drawer-section">
-                    <h3>Local downloads</h3>
-                    <p className="muted" style={{ marginTop: 0 }}>
-                      Every Hub download tracked in this app (newest first). Use a finished file path with llama.cpp; Ollama uses tags you pull
-                      separately (<code className="inline-code">ollama pull …</code>).
-                    </p>
-                    <p className="muted">
-                      Default folder for new downloads:{' '}
-                      <span className="runtime-downloads-default-path">{paths?.modelsDefault ?? '—'}</span>{' '}
-                      <button type="button" className="btn-ghost-sm" onClick={() => setDrawer('settings')}>
-                        Change in Settings
-                      </button>
-                    </p>
-                    {localDownloads.length === 0 ? (
-                      <p className="muted">No downloads yet. Open the Hub tool to download a GGUF file.</p>
-                    ) : (
-                      <ul className="runtime-downloads-list">
-                        {localDownloads.map((r) => {
-                          const dlPct = downloadRowProgressPct(r)
-                          const showDlBar = r.status === 'downloading' || r.status === 'pending'
-                          const dlMeta =
-                            showDlBar && dlPct != null
-                              ? `${dlPct}%${
-                                  typeof r.bytes_received === 'number' && Number(r.bytes_total) > 0
-                                    ? ` · ${formatBytes(r.bytes_received)} / ${formatBytes(Number(r.bytes_total))}`
-                                    : ''
-                                }`
-                              : showDlBar
-                                ? 'Starting…'
-                                : undefined
-                          return (
-                            <li
-                              key={r.id}
-                              className={`runtime-download-row ${r.status === 'complete' ? '' : 'runtime-download-row-dim'}`}
-                            >
-                              <div className="runtime-download-row-head">
-                                <span className="runtime-download-row-title">{fileNameFromPath(r.local_path)}</span>
-                                <div className="runtime-download-row-actions">
-                                  <span className={downloadStatusClass(r.status)}>{r.status}</span>
-                                  {showDlBar ? (
-                                    <button type="button" className="btn-ghost-sm" onClick={() => void cancelDownloadJob(r.id)}>
-                                      Cancel
-                                    </button>
-                                  ) : null}
-                                  {r.status === 'complete' ? (
-                                    <button
-                                      type="button"
-                                      className="btn-ghost-sm"
-                                      onClick={() => {
-                                        setRuntimeKind('llamacpp')
-                                        setModelPath(r.local_path)
-                                      }}
-                                    >
-                                      Use path
-                                    </button>
-                                  ) : null}
-                                </div>
-                              </div>
-                              {showDlBar ? <DownloadProgressBar pct={dlPct} meta={dlMeta} /> : null}
-                              <div className="runtime-download-row-repo muted">{r.repo_id}</div>
-                              <div className="runtime-download-row-path">{r.local_path}</div>
-                              <div className="runtime-download-row-meta">
-                                {formatBytes(Number(r.bytes_total) || 0)}
-                                {r.revision ? ` · ${r.revision}` : ''}
-                              </div>
-                            </li>
-                          )
-                        })}
-                      </ul>
-                    )}
-                  </div>
-                  {runtimeKind === 'llamacpp' && (
-                    <div className="drawer-section">
-                      <h3>Binary</h3>
-                      {llamaEnv?.detected && llamaEnv.configuredValid ? (
-                        <p className="muted runtime-llama-ok">llama-server binary path found.</p>
-                      ) : null}
-                      <input className="input" value={llamaBin} onChange={(e) => setLlamaBin(e.target.value)} placeholder="llama-server path" />
-                    </div>
-                  )}
-                  {runtimeStarting ? (
-                    <div className="runtime-load-progress-banner" role="status" aria-live="polite">
-                      {runtimeLoadProgress?.percent != null ? (
-                        <div className="runtime-load-progress-bar">
-                          <div
-                            className="runtime-load-progress-bar-fill"
-                            style={{
-                              width: `${Math.min(100, Math.max(0, runtimeLoadProgress.percent))}%`
-                            }}
-                          />
-                        </div>
-                      ) : null}
-                      <p className="runtime-load-progress-message">
-                        {runtimeLoadProgress?.message ?? 'Starting runtime…'}
-                      </p>
-                    </div>
-                  ) : null}
-                  <div className="row">
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={runtimeStarting}
-                      onClick={() => void startRuntime()}
-                    >
-                      {runtimeStarting ? 'Starting…' : 'Start'}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={runtimeStarting}
-                      onClick={() => void stopRuntime()}
-                    >
-                      Stop
-                    </button>
-                    <button type="button" className="btn-secondary" onClick={() => void refreshRunDrawer()}>
-                      Refresh status
-                    </button>
-                  </div>
-                  <div className="drawer-section" style={{ marginTop: 16 }}>
-                    <h3>Runtime state</h3>
-                    {!runtimeStatus && <p className="muted">Loading…</p>}
-                    {runtimeStatus && (
+                    {runtimeKind === 'llamacpp' ? (
                       <>
-                        <div className="runtime-status-panel">
-                          <div className="runtime-status-row">
-                            <span className="runtime-status-label">Status</span>
-                            <span
-                              className={`runtime-status-value runtime-status-badge ${runtimeStatus.running ? 'on' : 'off'}`}
-                            >
-                              {runtimeStatus.running ? 'Running' : 'Stopped'}
-                            </span>
-                          </div>
-                          <div className="runtime-status-row">
-                            <span className="runtime-status-label">Backend</span>
-                            <span className="runtime-status-value">{runtimeKindLabel(runtimeStatus.kind)}</span>
-                          </div>
-                          {runtimeStatus.endpoint ? (
-                            <div className="runtime-status-row">
-                              <span className="runtime-status-label">Endpoint</span>
-                              <span className="runtime-status-value">{runtimeStatus.endpoint}</span>
-                            </div>
-                          ) : null}
-                          <div className="runtime-status-row">
-                            <span className="runtime-status-label">
-                              {runtimeStatus.kind === 'ollama' ? 'Model tag' : 'Model'}
-                            </span>
-                            <span className="runtime-status-value">{runtimeStatus.modelPath || '—'}</span>
-                          </div>
-                          {typeof runtimeStatus.pid === 'number' ? (
-                            <div className="runtime-status-row">
-                              <span className="runtime-status-label">Process</span>
-                              <span className="runtime-status-value">PID {runtimeStatus.pid}</span>
-                            </div>
-                          ) : null}
-                        </div>
-                        {runtimeStatus.lastError ? (
-                          <p className="runtime-status-error" role="alert">
-                            {runtimeStatus.lastError}
-                          </p>
+                        <label className="runtime-field-label" htmlFor="runtime-llama-bin-input">
+                          llama-server binary
+                        </label>
+                        {llamaEnv?.detected && llamaEnv.configuredValid ? (
+                          <p className="muted runtime-llama-ok">Saved path looks valid.</p>
                         ) : null}
-                        <details className="runtime-raw-toggle">
-                          <summary>Raw status JSON</summary>
-                          <pre className="code-block" style={{ marginTop: 8 }}>
-                            {JSON.stringify(runtimeStatus, null, 2)}
-                          </pre>
-                        </details>
+                        <input
+                          id="runtime-llama-bin-input"
+                          className="input"
+                          value={llamaBin}
+                          disabled={runtimeStarting}
+                          onChange={(e) => setLlamaBin(e.target.value)}
+                          placeholder="Path to llama-server"
+                        />
                       </>
-                    )}
+                    ) : null}
+                    <div className="row runtime-load-primary-actions">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={runtimeStarting}
+                        onClick={() => void startRuntime()}
+                      >
+                        {runtimeStarting ? 'Starting…' : 'Load model'}
+                      </button>
+                      <button type="button" className="btn-secondary" onClick={() => void refreshRunDrawer()}>
+                        Refresh
+                      </button>
+                    </div>
                   </div>
+
+                  <details className="runtime-drawer-advanced">
+                    <summary>Hub downloads &amp; copy path</summary>
+                    <div className="drawer-section runtime-drawer-advanced-body">
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        Finished downloads (newest first). “Use path” fills the field above for llama.cpp.
+                      </p>
+                      <p className="muted">
+                        Default save folder:{' '}
+                        <span className="runtime-downloads-default-path">{paths?.modelsDefault ?? '—'}</span>{' '}
+                        <button type="button" className="btn-ghost-sm" onClick={() => setDrawer('settings')}>
+                          Settings
+                        </button>
+                      </p>
+                      {localDownloads.length === 0 ? (
+                        <p className="muted">No downloads yet. Use the Models (Hub) tool.</p>
+                      ) : (
+                        <ul className="runtime-downloads-list">
+                          {localDownloads.map((r) => {
+                            const dlPct = downloadRowProgressPct(r)
+                            const showDlBar = r.status === 'downloading' || r.status === 'pending'
+                            const dlMeta =
+                              showDlBar && dlPct != null
+                                ? `${dlPct}%${
+                                    typeof r.bytes_received === 'number' && Number(r.bytes_total) > 0
+                                      ? ` · ${formatBytes(r.bytes_received)} / ${formatBytes(Number(r.bytes_total))}`
+                                      : ''
+                                  }`
+                                : showDlBar
+                                  ? 'Starting…'
+                                  : undefined
+                            return (
+                              <li
+                                key={r.id}
+                                className={`runtime-download-row ${r.status === 'complete' ? '' : 'runtime-download-row-dim'}`}
+                              >
+                                <div className="runtime-download-row-head">
+                                  <span className="runtime-download-row-title">{fileNameFromPath(r.local_path)}</span>
+                                  <div className="runtime-download-row-actions">
+                                    <span className={downloadStatusClass(r.status)}>{r.status}</span>
+                                    {showDlBar ? (
+                                      <button type="button" className="btn-ghost-sm" onClick={() => void cancelDownloadJob(r.id)}>
+                                        Cancel
+                                      </button>
+                                    ) : null}
+                                    {r.status === 'complete' ? (
+                                      <button
+                                        type="button"
+                                        className="btn-ghost-sm"
+                                        disabled={runtimeStarting}
+                                        onClick={() => {
+                                          setRuntimeKind('llamacpp')
+                                          setModelPath(r.local_path)
+                                        }}
+                                      >
+                                        Use path
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </div>
+                                {showDlBar ? <DownloadProgressBar pct={dlPct} meta={dlMeta} /> : null}
+                                <div className="runtime-download-row-repo muted">{r.repo_id}</div>
+                                <div className="runtime-download-row-path">{r.local_path}</div>
+                                <div className="runtime-download-row-meta">
+                                  {formatBytes(Number(r.bytes_total) || 0)}
+                                  {r.revision ? ` · ${r.revision}` : ''}
+                                </div>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  </details>
+
+                  {!runtimeStatus ? <p className="muted runtime-runtime-footnote">Checking runtime…</p> : null}
+                  {runtimeStatus && !runtimeStatus.running && runtimeStatus.lastError ? (
+                    <p className="runtime-status-error" role="alert">
+                      {runtimeStatus.lastError}
+                    </p>
+                  ) : null}
+                  {runtimeStatus ? (
+                    <details className="runtime-raw-toggle">
+                      <summary>Raw status JSON</summary>
+                      <pre className="code-block" style={{ marginTop: 8 }}>
+                        {JSON.stringify(runtimeStatus, null, 2)}
+                      </pre>
+                    </details>
+                  ) : null}
+                    </>
+                  ) : null}
                 </>
               )}
 
