@@ -1,0 +1,59 @@
+# electron-builder config (used by npm run dist:zip)
+appId: com.localllm.desktop
+productName: Local LLM Desktop
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: build
+
+# Default icon path; platform-specific icons set under win/mac/linux (from `npm run icons`)
+icon: build/icon.png
+
+files:
+  - out/**/*
+  - package.json
+
+# Native addon (SQLite)
+asarUnpack:
+  - "**/*.node"
+
+extraResources:
+  - from: training
+    to: training
+    filter:
+      - "**/*"
+
+win:
+  icon: build/icon.ico
+  signAndEditExecutable: false
+  target:
+    - target: zip
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+
+mac:
+  icon: build/icon.icns
+  target:
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  category: public.app-category.developer-tools
+
+linux:
+  icon: build/icon.png
+  target:
+    - target: zip
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+  category: Development
+
+# Do not publish to GitHub etc. from this config
+publish: null
+
+# Avoid winCodeSign extraction (symlinks) on Windows without Developer Mode / admin
+forceCodeSigning: false
