@@ -28,6 +28,12 @@ function formatRefreshLabel(ms: number): string {
 type MainView = 'chat' | 'wiki'
 type ToolDrawer = 'hf' | 'runtime' | 'train' | 'metrics' | 'settings' | null
 type HfLibraryMode = 'recommended' | 'search'
+type PinnedWidgetsSide = 'left' | 'right' | 'top' | 'bottom'
+
+function parsePinnedWidgetsSide(raw: unknown): PinnedWidgetsSide {
+  if (raw === 'left' || raw === 'right' || raw === 'top' || raw === 'bottom') return raw
+  return 'left'
+}
 
 function runtimeKindLabel(kind: RuntimeStatus['kind']): string {
   if (kind === 'ollama') return 'Ollama'
@@ -224,6 +230,7 @@ export default function App(): React.ReactElement {
 
   const [metricsPinned, setMetricsPinned] = useState(false)
   const [downloadsPinned, setDownloadsPinned] = useState(false)
+  const [pinnedWidgetsSide, setPinnedWidgetsSide] = useState<PinnedWidgetsSide>('left')
   const [pinnedDownloadsSnapshot, setPinnedDownloadsSnapshot] = useState<DownloadRow[]>([])
   const [metricsRefreshMs, setMetricsRefreshMs] = useState(3000)
   const [metricsRefreshCustomMode, setMetricsRefreshCustomMode] = useState(false)
@@ -333,6 +340,7 @@ export default function App(): React.ReactElement {
     void window.api.getConfig().then((c: Record<string, unknown>) => {
       if (typeof c.metricsPinned === 'boolean') setMetricsPinned(c.metricsPinned)
       if (typeof c.downloadsPinned === 'boolean') setDownloadsPinned(c.downloadsPinned)
+      setPinnedWidgetsSide(parsePinnedWidgetsSide(c.pinnedWidgetsSide))
       if (typeof c.metricsRefreshMs === 'number') {
         const ms = clampMetricsRefreshMs(c.metricsRefreshMs)
         setMetricsRefreshMs(ms)
@@ -414,11 +422,17 @@ export default function App(): React.ReactElement {
   }, [])
 
   const saveMetricsWidgetConfig = useCallback(
-    async (patch: { metricsPinned?: boolean; downloadsPinned?: boolean; metricsRefreshMs?: number }) => {
+    async (patch: {
+      metricsPinned?: boolean
+      downloadsPinned?: boolean
+      metricsRefreshMs?: number
+      pinnedWidgetsSide?: PinnedWidgetsSide
+    }) => {
       const body: Record<string, unknown> = {}
       if (patch.metricsPinned !== undefined) body.metricsPinned = patch.metricsPinned
       if (patch.downloadsPinned !== undefined) body.downloadsPinned = patch.downloadsPinned
       if (patch.metricsRefreshMs !== undefined) body.metricsRefreshMs = clampMetricsRefreshMs(patch.metricsRefreshMs)
+      if (patch.pinnedWidgetsSide !== undefined) body.pinnedWidgetsSide = patch.pinnedWidgetsSide
       await window.api.setConfig(body)
     },
     []
@@ -473,7 +487,7 @@ export default function App(): React.ReactElement {
 
   const metricsWidgetControls = (
     <div className="drawer-section">
-      <h3>Pinned floating widgets</h3>
+      <h3>Pinned widgets</h3>
       <label className="metrics-widget-check">
         <input
           type="checkbox"
@@ -497,6 +511,26 @@ export default function App(): React.ReactElement {
           }}
         />
         <span>Show Hub download progress in the Pinned widgets panel</span>
+      </label>
+      <label style={{ display: 'block', marginTop: 16 }}>
+        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+          Panel side (when at least one widget is pinned)
+        </span>
+        <select
+          className="select"
+          style={{ width: '100%', maxWidth: 320 }}
+          value={pinnedWidgetsSide}
+          onChange={(e) => {
+            const v = parsePinnedWidgetsSide(e.target.value)
+            setPinnedWidgetsSide(v)
+            void saveMetricsWidgetConfig({ pinnedWidgetsSide: v })
+          }}
+        >
+          <option value="left">Left — beside the nav rail</option>
+          <option value="right">Right — after the main content</option>
+          <option value="top">Top — above the main content</option>
+          <option value="bottom">Bottom — below the main content</option>
+        </select>
       </label>
       <p className="muted" style={{ margin: '10px 0 6px' }}>
         Widget refresh rate (500 ms – 1 hour). Full stats drawer still records samples when you open it or press Record.
@@ -885,7 +919,7 @@ export default function App(): React.ReactElement {
         </nav>
       </aside>
 
-      <div className="shell-content">
+      <div className={`shell-content shell-content--pinned-${pinnedWidgetsSide}`}>
         {(metricsPinned || downloadsPinned) && (
           <aside className="pinned-widgets-aside" aria-label="Pinned widgets">
             <div className="pinned-widgets-aside-header">Pinned widgets</div>

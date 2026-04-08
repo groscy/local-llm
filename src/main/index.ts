@@ -14,7 +14,8 @@ const store = new Store<Record<string, unknown>>({
     llamaPort: 8080,
     metricsPinned: false,
     metricsRefreshMs: 3000,
-    downloadsPinned: false
+    downloadsPinned: false,
+    pinnedWidgetsSide: 'left'
   }
 })
 

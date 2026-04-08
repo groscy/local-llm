@@ -164,26 +164,90 @@ body {
   font-size: 9px;
 }
 
-/* Content area: optional pinned rail + main */
+/* Content area: optional pinned panel + main (side set via .shell-content--pinned-*) */
 .shell-content {
   flex: 1;
   display: flex;
-  flex-direction: row;
   align-items: stretch;
   min-width: 0;
   min-height: 0;
 }
 
+.shell-content--pinned-left {
+  flex-direction: row;
+}
+
+.shell-content--pinned-right {
+  flex-direction: row;
+}
+
+.shell-content--pinned-right .main-column {
+  order: 0;
+}
+
+.shell-content--pinned-right .pinned-widgets-aside {
+  order: 1;
+}
+
+.shell-content--pinned-top {
+  flex-direction: column;
+}
+
+.shell-content--pinned-top .main-column {
+  flex: 1;
+  min-height: 0;
+}
+
+.shell-content--pinned-bottom {
+  flex-direction: column;
+}
+
+.shell-content--pinned-bottom .main-column {
+  order: 0;
+  flex: 1;
+  min-height: 0;
+}
+
+.shell-content--pinned-bottom .pinned-widgets-aside {
+  order: 1;
+}
+
 .pinned-widgets-aside {
   display: flex;
   flex-direction: column;
-  width: min(308px, 36vw);
-  max-width: 100%;
-  flex-shrink: 0;
-  border-right: 1px solid var(--border);
   background: rgba(12, 14, 20, 0.88);
   backdrop-filter: blur(12px);
   min-height: 0;
+  flex-shrink: 0;
+}
+
+.shell-content--pinned-left .pinned-widgets-aside,
+.shell-content--pinned-right .pinned-widgets-aside {
+  width: min(308px, 36vw);
+  max-width: 100%;
+}
+
+.shell-content--pinned-left .pinned-widgets-aside {
+  border-right: 1px solid var(--border);
+}
+
+.shell-content--pinned-right .pinned-widgets-aside {
+  border-left: 1px solid var(--border);
+}
+
+.shell-content--pinned-top .pinned-widgets-aside,
+.shell-content--pinned-bottom .pinned-widgets-aside {
+  width: 100%;
+  max-width: none;
+  max-height: min(44vh, 420px);
+}
+
+.shell-content--pinned-top .pinned-widgets-aside {
+  border-bottom: 1px solid var(--border);
+}
+
+.shell-content--pinned-bottom .pinned-widgets-aside {
+  border-top: 1px solid var(--border);
 }
 
 .pinned-widgets-aside-header {
@@ -207,29 +271,63 @@ body {
   overflow: hidden;
 }
 
-.pinned-widgets-aside-body > .metrics-pinned-widget {
+.shell-content--pinned-top .pinned-widgets-aside-body,
+.shell-content--pinned-bottom .pinned-widgets-aside-body {
+  flex-direction: row;
+  align-items: stretch;
+}
+
+.shell-content--pinned-top .pinned-widgets-aside-body > .metrics-pinned-widget,
+.shell-content--pinned-top .pinned-widgets-aside-body > .downloads-pinned-widget,
+.shell-content--pinned-bottom .pinned-widgets-aside-body > .metrics-pinned-widget,
+.shell-content--pinned-bottom .pinned-widgets-aside-body > .downloads-pinned-widget {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.shell-content--pinned-left .pinned-widgets-aside-body > .metrics-pinned-widget {
   flex-shrink: 0;
 }
 
-.pinned-widgets-aside-body > .downloads-pinned-widget {
+.shell-content--pinned-right .pinned-widgets-aside-body > .metrics-pinned-widget {
+  flex-shrink: 0;
+}
+
+.shell-content--pinned-left .pinned-widgets-aside-body > .downloads-pinned-widget,
+.shell-content--pinned-right .pinned-widgets-aside-body > .downloads-pinned-widget {
   flex: 1;
   min-height: 0;
 }
 
 @media (max-width: 720px) {
-  .shell-content {
+  .shell-content--pinned-left,
+  .shell-content--pinned-right {
     flex-direction: column;
   }
 
-  .pinned-widgets-aside {
+  .shell-content--pinned-left .pinned-widgets-aside,
+  .shell-content--pinned-right .pinned-widgets-aside {
     width: 100%;
     max-height: min(42vh, 360px);
-    border-right: none;
+    border-left: none !important;
+    border-right: none !important;
     border-bottom: 1px solid var(--border);
-    order: -1;
+    order: 0;
   }
 
-  .pinned-widgets-aside-body > .downloads-pinned-widget {
+  .shell-content--pinned-left .main-column,
+  .shell-content--pinned-right .main-column {
+    order: 1;
+  }
+
+  .shell-content--pinned-top .pinned-widgets-aside-body,
+  .shell-content--pinned-bottom .pinned-widgets-aside-body {
+    flex-direction: column;
+  }
+
+  .shell-content--pinned-left .pinned-widgets-aside-body > .downloads-pinned-widget,
+  .shell-content--pinned-right .pinned-widgets-aside-body > .downloads-pinned-widget {
     flex: 1 1 auto;
     min-height: 120px;
     max-height: 220px;

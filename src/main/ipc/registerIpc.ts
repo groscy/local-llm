@@ -32,7 +32,8 @@ const configSchema = z.object({
   hfTokenEncrypted: z.string().optional(),
   metricsPinned: z.boolean().optional(),
   metricsRefreshMs: z.number().min(500).max(3_600_000).optional(),
-  downloadsPinned: z.boolean().optional()
+  downloadsPinned: z.boolean().optional(),
+  pinnedWidgetsSide: z.enum(['left', 'right', 'top', 'bottom']).optional()
 })
 
 function trainingScriptPath(): string {
