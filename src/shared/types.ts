@@ -29,6 +29,21 @@ export interface HfModelDetail extends HfModelSummary {
   sha?: string
 }
 
+/** Snapshot from the main process for model-vs-hardware hints. */
+export interface HardwareSummary {
+  totalRamBytes: number
+  freeRamBytes: number
+  logicalCores: number
+  platform: string
+  /** Free space on the volume that contains the resolved download directory, when readable. */
+  downloadVolumeFreeBytes?: number
+  gpu?: {
+    name: string
+    totalVramMb: number
+    usedVramMb: number
+  }
+}
+
 export interface DownloadJob {
   id: string
   repoId: string
@@ -125,4 +140,20 @@ export interface TrainJob {
   message?: string
   startedAt?: number
   finishedAt?: number
+}
+
+/** Main → renderer while `runtime:start` is working (pull, GGUF import, server spawn). */
+export interface RuntimeLoadProgress {
+  phase: string
+  message: string
+  /** 0–100 when known (e.g. Ollama layer pull or GGUF upload). */
+  percent?: number
+}
+
+/** Main → renderer while a chat completion is streaming. */
+export interface RuntimeChatProgress {
+  requestId: string
+  kind: 'token' | 'error'
+  text?: string
+  message?: string
 }

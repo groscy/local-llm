@@ -7,6 +7,10 @@ export const IPC = {
   SET_CONFIG: 'app:setConfig',
   PICK_MODELS_DIRECTORY: 'app:pickModelsDirectory',
   CLEAR_DOWNLOAD_CACHE: 'app:clearDownloadCache',
+  CLEAR_ALL_CACHES: 'app:clearAllCaches',
+  DELETE_ALL_MODELS: 'app:deleteAllModels',
+  RESET_FACTORY_CONFIG: 'app:resetFactoryConfig',
+  HARDWARE_SUMMARY: 'app:hardwareSummary',
   LOG: 'app:log',
 
   // Hugging Face
@@ -23,10 +27,18 @@ export const IPC = {
   // Runtime
   RUNTIME_LIST: 'runtime:list',
   RUNTIME_INSTALL_PATH: 'runtime:installPath',
+  RUNTIME_LIST_LOCAL_MODELS: 'runtime:listLocalModels',
+  RUNTIME_INSTALL_OLLAMA: 'runtime:installOllama',
+  /** Main → renderer: `{ message: string }` lines while install is running. */
+  RUNTIME_INSTALL_OLLAMA_PROGRESS: 'runtime:installOllamaProgress',
+  /** Main → renderer: load progress while `runtime:start` is in flight. */
+  RUNTIME_LOAD_PROGRESS: 'runtime:loadProgress',
   RUNTIME_START: 'runtime:start',
   RUNTIME_STOP: 'runtime:stop',
   RUNTIME_STATUS: 'runtime:status',
   RUNTIME_CHAT: 'runtime:chat',
+  /** Main → renderer: streamed assistant tokens; correlate with `requestId` from `RUNTIME_CHAT`. */
+  RUNTIME_CHAT_PROGRESS: 'runtime:chatProgress',
   OPEN_EXTERNAL_URL: 'shell:openExternalUrl',
 
   // Chat / persistence
