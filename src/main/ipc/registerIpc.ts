@@ -269,7 +269,11 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(
     IPC.RUNTIME_START,
     async (event, opts: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => {
-      await getRuntime()?.stop()
+      const existing = getRuntime()
+      if (existing?.getStatus().running) {
+        throw new Error('A model is already loaded. Unload it before loading another.')
+      }
+      await existing?.stop()
       const adapter = createRuntime(opts.kind, {
         ollamaBaseUrl: (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434'
       })
