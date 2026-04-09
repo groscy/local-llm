@@ -1,12 +1,20 @@
 import { randomUUID } from 'crypto'
-import { readFileSync } from 'fs'
+import { createWriteStream, readFileSync } from 'fs'
+import { finished } from 'stream/promises'
+import archiver from 'archiver'
 import type Database from 'better-sqlite3'
+import { extractWikiGlossary } from '@shared/wikiArticleExtras'
 import type {
   KbChunk,
+  KbSearchHit,
   KbSource,
   KnowledgeGraphEdge,
   KnowledgeGraphNode,
   KnowledgeGraphPayload,
+  WikiChatHighlightTerm,
+  WikiPagePayload,
+  WikiRelatedSource,
+  WikiSourceKind,
   WikiTopic
 } from '@shared/types'
 
@@ -131,6 +139,83 @@ export function searchChunks(db: Database.Database, query: string, limit: number
   }
 }
 
+const KB_HIT_SNIPPET_MAX = 220
+
+function kbHitSnippet(text: string): string {
+  const s = text.replace(/\s+/g, ' ').trim()
+  if (s.length <= KB_HIT_SNIPPET_MAX) return s
+  return `${s.slice(0, KB_HIT_SNIPPET_MAX - 1)}…`
+}
+
+function wikiKindFromUri(uri: string): WikiSourceKind {
+  const u = uri.toLowerCase()
+  if (u.startsWith('file:')) return 'document'
+  if (u.startsWith('wiki-extract:')) return 'extracted_note'
+  if (u.startsWith('chat:')) return 'saved_chat'
+  return 'other'
+}
+
+type KbSearchRow = {
+  id: string
+  sourceId: string
+  sourceTitle: string
+  uri: string
+  text: string
+  heading: string | null
+  ord: number
+}
+
+/**
+ * Full-text search across chunks; returns at most one row per source (best BM25 chunk),
+ * with source title and a short snippet for the wiki library UI.
+ */
+export function searchKbHits(db: Database.Database, query: string, limit: number): KbSearchHit[] {
+  const fts = ftsEscape(query)
+  if (!fts) return []
+  const rawCap = Math.min(200, Math.max(limit * 6, limit))
+  let rows: KbSearchRow[] = []
+  try {
+    rows = db
+      .prepare(
+        `SELECT c.id, c.source_id as sourceId, s.title as sourceTitle, s.uri as uri, c.text, c.heading as heading, c.ord
+         FROM kb_chunks_fts f
+         JOIN kb_chunks c ON c.id = f.chunk_id
+         JOIN kb_sources s ON s.id = c.source_id
+         WHERE f MATCH ?
+         ORDER BY bm25(f) LIMIT ?`
+      )
+      .all(fts, rawCap) as KbSearchRow[]
+  } catch {
+    const safe = query.replace(/%/g, '').replace(/_/g, '')
+    const like = `%${safe}%`
+    rows = db
+      .prepare(
+        `SELECT c.id, c.source_id as sourceId, s.title as sourceTitle, s.uri as uri, c.text, c.heading as heading, c.ord
+         FROM kb_chunks c
+         JOIN kb_sources s ON s.id = c.source_id
+         WHERE c.text LIKE ? OR s.title LIKE ?
+         ORDER BY c.ord LIMIT ?`
+      )
+      .all(like, like, rawCap) as KbSearchRow[]
+  }
+  const seen = new Set<string>()
+  const out: KbSearchHit[] = []
+  for (const r of rows) {
+    if (seen.has(r.sourceId)) continue
+    seen.add(r.sourceId)
+    out.push({
+      sourceId: r.sourceId,
+      sourceTitle: r.sourceTitle,
+      chunkId: r.id,
+      heading: r.heading,
+      snippet: kbHitSnippet(r.text),
+      kind: wikiKindFromUri(r.uri)
+    })
+    if (out.length >= limit) break
+  }
+  return out
+}
+
 export function listSources(db: Database.Database): KbSource[] {
   return db
     .prepare(
@@ -148,18 +233,103 @@ export function listChunksForSource(db: Database.Database, sourceId: string): Kb
     .all(sourceId) as KbChunk[]
 }
 
-/** Topic = source title with chunk count (wiki index). */
+const WIKI_HIGHLIGHT_SNIPPET_MAX = 220
+const WIKI_HIGHLIGHT_PHRASE_MIN = 3
+const WIKI_HIGHLIGHT_PHRASE_MAX = 200
+const WIKI_HIGHLIGHT_MAX_TERMS = 600
+
+function clipHighlightSnippet(text: string): string {
+  const s = text.replace(/\s+/g, ' ').trim()
+  if (s.length <= WIKI_HIGHLIGHT_SNIPPET_MAX) return s
+  return `${s.slice(0, WIKI_HIGHLIGHT_SNIPPET_MAX - 1)}…`
+}
+
+/**
+ * Collect phrases that appear in the knowledge base so chat bubbles can link to wiki articles:
+ * source titles (and "Chat:" title suffix), non-empty chunk headings, and `::: glossary` terms
+ * from compiled wiki page bodies when present.
+ */
+export function listWikiChatHighlightTerms(db: Database.Database): WikiChatHighlightTerm[] {
+  const out: WikiChatHighlightTerm[] = []
+  const seen = new Set<string>()
+
+  const push = (sourceId: string, phrase: string, snippet: string): void => {
+    const p = phrase.trim()
+    if (p.length < WIKI_HIGHLIGHT_PHRASE_MIN || p.length > WIKI_HIGHLIGHT_PHRASE_MAX) return
+    const k = `${sourceId}\0${p.toLowerCase()}`
+    if (seen.has(k)) return
+    seen.add(k)
+    out.push({ sourceId, phrase: p, snippet: clipHighlightSnippet(snippet) })
+  }
+
+  const sources = db.prepare('SELECT id, title FROM kb_sources').all() as { id: string; title: string }[]
+  for (const s of sources) {
+    const title = (s.title ?? '').trim()
+    if (!title) continue
+
+    push(s.id, title, `Wiki: ${title}`)
+
+    const chatStripped = title.replace(/^Chat:\s*/i, '').trim()
+    if (chatStripped.length >= WIKI_HIGHLIGHT_PHRASE_MIN && chatStripped.toLowerCase() !== title.toLowerCase()) {
+      push(s.id, chatStripped, `Saved chat: ${title}`)
+    }
+
+    const noteStripped = title.replace(/^Note:\s*/i, '').trim()
+    if (
+      noteStripped.length >= WIKI_HIGHLIGHT_PHRASE_MIN &&
+      noteStripped.toLowerCase() !== title.toLowerCase() &&
+      noteStripped.toLowerCase() !== chatStripped.toLowerCase()
+    ) {
+      push(s.id, noteStripped, `Chat note: ${title}`)
+    }
+  }
+
+  const chunkHeadings = db
+    .prepare(
+      `SELECT source_id as sourceId, heading, text FROM kb_chunks
+       WHERE heading IS NOT NULL AND TRIM(heading) != ''`
+    )
+    .all() as { sourceId: string; heading: string; text: string }[]
+
+  for (const c of chunkHeadings) {
+    push(c.sourceId, c.heading, c.text || c.heading)
+  }
+
+  const pages = db.prepare('SELECT id, body FROM wiki_pages WHERE id LIKE ?').all('src:%') as {
+    id: string
+    body: string
+  }[]
+
+  for (const page of pages) {
+    const sourceId = page.id.startsWith('src:') ? page.id.slice(4) : ''
+    if (!sourceId) continue
+    const { glossary } = extractWikiGlossary(page.body ?? '')
+    for (const g of glossary) {
+      push(sourceId, g.term, g.definition || g.term)
+    }
+  }
+
+  out.sort((a, b) => b.phrase.length - a.phrase.length)
+  return out.slice(0, WIKI_HIGHLIGHT_MAX_TERMS)
+}
+
+/** Topic = source title with chunk count and kind (wiki index). */
 export function listWikiTopics(db: Database.Database): WikiTopic[] {
   const rows = db
     .prepare(
-      `SELECT s.id, s.title, COUNT(c.id) as chunkCount
+      `SELECT s.id, s.title, s.uri, COUNT(c.id) as chunkCount
        FROM kb_sources s
        LEFT JOIN kb_chunks c ON c.source_id = s.id
-       GROUP BY s.id, s.title
+       GROUP BY s.id, s.title, s.uri
        ORDER BY s.created_at DESC`
     )
-    .all() as { id: string; title: string; chunkCount: number }[]
-  return rows.map((r) => ({ ...r, chunkCount: Number(r.chunkCount) }))
+    .all() as { id: string; title: string; uri: string; chunkCount: number }[]
+  return rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    chunkCount: Number(r.chunkCount),
+    kind: wikiKindFromUri(r.uri)
+  }))
 }
 
 export function getWikiPageBody(db: Database.Database, sourceId: string): string {
@@ -294,4 +464,163 @@ export function ensureWikiPageForSource(db: Database.Database, sourceId: string)
   const link = db.prepare('INSERT OR IGNORE INTO wiki_page_chunks (page_id, chunk_id) VALUES (?, ?)')
   for (const c of chs) link.run(pageId, c.id)
   return { id: pageId, title: s.title, body }
+}
+
+const RELATED_CHUNK_SAMPLE = 3
+const RELATED_BODY_CAP = 12_000
+
+/** Other sources that share topical tokens with this article (title + first chunks). */
+export function listRelatedWikiSources(
+  db: Database.Database,
+  sourceId: string,
+  limit: number
+): WikiRelatedSource[] {
+  const self = db.prepare('SELECT id, title, uri FROM kb_sources WHERE id = ?').get(sourceId) as
+    | { id: string; title: string; uri: string }
+    | undefined
+  if (!self) return []
+
+  const chunkStmt = db.prepare(
+    `SELECT text FROM kb_chunks WHERE source_id = ? ORDER BY ord LIMIT ${RELATED_CHUNK_SAMPLE}`
+  )
+  function tokensFor(sid: string, title: string): Set<string> {
+    const rows = chunkStmt.all(sid) as { text: string }[]
+    const blob = `${title}\n${rows.map((r) => r.text).join('\n')}`.slice(0, RELATED_BODY_CAP)
+    const raw = blob.toLowerCase().match(/[a-z0-9]{4,}/g)
+    return new Set(raw ?? [])
+  }
+
+  const selfTokens = tokensFor(sourceId, self.title)
+  if (selfTokens.size === 0) return []
+
+  const others = db
+    .prepare('SELECT id, title, uri FROM kb_sources WHERE id != ?')
+    .all(sourceId) as { id: string; title: string; uri: string }[]
+
+  const scored: { o: (typeof others)[0]; shared: string[]; score: number }[] = []
+  for (const o of others) {
+    const oTokens = tokensFor(o.id, o.title)
+    const shared = [...oTokens].filter((t) => selfTokens.has(t))
+    if (shared.length === 0) continue
+    scored.push({ o, shared, score: shared.length })
+  }
+  scored.sort((a, b) => b.score - a.score)
+  return scored.slice(0, limit).map(({ o, shared }) => ({
+    id: o.id,
+    title: o.title,
+    kind: wikiKindFromUri(o.uri),
+    sharedTerms: [...shared].sort((x, y) => y.length - x.length || x.localeCompare(y)).slice(0, 8)
+  }))
+}
+
+/** Sync wiki page row, then return payload for the renderer (glossary stripped from body). */
+export function buildWikiPagePayload(db: Database.Database, sourceId: string): WikiPagePayload {
+  const page = ensureWikiPageForSource(db, sourceId)
+  const { body, glossary } = extractWikiGlossary(page.body)
+  return {
+    id: page.id,
+    title: page.title,
+    body,
+    glossary,
+    relatedSources: listRelatedWikiSources(db, sourceId, 12)
+  }
+}
+
+function safeWikiExportFileStem(title: string): string {
+  return (
+    title
+      .replace(/[/\\?%*:|"<>]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 72) || 'untitled'
+  )
+}
+
+function uniqueWikiExportFileName(title: string, sourceId: string, used: Set<string>): string {
+  const base = safeWikiExportFileStem(title)
+  let name = `${base}__${sourceId.slice(0, 8)}.md`
+  let n = 1
+  const key = (): string => name.toLowerCase()
+  while (used.has(key())) {
+    name = `${base}__${sourceId.slice(0, 8)}_${n++}.md`
+  }
+  used.add(key())
+  return name
+}
+
+/** Write all KB sources as Markdown (compiled from chunks) plus manifest into a ZIP at `outPath`. */
+export async function exportWikiZip(db: Database.Database, outPath: string): Promise<void> {
+  const rows = db
+    .prepare(
+      `SELECT id, title, uri, created_at as createdAt, conversation_id as conversationId
+       FROM kb_sources ORDER BY created_at ASC`
+    )
+    .all() as {
+      id: string
+      title: string
+      uri: string
+      createdAt: number
+      conversationId: string | null
+    }[]
+
+  const output = createWriteStream(outPath)
+  const archive = archiver('zip', { zlib: { level: 6 } })
+  archive.on('warning', (err: NodeJS.ErrnoException) => {
+    if (err.code !== 'ENOENT') throw err
+  })
+
+  const outputClosed = finished(output)
+  archive.pipe(output)
+
+  const usedNames = new Set<string>()
+  const manifestSources: {
+    id: string
+    title: string
+    uri: string
+    kind: WikiSourceKind
+    file: string
+    createdAt: number
+    conversationId: string | null
+  }[] = []
+
+  for (const s of rows) {
+    const fileName = uniqueWikiExportFileName(s.title, s.id, usedNames)
+    const zipPath = `wiki-sources/${fileName}`
+    const body = getWikiPageBody(db, s.id)
+    const h1 = s.title.replace(/\r?\n/g, ' ').trim() || 'Untitled'
+    const md = `# ${h1}\n\n${body}\n`
+    archive.append(md, { name: zipPath })
+    manifestSources.push({
+      id: s.id,
+      title: s.title,
+      uri: s.uri,
+      kind: wikiKindFromUri(s.uri),
+      file: zipPath,
+      createdAt: s.createdAt,
+      conversationId: s.conversationId
+    })
+  }
+
+  const manifest = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    app: 'local-llm-desktop',
+    sourceCount: manifestSources.length,
+    sources: manifestSources
+  }
+  archive.append(JSON.stringify(manifest, null, 2), { name: 'wiki-manifest.json' })
+  archive.append(
+    [
+      '# Wiki export',
+      '',
+      'Generated by **Local LLM Desktop**. Each file under `wiki-sources/` matches the compiled wiki body shown in the app (sections built from indexed chunks).',
+      '',
+      'Metadata: `wiki-manifest.json` (ids, URIs, kinds, timestamps).',
+      ''
+    ].join('\n'),
+    { name: 'README.md' }
+  )
+
+  await archive.finalize()
+  await outputClosed
 }
