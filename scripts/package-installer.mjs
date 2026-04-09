@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Typecheck → electron-vite build → electron-builder **zip only** for the current OS (see `dist:installer` for NSIS/DMG/AppImage).
+ * Typecheck → electron-vite build → platform installer (no zip).
  *
- * Output: ./release/ when that folder can be cleared, otherwise ./release-builds/<timestamp>/
- * (Windows often locks release/win-unpacked — close Explorer / the app if you want a stable path).
+ * - Windows: NSIS Setup .exe (per-user or elevated install, Start Menu + desktop shortcuts)
+ * - macOS:     DMG (drag to Applications)
+ * - Linux:     .deb (apt/dpkg) + AppImage (portable); .rpm available via electron-builder --linux rpm on RPM hosts
  *
- * Code signing is disabled (CSC_IDENTITY_AUTO_DISCOVERY=false) so packaging works without
- * Developer Mode symlinks for winCodeSign.
+ * Output: ./release/ or ./release-builds/<timestamp>/ (same rules as package-zip.mjs).
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
@@ -41,7 +41,6 @@ function run(label, command, args) {
   }
 }
 
-/** Prefer release/; fall back to release-builds/<iso>/ if release is locked. */
 async function pickOutputDirRelative() {
   const releaseDir = join(root, 'release')
   for (let i = 0; i < 5; i++) {
@@ -62,6 +61,12 @@ async function pickOutputDirRelative() {
   return alt.replace(/\\/g, '/')
 }
 
+function installerLabel() {
+  if (process.platform === 'win32') return 'electron-builder (Windows NSIS installer)'
+  if (process.platform === 'darwin') return 'electron-builder (macOS DMG)'
+  return 'electron-builder (Linux .deb + AppImage)'
+}
+
 async function main() {
   run('Typecheck', npm, ['run', 'typecheck'])
   run('electron-vite build', npm, ['run', 'build'])
@@ -75,17 +80,28 @@ async function main() {
   process.env.CSC_IDENTITY_AUTO_DISCOVERY = 'false'
 
   const ebArgs = ['electron-builder', '--publish', 'never', `-c.directories.output=${outDir}`]
+
   if (process.platform === 'win32') {
-    ebArgs.push('--win', 'zip')
+    ebArgs.push('--win', 'nsis')
   } else if (process.platform === 'darwin') {
-    ebArgs.push('--mac', 'zip')
+    ebArgs.push('--mac', 'dmg')
   } else {
-    ebArgs.push('--linux', 'zip')
+    ebArgs.push('--linux', 'deb', 'AppImage')
   }
 
-  run('electron-builder (zip only)', npx, ebArgs)
+  run(installerLabel(), npx, ebArgs)
 
-  console.log(`\n✓ Done. Output directory: ${outDir}/ (zip + unpacked app)\n`)
+  console.log(`\n✓ Installer build finished. Output directory: ${outDir}/\n`)
+  if (process.platform === 'win32') {
+    console.log('  Look for: Local LLM Desktop-Setup-<version>.exe\n')
+  } else if (process.platform === 'darwin') {
+    console.log('  Look for: Local LLM Desktop-<version>-<arch>.dmg\n')
+  } else {
+    console.log('  Look for:\n')
+    console.log('    - Local LLM Desktop-<version>-linux-x64.deb  →  sudo apt install ./<file>.deb   (or: sudo dpkg -i <file>.deb)\n')
+    console.log('    - Local LLM Desktop-<version>-linux-x64.AppImage  →  chmod +x <file>.AppImage && ./<file>.AppImage\n')
+    console.log('  Optional RPM (Fedora/RHEL, after npm run build): npx electron-builder --publish never -c.directories.output=release --linux rpm\n')
+  }
 }
 
 main().catch((e) => {

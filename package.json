@@ -11,6 +11,7 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "dist:zip": "node scripts/package-zip.mjs",
+    "dist:installer": "node scripts/package-installer.mjs",
     "icons": "node scripts/generate-icons.mjs",
     "postinstall": "electron-rebuild -f -w better-sqlite3"
   },

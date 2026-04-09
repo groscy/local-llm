@@ -31,6 +31,9 @@ win:
     - target: zip
       arch:
         - x64
+    - target: nsis
+      arch:
+        - x64
   artifactName: ${productName}-${version}-win-${arch}.${ext}
 
 mac:
@@ -40,17 +43,63 @@ mac:
       arch:
         - x64
         - arm64
+    - target: dmg
+      arch:
+        - x64
+        - arm64
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
   category: public.app-category.developer-tools
 
 linux:
   icon: build/icon.png
+  maintainer: Local <noreply@local.invalid>
   target:
     - target: zip
       arch:
         - x64
+    - target: deb
+      arch:
+        - x64
+    - target: AppImage
+      arch:
+        - x64
+    - target: rpm
+      arch:
+        - x64
   artifactName: ${productName}-${version}-linux-${arch}.${ext}
   category: Development
+  synopsis: Local LLM desktop — Hugging Face, RAG wiki, optional training
+  description: |
+    Browse Hugging Face GGUF models, chat with a local llama.cpp or Ollama runtime,
+    use a local knowledge base and wiki, metrics, and optional LoRA training hooks.
+
+# Windows setup wizard (built with `npm run dist:installer` on Windows)
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: Local LLM Desktop
+  uninstallDisplayName: Local LLM Desktop
+  artifactName: ${productName}-Setup-${version}.${ext}
+  deleteAppDataOnUninstall: false
+  warningsAsErrors: false
+
+# macOS disk image (built with `npm run dist:installer` on macOS)
+dmg:
+  title: ${productName} ${version}
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+# Linux installers (built with `npm run dist:installer` on Linux — see USER-GUIDE §2)
+deb:
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+
+rpm:
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+
+appImage:
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
 
 # Do not publish to GitHub etc. from this config
 publish: null
