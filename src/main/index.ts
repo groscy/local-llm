@@ -9,6 +9,7 @@ import { initLogger, logLine } from './logger'
 import { registerIpc, type IpcContext } from './ipc/registerIpc'
 import type { RuntimeAdapter } from './services/runtime/types'
 import { ELECTRON_STORE_DEFAULTS } from './storeDefaults'
+import { stopIntegrationServer } from './services/integrationServer'
 
 const store = new Store<Record<string, unknown>>({
   defaults: { ...ELECTRON_STORE_DEFAULTS }
@@ -124,6 +125,10 @@ app.whenReady().then(() => {
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+app.on('before-quit', () => {
+  stopIntegrationServer()
 })
 
 app.on('window-all-closed', () => {

@@ -47,6 +47,8 @@ type Api = {
     revision: string
     filename: string
     destDir?: string
+    /** Shown as chat author when this file is loaded; defaults to repoId. */
+    chatDisplayName?: string
   }) => Promise<{ id: string; destPath: string }>
   hfDownloadStatus: (id: string) => Promise<unknown>
   hfCancelDownload: (id: string) => Promise<boolean>
@@ -89,7 +91,13 @@ type Api = {
     cid: string,
     role: 'user' | 'assistant' | 'system',
     content: string,
-    modelId?: string
+    modelId?: string,
+    usage?: {
+      promptTokens?: number
+      completionTokens?: number
+      promptIsEstimate?: boolean
+      completionIsEstimate?: boolean
+    }
   ) => Promise<unknown>
   kbIngestText: (title: string, uri: string, body: string) => Promise<unknown>
   kbIngestConversation: (conversationId: string) => Promise<unknown>

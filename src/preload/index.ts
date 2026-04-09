@@ -22,8 +22,14 @@ contextBridge.exposeInMainWorld('api', {
   hfSearch: (q: string, limit?: number) => invoke(IPC.HF_SEARCH, q, limit),
   hfRecommended: (limit?: number) => invoke(IPC.HF_RECOMMENDED, limit),
   hfModelInfo: (id: string) => invoke(IPC.HF_MODEL_INFO, id),
-  hfDownload: (p: { repoId: string; revision: string; filename: string; destDir?: string }) =>
-    invoke(IPC.HF_DOWNLOAD, p),
+  hfDownload: (p: {
+    repoId: string
+    revision: string
+    filename: string
+    destDir?: string
+    /** Defaults to repoId in main process when omitted. */
+    chatDisplayName?: string
+  }) => invoke(IPC.HF_DOWNLOAD, p),
   hfDownloadStatus: (id: string) => invoke(IPC.HF_DOWNLOAD_STATUS, id),
   hfCancelDownload: (id: string) => invoke(IPC.HF_CANCEL_DOWNLOAD, id),
   downloadsList: () => invoke(IPC.DOWNLOADS_LIST),
@@ -62,8 +68,18 @@ contextBridge.exposeInMainWorld('api', {
     invoke(IPC.CONVERSATION_RENAME, { id, title }),
   conversationDelete: (payload: { id: string; removeLinkedKnowledge: boolean }) =>
     invoke(IPC.CONVERSATION_DELETE, payload),
-  messageAppend: (cid: string, role: 'user' | 'assistant' | 'system', content: string, modelId?: string) =>
-    invoke(IPC.MESSAGE_APPEND, cid, role, content, modelId),
+  messageAppend: (
+    cid: string,
+    role: 'user' | 'assistant' | 'system',
+    content: string,
+    modelId?: string,
+    usage?: {
+      promptTokens?: number
+      completionTokens?: number
+      promptIsEstimate?: boolean
+      completionIsEstimate?: boolean
+    }
+  ) => invoke(IPC.MESSAGE_APPEND, cid, role, content, modelId, usage),
   kbIngestText: (title: string, uri: string, body: string) => invoke(IPC.KB_INGEST_TEXT, title, uri, body),
   kbIngestConversation: (conversationId: string) => invoke(IPC.KB_INGEST_CONVERSATION, conversationId),
   kbIngestFile: () => invoke(IPC.KB_INGEST_FILE),

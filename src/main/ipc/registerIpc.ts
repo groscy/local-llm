@@ -28,6 +28,7 @@ import { resolveLlamaBinary } from '../services/llamaDetect'
 import { collectHardwareSummary } from '../services/hardwareSummary'
 import { clearAllAppCaches, deleteAllChildrenInDirectory } from '../services/dataMaintenance'
 import { resetElectronStoreToFactory } from '../storeDefaults'
+import { configureIntegrationServer } from '../services/integrationServer'
 import { listGgufModelsInDir } from '../services/localModelsScan'
 
 const configSchema = z.object({
@@ -43,7 +44,13 @@ const configSchema = z.object({
   downloadsPinned: z.boolean().optional(),
   activityPinned: z.boolean().optional(),
   pinnedWidgetsSide: z.enum(['left', 'right', 'top', 'bottom']).optional(),
-  colorScheme: z.enum(['violet', 'teal', 'amber', 'rose', 'sky']).optional()
+  pinnedWidgetsWidthPx: z.number().min(160).max(1400).optional(),
+  pinnedWidgetsHeightPx: z.number().min(100).max(1200).optional(),
+  colorScheme: z.enum(['violet', 'teal', 'amber', 'rose', 'sky']).optional(),
+  chatMaxTokens: z.number().int().min(1).max(262_144).optional(),
+  integrationListenEnabled: z.boolean().optional(),
+  integrationPort: z.number().int().min(1024).max(65535).optional(),
+  integrationToken: z.string().max(256).optional()
 })
 
 function trainingScriptPath(): string {
@@ -111,6 +118,9 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(IPC.SET_CONFIG, (_e, raw: unknown) => {
     const parsed = configSchema.partial().safeParse(raw)
     if (!parsed.success) return { ok: false, error: parsed.error.message }
+    const reloadIntegration = Object.keys(parsed.data).some(
+      (k) => k === 'integrationListenEnabled' || k === 'integrationPort' || k === 'integrationToken'
+    )
     Object.entries(parsed.data).forEach(([k, v]) => {
       if (v === undefined || k === 'hfTokenEncrypted') return
       if (k === 'modelsDir' && v === null) {
@@ -119,6 +129,9 @@ export function registerIpc(ctx: IpcContext): void {
       }
       store.set(k, v as never)
     })
+    if (reloadIntegration) {
+      configureIntegrationServer({ store, getRuntime })
+    }
     return { ok: true }
   })
 
@@ -147,38 +160,45 @@ export function registerIpc(ctx: IpcContext): void {
     return hfModelDetail(db, repoId, getHfToken())
   })
 
-  ipcMain.handle(
-    IPC.HF_DOWNLOAD,
-    async (_e, payload: { repoId: string; revision: string; filename: string; destDir?: string }) => {
-      const destBase = payload.destDir ?? modelsDir()
-      if (!existsSync(destBase)) mkdirSync(destBase, { recursive: true })
-      const destPath = join(destBase, payload.filename.split('/').pop() ?? payload.filename)
-      const job = {
-        id: randomUUID(),
-        repoId: payload.repoId,
-        revision: payload.revision || 'main',
-        destPath,
-        status: 'pending' as const,
-        progress: 0,
-        bytesReceived: 0,
-        bytesTotal: 0
-      }
-      const token = getHfToken()
-      const url = `https://huggingface.co/${payload.repoId}/resolve/${encodeURIComponent(job.revision)}/${payload.filename
-        .split('/')
-        .map((s) => encodeURIComponent(s))
-        .join('/')}`
+  const hfDownloadPayload = z.object({
+    repoId: z.string().min(1),
+    revision: z.string().optional(),
+    filename: z.string().min(1),
+    destDir: z.string().optional(),
+    chatDisplayName: z.string().max(240).optional()
+  })
 
-      startDownload(
-        db,
-        { ...job, status: 'downloading' },
-        async () => url,
-        () => {},
-        token
-      )
-      return job
+  ipcMain.handle(IPC.HF_DOWNLOAD, async (_e, raw: unknown) => {
+    const payload = hfDownloadPayload.parse(raw)
+    const destBase = payload.destDir ?? modelsDir()
+    if (!existsSync(destBase)) mkdirSync(destBase, { recursive: true })
+    const destPath = join(destBase, payload.filename.split('/').pop() ?? payload.filename)
+    const job = {
+      id: randomUUID(),
+      repoId: payload.repoId,
+      revision: payload.revision || 'main',
+      destPath,
+      status: 'pending' as const,
+      progress: 0,
+      bytesReceived: 0,
+      bytesTotal: 0,
+      chatDisplayName: payload.chatDisplayName?.trim() || payload.repoId
     }
-  )
+    const token = getHfToken()
+    const url = `https://huggingface.co/${payload.repoId}/resolve/${encodeURIComponent(job.revision)}/${payload.filename
+      .split('/')
+      .map((s) => encodeURIComponent(s))
+      .join('/')}`
+
+    startDownload(
+      db,
+      { ...job, status: 'downloading' },
+      async () => url,
+      () => {},
+      token
+    )
+    return job
+  })
 
   ipcMain.handle(IPC.HF_DOWNLOAD_STATUS, (_e, jobId: string) => {
     const j = getActiveDownload(jobId)
@@ -316,6 +336,11 @@ export function registerIpc(ctx: IpcContext): void {
     ) => {
       const rt = getRuntime()
       if (!rt) throw new Error('Runtime not started')
+      const rawMax = store.get('chatMaxTokens')
+      const chatMaxTokens =
+        typeof rawMax === 'number' && Number.isFinite(rawMax)
+          ? Math.min(262_144, Math.max(1, Math.floor(rawMax)))
+          : 512
       const requestId = typeof payload.requestId === 'string' ? payload.requestId : ''
       const emit = (
         data:
@@ -328,6 +353,7 @@ export function registerIpc(ctx: IpcContext): void {
       }
       try {
         return await rt.chat(payload.messages, {
+          maxTokens: chatMaxTokens,
           ...(requestId
             ? {
                 onStreamChunk: (text: string) => emit({ kind: 'token', text }),
@@ -365,8 +391,19 @@ export function registerIpc(ctx: IpcContext): void {
   })
   ipcMain.handle(
     IPC.MESSAGE_APPEND,
-    (_e, cid: string, role: 'user' | 'assistant' | 'system', content: string, modelId?: string) =>
-      chatService.appendMessage(db, cid, role, content, modelId)
+    (
+      _e,
+      cid: string,
+      role: 'user' | 'assistant' | 'system',
+      content: string,
+      modelId?: string,
+      usage?: {
+        promptTokens?: number
+        completionTokens?: number
+        promptIsEstimate?: boolean
+        completionIsEstimate?: boolean
+      }
+    ) => chatService.appendMessage(db, cid, role, content, modelId, usage)
   )
 
   ipcMain.handle(
@@ -442,4 +479,6 @@ export function registerIpc(ctx: IpcContext): void {
     setHfToken(token)
     return { ok: true }
   })
+
+  configureIntegrationServer({ store, getRuntime })
 }
