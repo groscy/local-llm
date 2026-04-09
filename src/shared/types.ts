@@ -132,11 +132,62 @@ export interface KbChunk {
   ord: number
 }
 
+/** How a KB source was created; derived from its `uri` for library grouping. */
+export type WikiSourceKind = 'document' | 'extracted_note' | 'saved_chat' | 'other'
+
 export interface WikiTopic {
   id: string
   title: string
   chunkCount: number
+  kind: WikiSourceKind
 }
+
+/** One ranked KB hit per source for wiki / library search (snippet from best-matching chunk). */
+export interface KbSearchHit {
+  sourceId: string
+  sourceTitle: string
+  chunkId: string
+  heading: string | null
+  snippet: string
+  kind: WikiSourceKind
+}
+
+/** A defined term extracted from a `::: glossary` block in wiki Markdown. */
+export interface WikiGlossaryEntry {
+  term: string
+  definition: string
+}
+
+/** Phrase linked from chat text to a wiki/KB source (title, heading, or glossary term). */
+export interface WikiChatHighlightTerm {
+  sourceId: string
+  /** Match this text case-insensitively in chat (trimmed). */
+  phrase: string
+  /** Short preview for hover tooltip. */
+  snippet: string
+}
+
+/** Another KB source related by overlapping topical tokens (title + early chunks). */
+export interface WikiRelatedSource {
+  id: string
+  title: string
+  kind: WikiSourceKind
+  /** Shared tokens (4+ chars) linking this article to the related source. */
+  sharedTerms: string[]
+}
+
+/** Wiki article returned to the renderer (body has glossary fences removed). */
+export interface WikiPagePayload {
+  id: string
+  title: string
+  body: string
+  glossary: WikiGlossaryEntry[]
+  relatedSources: WikiRelatedSource[]
+}
+
+export type WikiExportZipResult =
+  | { ok: true; path: string }
+  | { ok: false; canceled: true }
 
 /** Nodes and edges for the in-app knowledge graph visualization (sources, chunks, wiki pages). */
 export type KnowledgeGraphNodeKind = 'source' | 'chunk' | 'wiki'
