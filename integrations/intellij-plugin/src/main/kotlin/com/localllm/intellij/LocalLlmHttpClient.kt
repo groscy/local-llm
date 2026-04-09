@@ -112,6 +112,62 @@ object LocalLlmHttpClient {
         return "connection refused" in m || "connectexception" in m
     }
 
+    /**
+     * POST /v1/plugin/report — fire-and-forget activity from the IDE to the desktop app (same auth as /v1/chat).
+     */
+    fun postPluginReport(
+        port: Int,
+        token: String,
+        source: String,
+        kind: String,
+        message: String?,
+        meta: Map<String, Any?> = emptyMap()
+    ) {
+        val body = buildPluginReportJson(source, kind, message, meta)
+        val uri = URI.create("http://127.0.0.1:$port/v1/plugin/report")
+        val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build()
+        val rb = HttpRequest.newBuilder(uri)
+            .timeout(Duration.ofSeconds(6))
+            .header("Content-Type", "application/json; charset=utf-8")
+        if (token.isNotBlank()) {
+            rb.header("Authorization", "Bearer $token")
+        }
+        val req = rb.POST(HttpRequest.BodyPublishers.ofString(body)).build()
+        try {
+            client.send(req, HttpResponse.BodyHandlers.discarding())
+        } catch (_: Exception) {
+            // Best-effort: desktop may be off or integration disabled
+        }
+    }
+
+    private fun jsonMetaValue(v: Any?): String = when (v) {
+        null -> "null"
+        is Number -> v.toString()
+        is Boolean -> if (v) "true" else "false"
+        else -> jsonString(v.toString())
+    }
+
+    private fun buildMetaJson(meta: Map<String, Any?>): String {
+        if (meta.isEmpty()) return "{}"
+        return meta.entries.joinToString(",", "{", "}") { (k, v) ->
+            "${jsonString(k)}:${jsonMetaValue(v)}"
+        }
+    }
+
+    private fun buildPluginReportJson(source: String, kind: String, message: String?, meta: Map<String, Any?>): String {
+        return buildString {
+            append("{\"source\":").append(jsonString(source))
+            append(",\"kind\":").append(jsonString(kind))
+            if (!message.isNullOrBlank()) {
+                append(",\"message\":").append(jsonString(message))
+            }
+            if (meta.isNotEmpty()) {
+                append(",\"meta\":").append(buildMetaJson(meta))
+            }
+            append('}')
+        }
+    }
+
     fun chat(port: Int, token: String, messages: List<ChatMessage>): ChatCompletion {
         val body = buildMessagesJson(messages)
         val uri = URI.create("http://127.0.0.1:$port/v1/chat")

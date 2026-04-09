@@ -9,6 +9,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -29,6 +30,7 @@ import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.scale.JBUIScale
+import com.intellij.util.ui.EmptyIcon
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
@@ -68,19 +70,34 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
     /** Captured when a send starts so we can restore prompt + attachments after a failure. */
     private var lastSendSnapshot: LastSendSnapshot? = null
 
-    /** Status icon: checkmark when bridge + runtime OK, cross otherwise; text scrolls/wraps separately. */
-    private val connectionIconLabel = JLabel().apply {
-        border = JBUI.Borders.empty(6, 0, 6, JBUIScale.scale(8))
+    private enum class ConnectionStepState {
+        /** Earlier step failed or not evaluated yet. */
+        WAITING,
+
+        /** Currently checking (spinner-style icon). */
+        PENDING,
+
+        OK,
+        FAIL
     }
 
-    private val connectionStatusText = JBTextArea(2, 24).apply {
+    private val connectionStepIconPlaceholder = EmptyIcon.create(JBUIScale.scale(16))
+
+    private val connectionStep1Icon = JLabel()
+    private val connectionStep1Text = JLabel().apply { font = JBFont.label() }
+    private val connectionStep2Icon = JLabel()
+    private val connectionStep2Text = JLabel().apply { font = JBFont.label() }
+    private val connectionStep3Icon = JLabel()
+    private val connectionStep3Text = JLabel().apply { font = JBFont.label() }
+
+    private val connectionDetailText = JBTextArea(2, 24).apply {
         isEditable = false
         isFocusable = false
         lineWrap = true
         wrapStyleWord = true
         font = JBFont.label()
         background = JBColor.PanelBackground
-        border = JBUI.Borders.empty(6, 0, 6, JBUIScale.scale(4))
+        border = JBUI.Borders.empty(4, 0, 0, 0)
         tabSize = 2
     }
 
@@ -128,7 +145,10 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
         border = JBUI.Borders.empty(0, 0, 0, JBUIScale.scale(4))
     }
 
-    private val applyStructuredEdits = JBCheckBox("Apply file replacement blocks from replies (with confirm)", true).apply {
+    private val applyStructuredEdits = JBCheckBox(
+        "Apply structured edits from replies (patches + full files, with confirm)",
+        true
+    ).apply {
         border = JBUI.Borders.empty(JBUIScale.scale(4), 0, 0, JBUIScale.scale(4))
     }
 
@@ -174,18 +194,45 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
         }
         applyPendingFromService()
 
-        val statusTextScroll = JBScrollPane(connectionStatusText).apply {
+        fun stepRow(icon: JLabel, text: JLabel): JPanel {
+            icon.preferredSize = Dimension(JBUIScale.scale(20), JBUIScale.scale(18))
+            icon.minimumSize = icon.preferredSize
+            return JPanel(FlowLayout(FlowLayout.LEFT, JBUIScale.scale(6), JBUIScale.scale(2))).apply {
+                isOpaque = false
+                add(icon)
+                add(text)
+            }
+        }
+
+        val connectionChecklistPanel = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            border = JBUI.Borders.empty(2, 0, 0, 0)
+            add(stepRow(connectionStep1Icon, connectionStep1Text))
+            add(Box.createVerticalStrut(JBUIScale.scale(2)))
+            add(stepRow(connectionStep2Icon, connectionStep2Text))
+            add(Box.createVerticalStrut(JBUIScale.scale(2)))
+            add(stepRow(connectionStep3Icon, connectionStep3Text))
+        }
+
+        val connectionBodyScroll = JBScrollPane(
+            JPanel(BorderLayout()).apply {
+                isOpaque = false
+                add(connectionChecklistPanel, BorderLayout.NORTH)
+                add(connectionDetailText, BorderLayout.CENTER)
+            }
+        ).apply {
             border = JBUI.Borders.empty()
             horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
             verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
-            minimumSize = Dimension(JBUIScale.scale(64), JBUIScale.scale(44))
-            preferredSize = Dimension(JBUIScale.scale(200), JBUIScale.scale(72))
+            minimumSize = Dimension(JBUIScale.scale(64), JBUIScale.scale(88))
+            preferredSize = Dimension(JBUIScale.scale(220), JBUIScale.scale(108))
         }
+
         val statusStrip = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLine(JBColor.border(), 1)
             background = JBColor.PanelBackground
-            add(connectionIconLabel, BorderLayout.WEST)
-            add(statusTextScroll, BorderLayout.CENTER)
+            add(connectionBodyScroll, BorderLayout.CENTER)
             add(
                 JPanel(FlowLayout(FlowLayout.RIGHT, JBUIScale.scale(6), 0)).apply {
                     isOpaque = false
@@ -363,50 +410,88 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
         return props.getValue("localLlm.integrationPort")?.toIntOrNull()?.coerceIn(1024, 65535) ?: 17373
     }
 
+    private fun applyConnectionStep(
+        iconLabel: JLabel,
+        textLabel: JLabel,
+        state: ConnectionStepState,
+        iconTooltip: String?
+    ) {
+        iconLabel.icon = when (state) {
+            ConnectionStepState.WAITING -> connectionStepIconPlaceholder
+            ConnectionStepState.PENDING -> AllIcons.Process.Step_1
+            ConnectionStepState.OK -> AllIcons.General.GreenCheckmark
+            ConnectionStepState.FAIL -> AllIcons.General.Error
+        }
+        iconLabel.toolTipText = iconTooltip
+        textLabel.foreground = when (state) {
+            ConnectionStepState.WAITING ->
+                JBColor(Color(0x8E8E8E), Color(0x7A7A7A))
+            ConnectionStepState.PENDING ->
+                JBColor(Color(0x303030), Color(0xBBBBBB))
+            ConnectionStepState.OK ->
+                JBColor(Color(0x1B5E20), Color(0xC8E6C9))
+            ConnectionStepState.FAIL ->
+                JBColor(Color(0xB71C1C), Color(0xFF8A80))
+        }
+    }
+
     private fun setConnectionCheckingUi() {
         val port = integrationPort()
-        connectionIconLabel.icon = AllIcons.Process.Step_1
-        connectionStatusText.foreground = JBColor(Color(90, 90, 90), Color(180, 180, 180))
-        connectionStatusText.text = "Checking 127.0.0.1:$port…"
-        connectionStatusText.caretPosition = 0
+        val host = "127.0.0.1:$port"
+        connectionStep1Text.text = "Reach integration server ($host)"
+        connectionStep2Text.text = "GET /health returns HTTP 200"
+        connectionStep3Text.text = "Model runtime is running"
+        applyConnectionStep(connectionStep1Icon, connectionStep1Text, ConnectionStepState.PENDING, null)
+        applyConnectionStep(connectionStep2Icon, connectionStep2Text, ConnectionStepState.WAITING, null)
+        applyConnectionStep(connectionStep3Icon, connectionStep3Text, ConnectionStepState.WAITING, null)
+        connectionDetailText.foreground = JBColor(Color(90, 90, 90), Color(180, 180, 180))
+        connectionDetailText.text = "Checking…"
+        connectionDetailText.caretPosition = 0
     }
 
     private fun applyBridgeHealthUi(health: LocalLlmHttpClient.BridgeHealth, port: Int) {
         val host = "127.0.0.1:$port"
+        connectionStep1Text.text = "Reach integration server ($host)"
+        connectionStep2Text.text = "GET /health returns HTTP 200"
+        val kind = health.runtimeKind?.ifBlank { null }
+        connectionStep3Text.text =
+            if (kind != null) "Model runtime is running ($kind)" else "Model runtime is running"
+
         when {
             !health.reachable -> {
-                connectionIconLabel.icon = AllIcons.General.Error
-                connectionStatusText.foreground = JBColor(Color(0xB71C1C), Color(0xFF8A80))
-                val detail = health.errorHint?.take(180) ?: "Connection refused or timed out"
-                connectionStatusText.text = buildString {
-                    append("Disconnected — $host\n")
-                    append(detail)
-                    append("\nOpen Local LLM Desktop → Settings → enable IDE integration and keep the app running.")
-                }
-                connectionStatusText.caretPosition = 0
+                applyConnectionStep(connectionStep1Icon, connectionStep1Text, ConnectionStepState.FAIL, "No TCP/HTTP response")
+                applyConnectionStep(connectionStep2Icon, connectionStep2Text, ConnectionStepState.WAITING, null)
+                applyConnectionStep(connectionStep3Icon, connectionStep3Text, ConnectionStepState.WAITING, null)
+                val detail = health.errorHint?.take(280) ?: "Connection refused or timed out"
+                connectionDetailText.foreground = JBColor(Color(0xB71C1C), Color(0xFF8A80))
+                connectionDetailText.text =
+                    "$detail\nEnable IDE integration under Local LLM Desktop → Settings and keep the app running."
             }
             health.httpStatus != 200 -> {
-                connectionIconLabel.icon = AllIcons.General.Error
-                connectionStatusText.foreground = JBColor(Color(0xE65100), Color(0xFFCC80))
-                connectionStatusText.text =
-                    "Bridge responded with HTTP ${health.httpStatus} — $host\n${health.errorHint ?: ""}"
-                connectionStatusText.caretPosition = 0
+                applyConnectionStep(connectionStep1Icon, connectionStep1Text, ConnectionStepState.OK, null)
+                applyConnectionStep(connectionStep2Icon, connectionStep2Text, ConnectionStepState.FAIL, "Non-200 response")
+                applyConnectionStep(connectionStep3Icon, connectionStep3Text, ConnectionStepState.WAITING, null)
+                connectionDetailText.foreground = JBColor(Color(0xE65100), Color(0xFFCC80))
+                connectionDetailText.text =
+                    "Bridge responded with HTTP ${health.httpStatus} — $host\n${health.errorHint ?: ""}".trimEnd()
             }
             health.runtimeRunning == true -> {
-                connectionIconLabel.icon = AllIcons.General.GreenCheckmark
-                connectionStatusText.foreground = JBColor(Color(0x1B5E20), Color(0xA5D6A7))
-                val kind = health.runtimeKind?.ifBlank { null } ?: "?"
-                connectionStatusText.text = "Connected — $host · Model runtime running ($kind)"
-                connectionStatusText.caretPosition = 0
+                applyConnectionStep(connectionStep1Icon, connectionStep1Text, ConnectionStepState.OK, null)
+                applyConnectionStep(connectionStep2Icon, connectionStep2Text, ConnectionStepState.OK, null)
+                applyConnectionStep(connectionStep3Icon, connectionStep3Text, ConnectionStepState.OK, null)
+                connectionDetailText.foreground = JBColor(Color(0x1B5E20), Color(0xA5D6A7))
+                connectionDetailText.text = "Ready — chat requests use the desktop runtime."
             }
             else -> {
-                connectionIconLabel.icon = AllIcons.General.Error
-                connectionStatusText.foreground = JBColor(Color(0x6A1B9A), Color(0xCE93D8))
-                connectionStatusText.text =
-                    "Bridge OK — $host · Model runtime stopped — start Run in Local LLM Desktop"
-                connectionStatusText.caretPosition = 0
+                applyConnectionStep(connectionStep1Icon, connectionStep1Text, ConnectionStepState.OK, null)
+                applyConnectionStep(connectionStep2Icon, connectionStep2Text, ConnectionStepState.OK, null)
+                applyConnectionStep(connectionStep3Icon, connectionStep3Text, ConnectionStepState.FAIL, "Runtime not started")
+                connectionDetailText.foreground = JBColor(Color(0x6A1B9A), Color(0xCE93D8))
+                connectionDetailText.text =
+                    "Bridge is up but no model is running. Open Run in Local LLM Desktop and start your model."
             }
         }
+        connectionDetailText.caretPosition = 0
     }
 
     private fun refreshConnectionStatus() {
@@ -477,6 +562,15 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
         logArea.caretPosition = logArea.document.length
     }
 
+    /** Best-effort POST to Local LLM Desktop so the Electron app can show IDE activity (pinned Activity widget). */
+    private fun notifyDesktop(kind: String, message: String?, meta: Map<String, Any?> = emptyMap()) {
+        val port = integrationPort()
+        val token = PropertiesComponent.getInstance().getValue("localLlm.integrationToken") ?: ""
+        ApplicationManager.getApplication().executeOnPooledThread {
+            LocalLlmHttpClient.postPluginReport(port, token, "intellij", kind, message, meta)
+        }
+    }
+
     private fun finishSendTurn(success: Boolean) {
         ApplicationManager.getApplication().invokeLater {
             if (project.isDisposed) return@invokeLater
@@ -543,7 +637,7 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
                     }
                     indicator.text = "Preparing message…"
                     val bundled = ApplicationManager.getApplication().runReadAction<PromptAttachmentBundler.Result> {
-                        PromptAttachmentBundler.bundle(basePrompt, files, indicator)
+                        PromptAttachmentBundler.bundle(project, basePrompt, files, indicator)
                     }
                     if (bundled.summaryLines.isNotEmpty()) {
                         val summary = bundled.summaryLines.joinToString("\n") { "  · $it" }
@@ -558,12 +652,14 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
                         token = token,
                         userMessage = bundled.augmentedUserMessage,
                         includeGraph = includeGraph.isSelected,
+                        attachmentCount = files.size,
                         onLog = { line ->
                             ApplicationManager.getApplication().invokeLater { appendLog(line) }
                         }
                     )
                 } catch (_: ProcessCanceledException) {
                     ApplicationManager.getApplication().invokeLater {
+                        notifyDesktop("send_cancelled", "Send cancelled", mapOf("project" to project.name))
                         appendLog("(Cancelled.)\n\n")
                         finishSendTurn(false)
                     }
@@ -571,12 +667,18 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
                     ApplicationManager.getApplication().invokeLater {
                         val net = e is IOException || LocalLlmHttpClient.isConnectFailure(e)
                         if (net) {
+                            notifyDesktop(
+                                "chat_failed",
+                                e.message?.take(200),
+                                mapOf("project" to project.name, "reason" to "prepare_or_network")
+                            )
                             appendLog(
                                 "Connection error · 127.0.0.1:$port · ${e.javaClass.simpleName}: ${e.message ?: ""}\n" +
                                     "See the status bar at the top of this tool window. Enable IDE integration in Local LLM Desktop.\n\n"
                             )
                             refreshConnectionStatus()
                         } else {
+                            notifyDesktop("chat_failed", e.message?.take(200), mapOf("project" to project.name))
                             appendLog("Error: ${e.message ?: e}\n\n")
                             Messages.showErrorDialog(project, e.message ?: e.toString(), "Local LLM")
                         }
@@ -608,6 +710,7 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
         token: String,
         userMessage: String,
         includeGraph: Boolean,
+        attachmentCount: Int,
         onLog: (String) -> Unit
     ) {
         val graphText = if (includeGraph) {
@@ -631,11 +734,21 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
             val completion = try {
                 LocalLlmHttpClient.chat(port, token, messages)
             } catch (e: LocalLlmHttpClient.LocalLlmHttpException) {
+                notifyDesktop(
+                    "chat_failed",
+                    "HTTP ${e.status}",
+                    mapOf("project" to project.name, "httpStatus" to e.status)
+                )
                 onLog("HTTP ${e.status}: ${e.body.take(800)}\n\n")
                 ApplicationManager.getApplication().invokeLater { refreshConnectionStatus() }
                 finishSendTurn(false)
                 return
             } catch (e: IOException) {
+                notifyDesktop(
+                    "chat_failed",
+                    e.message?.take(200),
+                    mapOf("project" to project.name, "reason" to "io")
+                )
                 onLog(
                     "Cannot reach Local LLM Desktop at 127.0.0.1:$port — ${e.javaClass.simpleName}: ${e.message ?: ""}\n" +
                         "Check the connection strip above (GET /health). Enable IDE integration in the desktop app.\n\n"
@@ -645,6 +758,11 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
                 return
             } catch (e: Exception) {
                 if (LocalLlmHttpClient.isConnectFailure(e)) {
+                    notifyDesktop(
+                        "chat_failed",
+                        e.message?.take(200),
+                        mapOf("project" to project.name, "reason" to "connect")
+                    )
                     onLog(
                         "Cannot reach Local LLM Desktop at 127.0.0.1:$port — ${e.javaClass.simpleName}: ${e.message ?: ""}\n" +
                             "Check the connection strip above.\n\n"
@@ -660,6 +778,15 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
                 is ClarifyResponseParser.Parsed.DirectAnswer -> {
                     onLog("Model:\n${parsed.text}\n\n")
                     onLog("${formatTokenUsageLine(completion, messages)}\n\n")
+                    val meta = mutableMapOf<String, Any?>(
+                        "project" to project.name,
+                        "attachments" to attachmentCount,
+                        "includeGraph" to includeGraph,
+                        "clarificationRounds" to round
+                    )
+                    completion.promptTokens?.let { meta["promptTokens"] = it }
+                    completion.completionTokens?.let { meta["completionTokens"] = it }
+                    notifyDesktop("chat_completed", project.name, meta)
                     offerApplyStructuredEdits(parsed.text) { finishSendTurn(true) }
                     return
                 }
@@ -691,12 +818,14 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
                         }
                     }
                     if (!latch.await(15, TimeUnit.MINUTES)) {
+                        notifyDesktop("send_cancelled", "Clarification timed out", mapOf("project" to project.name))
                         onLog("(Timed out waiting for clarification.)\n\n")
                         finishSendTurn(false)
                         return
                     }
                     val clarificationText = answers
                     if (clarificationText.isNullOrBlank()) {
+                        notifyDesktop("send_cancelled", "Clarification cancelled", mapOf("project" to project.name))
                         onLog("(Cancelled — no clarification provided.)\n\n")
                         finishSendTurn(false)
                         return
@@ -707,33 +836,42 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
                 }
             }
         }
+        notifyDesktop("chat_failed", "Max clarification rounds", mapOf("project" to project.name))
         onLog("Model: (max clarification rounds reached — try a more specific prompt.)\n\n")
         finishSendTurn(false)
     }
 
     /**
-     * If the model reply contains <<<LOCAL_LLM_FILE>>> blocks and the user opted in, prompt and write files
-     * under the project root (full replacement per file).
+     * If the model reply contains LOCAL_LLM_PATCH and/or LOCAL_LLM_FILE blocks and the user opted in,
+     * prompt and apply under the project root (patches = search/replace; files = full replace).
      */
     private fun offerApplyStructuredEdits(modelReply: String, onDone: () -> Unit) {
         if (!applyStructuredEdits.isSelected) {
             onDone()
             return
         }
-        val blocks = StructuredApplyParser.parse(modelReply)
-        if (blocks.isEmpty()) {
+        val edits = StructuredApplyParser.parseStructuredEdits(modelReply)
+        if (edits.isEmpty()) {
             onDone()
             return
         }
         ApplicationManager.getApplication().invokeLater {
+            val patchCount = edits.count { it is StructuredApplyParser.StructuredEdit.Patch }
+            val fileCount = edits.count { it is StructuredApplyParser.StructuredEdit.FullFile }
             val msg = buildString {
                 appendLine(
-                    "The model returned ${blocks.size} file block(s). Each path is replaced entirely on disk (UTF-8). " +
-                        "New directories are created if needed."
+                    "The model returned ${edits.size} structured edit(s): " +
+                        "$patchCount patch(es) (search/replace), $fileCount full file(s). " +
+                        "Full files replace the entire path on disk (UTF-8); patches require an existing file."
                 )
                 appendLine()
-                for (b in blocks) {
-                    appendLine("· ${b.path}")
+                for (e in edits) {
+                    when (e) {
+                        is StructuredApplyParser.StructuredEdit.Patch ->
+                            appendLine("· PATCH ${e.path} (${e.hunks.size} hunk(s))")
+                        is StructuredApplyParser.StructuredEdit.FullFile ->
+                            appendLine("· FILE  ${e.path} (full replace)")
+                    }
                 }
                 appendLine()
                 append("Apply these changes?")
@@ -741,31 +879,60 @@ class LocalLlmToolWindowPanel(private val project: Project) : JPanel(BorderLayou
             val ok = Messages.showYesNoDialog(
                 project,
                 msg,
-                "Local LLM — apply files",
+                "Local LLM — apply to project",
                 Messages.getQuestionIcon()
             )
             if (ok != Messages.YES) {
-                appendLog("(File apply cancelled.)\n\n")
+                notifyDesktop(
+                    "apply_cancelled",
+                    "User declined structured apply",
+                    mapOf("project" to project.name, "edits" to edits.size)
+                )
+                appendLog("(Apply cancelled.)\n\n")
                 onDone()
                 return@invokeLater
             }
             try {
                 val results = WriteCommandAction.writeCommandAction(project).compute<List<ProjectFileApplyService.ApplyResult>, RuntimeException> {
-                    ProjectFileApplyService.applyAll(project, blocks)
+                    ProjectFileApplyService.applyStructuredEdits(project, edits)
                 }
                 val lines = results.joinToString("\n") { r ->
                     if (r.ok) "  ✓ ${r.path}" else "  ✗ ${r.path}: ${r.message}"
                 }
                 appendLog("Apply results:\n$lines\n\n")
+                val okN = results.count { it.ok }
+                val failN = results.size - okN
+                notifyDesktop(
+                    "apply_completed",
+                    "${project.name}: $okN ok, $failN failed",
+                    mapOf(
+                        "project" to project.name,
+                        "filesTotal" to results.size,
+                        "filesOk" to okN,
+                        "filesFailed" to failN
+                    )
+                )
                 val anyFail = results.any { !it.ok }
                 if (anyFail) {
                     Messages.showWarningDialog(
                         project,
-                        "Some files could not be written. See the conversation log for details.",
+                        "Some edits could not be applied. See the conversation log for details.",
                         "Local LLM"
                     )
                 }
+                val firstOkPath = results.firstOrNull { it.ok }?.path
+                val base = project.basePath
+                if (firstOkPath != null && base != null) {
+                    val target = ProjectFileApplyService.resolveUnderProject(base, firstOkPath)
+                    if (target != null) {
+                        val vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(target.toFile())
+                        if (vf != null) {
+                            OpenFileDescriptor(project, vf).navigate(true)
+                        }
+                    }
+                }
             } catch (e: Exception) {
+                notifyDesktop("apply_failed", e.message?.take(200), mapOf("project" to project.name))
                 appendLog("Apply error: ${e.message ?: e}\n\n")
                 Messages.showErrorDialog(project, e.message ?: e.toString(), "Local LLM")
             }

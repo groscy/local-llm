@@ -3,8 +3,10 @@ package com.localllm.intellij
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
 import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import java.nio.charset.StandardCharsets
+import java.nio.file.Paths
 
 /**
  * Reads selected [VirtualFile]s into a single user-message appendix (path + fenced content).
@@ -18,6 +20,7 @@ object PromptAttachmentBundler {
     data class Result(val augmentedUserMessage: String, val summaryLines: List<String>)
 
     fun bundle(
+        project: Project,
         basePrompt: String,
         files: List<VirtualFile>,
         indicator: ProgressIndicator?
@@ -32,6 +35,7 @@ object PromptAttachmentBundler {
 
         var totalUsed = 0
         val ftm = FileTypeManager.getInstance()
+        val relPathsForFooter = linkedSetOf<String>()
 
         for (file in files) {
             indicator?.checkCanceled()
@@ -54,8 +58,13 @@ object PromptAttachmentBundler {
             } else {
                 raw
             }
+            val rel = relativeProjectPath(project, file)
+            if (rel != null) {
+                relPathsForFooter.add(rel)
+            }
+            val pathLabel = rel ?: file.path
             val block = buildString {
-                appendLine("--- File: ${file.path} ---")
+                appendLine("--- File: $pathLabel ---")
                 appendLine("```")
                 appendLine(truncated.trimEnd())
                 appendLine("```")
@@ -70,7 +79,33 @@ object PromptAttachmentBundler {
             summary.add("${file.name} (${raw.length.coerceAtMost(MAX_PER_FILE_CHARS)} chars)")
         }
 
+        if (relPathsForFooter.isNotEmpty()) {
+            val footer = buildString {
+                appendLine("--- Project-relative paths (use in LOCAL_LLM_PATCH / LOCAL_LLM_FILE `path=` attributes) ---")
+                for (p in relPathsForFooter) {
+                    appendLine("- $p")
+                }
+                appendLine()
+            }
+            if (totalUsed + footer.length <= MAX_TOTAL_APPEND_CHARS) {
+                sb.append(footer)
+                totalUsed += footer.length
+            }
+        }
+
         return Result(sb.toString().trimEnd(), summary)
+    }
+
+    private fun relativeProjectPath(project: Project, file: VirtualFile): String? {
+        val base = project.basePath ?: return null
+        return try {
+            val bp = Paths.get(base).normalize()
+            val fp = Paths.get(file.path).normalize()
+            if (!fp.startsWith(bp)) return null
+            bp.relativize(fp).toString().replace('\\', '/')
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun shouldSkipFile(file: VirtualFile, ftm: FileTypeManager): Boolean {
