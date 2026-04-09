@@ -134,6 +134,12 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       ALTER TABLE messages ADD COLUMN prompt_tokens_estimated INTEGER;
       ALTER TABLE messages ADD COLUMN completion_tokens_estimated INTEGER;
     `
+  },
+  {
+    version: 6,
+    sql: `
+      ALTER TABLE metrics_samples ADD COLUMN avg_prompt_to_response_ms REAL;
+    `
   }
 ]
 
