@@ -13,6 +13,7 @@ import type { ColorSchemeId } from '@shared/colorScheme'
 import { COLOR_SCHEME_IDS, COLOR_SCHEME_LABELS, DEFAULT_COLOR_SCHEME, parseColorScheme } from '@shared/colorScheme'
 import { DownloadProgressBar, downloadRowProgressPct, fileNameFromPath, formatBytes } from './downloadProgressUi'
 import { ActivityPinnedWidget, type ActivityChatTokens } from './ActivityPinnedWidget'
+import type { ActivityTokenHistoryPoint } from './ActivityTokenSessionChart'
 import { ChatRichContent } from './ChatRichContent'
 import { DownloadsPinnedWidget } from './DownloadsPinnedWidget'
 import { FloatingDots } from './FloatingDots'
@@ -45,15 +46,20 @@ type MainView = 'chat' | 'wiki'
 type ToolDrawer = 'hf' | 'runtime' | 'train' | 'metrics' | 'settings' | null
 type HfLibraryMode = 'recommended' | 'search'
 type HfModelSortKey = 'downloads' | 'likes' | 'size'
+type PinnedWidgetsSide = 'left' | 'right' | 'top' | 'bottom'
 
 const HF_RECOMMENDED_FETCH_LIMIT = 72
 
 const LS_SLIDE_CONV_W = 'slideConvWidthPx'
 const LS_SLIDE_KB_W = 'slideKbWidthPx'
+const LS_SLIDE_CONV_EDGE = 'slideConvEdge'
+const LS_SLIDE_KB_EDGE = 'slideKbEdge'
 const SLIDE_CONV_MIN = 220
 const SLIDE_CONV_DEFAULT = 300
 const SLIDE_KB_MIN = 240
 const SLIDE_KB_DEFAULT = 320
+
+type SlidePanelEdge = 'left' | 'right'
 
 function readSlideWidthPx(key: string, fallback: number): number {
   if (typeof window === 'undefined') return fallback
@@ -65,6 +71,25 @@ function readSlideWidthPx(key: string, fallback: number): number {
   }
 }
 
+function readSlideEdge(key: string, fallback: SlidePanelEdge): SlidePanelEdge {
+  if (typeof window === 'undefined') return fallback
+  try {
+    const v = localStorage.getItem(key)
+    if (v === 'left' || v === 'right') return v
+  } catch {
+    /* ignore */
+  }
+  return fallback
+}
+
+function persistSlideEdge(key: string, edge: SlidePanelEdge): void {
+  try {
+    localStorage.setItem(key, edge)
+  } catch {
+    /* ignore */
+  }
+}
+
 function clampSlideConv(px: number): number {
   const max = Math.max(SLIDE_CONV_MIN, Math.floor(window.innerWidth * 0.92))
   return Math.min(Math.max(Math.round(px), SLIDE_CONV_MIN), max)
@@ -73,6 +98,56 @@ function clampSlideConv(px: number): number {
 function clampSlideKb(px: number): number {
   const max = Math.max(SLIDE_KB_MIN, Math.floor(window.innerWidth * 0.92))
   return Math.min(Math.max(Math.round(px), SLIDE_KB_MIN), max)
+}
+
+const PINNED_W_MIN = 200
+const PINNED_W_DEFAULT = 308
+const PINNED_H_MIN = 140
+const PINNED_H_DEFAULT = 360
+
+function clampPinnedWidth(px: number): number {
+  const max = Math.max(PINNED_W_MIN + 40, Math.floor(window.innerWidth * 0.58))
+  return Math.min(Math.max(Math.round(px), PINNED_W_MIN), max)
+}
+
+function clampPinnedHeight(px: number): number {
+  const max = Math.max(PINNED_H_MIN + 40, Math.min(620, Math.floor(window.innerHeight * 0.65)))
+  return Math.min(Math.max(Math.round(px), PINNED_H_MIN), max)
+}
+
+const CHAT_MAX_TOKENS_MIN = 1
+const CHAT_MAX_TOKENS_MAX = 262_144
+const CHAT_MAX_TOKENS_DEFAULT = 512
+
+function clampChatMaxTokens(n: number): number {
+  if (!Number.isFinite(n)) return CHAT_MAX_TOKENS_DEFAULT
+  return Math.min(CHAT_MAX_TOKENS_MAX, Math.max(CHAT_MAX_TOKENS_MIN, Math.floor(n)))
+}
+
+const INTEGRATION_PORT_DEFAULT = 17373
+
+function clampIntegrationPort(n: number): number {
+  if (!Number.isFinite(n)) return INTEGRATION_PORT_DEFAULT
+  return Math.min(65535, Math.max(1024, Math.floor(n)))
+}
+
+function pinnedWidgetsAsideStyle(
+  narrowStack: boolean,
+  side: PinnedWidgetsSide,
+  widthPx: number,
+  heightPx: number
+): React.CSSProperties {
+  if (narrowStack && (side === 'left' || side === 'right')) {
+    return { width: '100%', maxHeight: clampPinnedHeight(heightPx) }
+  }
+  if (side === 'left' || side === 'right') {
+    return { width: clampPinnedWidth(widthPx) }
+  }
+  return {
+    width: '100%',
+    height: clampPinnedHeight(heightPx),
+    maxHeight: clampPinnedHeight(heightPx)
+  }
 }
 
 function useMediaQuery(query: string): boolean {
@@ -123,8 +198,6 @@ function parseNonNegativeFloat(raw: string): number | undefined {
   return n
 }
 
-type PinnedWidgetsSide = 'left' | 'right' | 'top' | 'bottom'
-
 function parsePinnedWidgetsSide(raw: unknown): PinnedWidgetsSide {
   if (raw === 'left' || raw === 'right' || raw === 'top' || raw === 'bottom') return raw
   return 'left'
@@ -134,6 +207,70 @@ function runtimeKindLabel(kind: RuntimeStatus['kind']): string {
   if (kind === 'ollama') return 'Ollama'
   if (kind === 'llamacpp') return 'llama.cpp server'
   return 'None'
+}
+
+/** Chat row in the viewport (may omit DB-only fields while a user message is optimistic). */
+type ChatMessageVm = {
+  role: string
+  content: string
+  promptTokens?: number | null
+  completionTokens?: number | null
+  promptTokensIsEstimate?: boolean | null
+  completionTokensIsEstimate?: boolean | null
+}
+
+function charTokenEst(s: string): number {
+  return Math.max(1, Math.ceil(s.length / 4))
+}
+
+function bubbleTokenLine(m: ChatMessageVm): string {
+  const r = m.role
+  if (r === 'user') {
+    if (m.promptTokens != null && Number.isFinite(m.promptTokens)) {
+      const n = Math.round(m.promptTokens)
+      return `${m.promptTokensIsEstimate ? 'Sent ~' : 'Sent '}${n} tok`
+    }
+    return `Sent ~${charTokenEst(m.content)} tok`
+  }
+  if (r === 'assistant') {
+    if (m.completionTokens != null && Number.isFinite(m.completionTokens)) {
+      const n = Math.round(m.completionTokens)
+      return `${m.completionTokensIsEstimate ? 'Generated ~' : 'Generated '}${n} tok`
+    }
+    return `Generated ~${charTokenEst(m.content)} tok`
+  }
+  return `~${charTokenEst(m.content)} tok`
+}
+
+function streamingTokenFoot(tokens: ActivityChatTokens): string {
+  const fmt = (n: number, est: boolean) => `${est ? '~' : ''}${Math.max(0, Math.round(n))}`
+  return `Sent ${fmt(tokens.prompt, tokens.promptIsEstimate)} tok · Generated ${fmt(tokens.completion, tokens.completionIsEstimate)} tok`
+}
+
+function looksLikeLocalModelFilePath(s: string): boolean {
+  return s.includes('/') || s.includes('\\') || /^[a-zA-Z]:[\\/]/.test(s)
+}
+
+function localModelPathsEqual(a: string, b: string, winPlatform: boolean): boolean {
+  const na = a.trim().replace(/\\/g, '/')
+  const nb = b.trim().replace(/\\/g, '/')
+  return winPlatform ? na.toLowerCase() === nb.toLowerCase() : na === nb
+}
+
+/** Hugging Face model id (or custom label) saved on download; shown as chat author when that file is loaded. */
+function chatAuthorLabelForModelPath(
+  modelPath: string | undefined,
+  downloads: DownloadRow[],
+  winPlatform: boolean
+): string | null {
+  const raw = modelPath?.trim()
+  if (!raw || !looksLikeLocalModelFilePath(raw)) return null
+  for (const d of downloads) {
+    const label = d.chat_display_name?.trim()
+    if (!label) continue
+    if (localModelPathsEqual(d.local_path, raw, winPlatform)) return label
+  }
+  return null
 }
 
 function downloadStatusClass(status: string): string {
@@ -257,6 +394,43 @@ function IconSend(): React.ReactElement {
   )
 }
 
+/** Pinned widget bar docked on the left (narrow strip beside main). */
+function IconDockLeft(): React.ReactElement {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="4" width="5" height="16" rx="1.5" />
+      <rect x="10" y="4" width="11" height="16" rx="1.5" />
+    </svg>
+  )
+}
+
+function IconDockRight(): React.ReactElement {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="4" width="11" height="16" rx="1.5" />
+      <rect x="16" y="4" width="5" height="16" rx="1.5" />
+    </svg>
+  )
+}
+
+function IconDockTop(): React.ReactElement {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="4" width="18" height="5" rx="1.5" />
+      <rect x="3" y="11" width="18" height="9" rx="1.5" />
+    </svg>
+  )
+}
+
+function IconDockBottom(): React.ReactElement {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="4" width="18" height="9" rx="1.5" />
+      <rect x="3" y="15" width="18" height="5" rx="1.5" />
+    </svg>
+  )
+}
+
 export default function App(): React.ReactElement {
   const [mainView, setMainView] = useState<MainView>('chat')
   const [drawer, setDrawer] = useState<ToolDrawer>(null)
@@ -328,7 +502,7 @@ export default function App(): React.ReactElement {
   const [renamingConvId, setRenamingConvId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [saveChatKbBusy, setSaveChatKbBusy] = useState(false)
-  const [messages, setMessages] = useState<{ role: string; content: string }[]>([])
+  const [messages, setMessages] = useState<ChatMessageVm[]>([])
   const [draft, setDraft] = useState('')
   const [ragQuery, setRagQuery] = useState('')
   const [ragSnippets, setRagSnippets] = useState<string[]>([])
@@ -358,6 +532,10 @@ export default function App(): React.ReactElement {
   const [trainDataset, setTrainDataset] = useState('')
   const [hfTokenInput, setHfTokenInput] = useState('')
   const [colorScheme, setColorScheme] = useState<ColorSchemeId>(DEFAULT_COLOR_SCHEME)
+  const [chatMaxTokensDraft, setChatMaxTokensDraft] = useState(String(CHAT_MAX_TOKENS_DEFAULT))
+  const [integrationListenEnabled, setIntegrationListenEnabled] = useState(false)
+  const [integrationPortDraft, setIntegrationPortDraft] = useState(String(INTEGRATION_PORT_DEFAULT))
+  const [integrationTokenDraft, setIntegrationTokenDraft] = useState('')
   const [modelsInstallPathDraft, setModelsInstallPathDraft] = useState('')
   const [modelsDirSaveErr, setModelsDirSaveErr] = useState<string | null>(null)
   const [settingsMaintenanceBusy, setSettingsMaintenanceBusy] = useState<
@@ -384,9 +562,27 @@ export default function App(): React.ReactElement {
   const [slideKbWidthPx, setSlideKbWidthPx] = useState(() =>
     readSlideWidthPx(LS_SLIDE_KB_W, SLIDE_KB_DEFAULT)
   )
+  const [slideConvEdge, setSlideConvEdge] = useState<SlidePanelEdge>(() =>
+    readSlideEdge(LS_SLIDE_CONV_EDGE, 'left')
+  )
+  const [slideKbEdge, setSlideKbEdge] = useState<SlidePanelEdge>(() => readSlideEdge(LS_SLIDE_KB_EDGE, 'right'))
   const [slidePanelResizing, setSlidePanelResizing] = useState<null | 'conv' | 'kb'>(null)
+  const [pinnedBarResizing, setPinnedBarResizing] = useState(false)
   const convWRef = useRef(slideConvWidthPx)
   const kbWRef = useRef(slideKbWidthPx)
+  const slideConvEdgeRef = useRef(slideConvEdge)
+  const slideKbEdgeRef = useRef(slideKbEdge)
+  const pinnedWRef = useRef(PINNED_W_DEFAULT)
+  const pinnedHRef = useRef(PINNED_H_DEFAULT)
+  const pinnedWidgetsSideRef = useRef<PinnedWidgetsSide>('left')
+  const narrowForPinnedRef = useRef(false)
+  const pinnedBarResizeRef = useRef<{
+    startX: number
+    startY: number
+    startW: number
+    startH: number
+  } | null>(null)
+  narrowForPinnedRef.current = narrowSlideConv
 
   useEffect(() => {
     convWRef.current = slideConvWidthPx
@@ -397,9 +593,30 @@ export default function App(): React.ReactElement {
   }, [slideKbWidthPx])
 
   useEffect(() => {
+    slideConvEdgeRef.current = slideConvEdge
+  }, [slideConvEdge])
+
+  useEffect(() => {
+    slideKbEdgeRef.current = slideKbEdge
+  }, [slideKbEdge])
+
+  const [pinnedWidgetsWidthPx, setPinnedWidgetsWidthPx] = useState(PINNED_W_DEFAULT)
+  const [pinnedWidgetsHeightPx, setPinnedWidgetsHeightPx] = useState(PINNED_H_DEFAULT)
+
+  useEffect(() => {
+    pinnedWRef.current = pinnedWidgetsWidthPx
+  }, [pinnedWidgetsWidthPx])
+
+  useEffect(() => {
+    pinnedHRef.current = pinnedWidgetsHeightPx
+  }, [pinnedWidgetsHeightPx])
+
+  useEffect(() => {
     const onResize = (): void => {
       setSlideConvWidthPx((w) => clampSlideConv(w))
       setSlideKbWidthPx((w) => clampSlideKb(w))
+      setPinnedWidgetsWidthPx((w) => clampPinnedWidth(w))
+      setPinnedWidgetsHeightPx((h) => clampPinnedHeight(h))
     }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
@@ -410,11 +627,17 @@ export default function App(): React.ReactElement {
     const kind = slidePanelResizing
     const onMove = (e: PointerEvent): void => {
       if (kind === 'conv') {
-        const v = clampSlideConv(e.clientX)
+        const v =
+          slideConvEdgeRef.current === 'left'
+            ? clampSlideConv(e.clientX)
+            : clampSlideConv(window.innerWidth - e.clientX)
         convWRef.current = v
         setSlideConvWidthPx(v)
       } else {
-        const v = clampSlideKb(window.innerWidth - e.clientX)
+        const v =
+          slideKbEdgeRef.current === 'right'
+            ? clampSlideKb(window.innerWidth - e.clientX)
+            : clampSlideKb(e.clientX)
         kbWRef.current = v
         setSlideKbWidthPx(v)
       }
@@ -442,6 +665,69 @@ export default function App(): React.ReactElement {
     }
   }, [slidePanelResizing])
 
+  useEffect(() => {
+    if (!pinnedBarResizing) return
+    const onMove = (e: PointerEvent): void => {
+      const r = pinnedBarResizeRef.current
+      if (!r) return
+      const side = pinnedWidgetsSideRef.current
+      const narrowStack = narrowForPinnedRef.current && (side === 'left' || side === 'right')
+      if (narrowStack) {
+        const next = clampPinnedHeight(r.startH + (e.clientY - r.startY))
+        pinnedHRef.current = next
+        setPinnedWidgetsHeightPx(next)
+        return
+      }
+      if (side === 'left') {
+        const next = clampPinnedWidth(r.startW + (e.clientX - r.startX))
+        pinnedWRef.current = next
+        setPinnedWidgetsWidthPx(next)
+        return
+      }
+      if (side === 'right') {
+        const next = clampPinnedWidth(r.startW - (e.clientX - r.startX))
+        pinnedWRef.current = next
+        setPinnedWidgetsWidthPx(next)
+        return
+      }
+      if (side === 'top') {
+        const next = clampPinnedHeight(r.startH + (e.clientY - r.startY))
+        pinnedHRef.current = next
+        setPinnedWidgetsHeightPx(next)
+        return
+      }
+      if (side === 'bottom') {
+        const next = clampPinnedHeight(r.startH - (e.clientY - r.startY))
+        pinnedHRef.current = next
+        setPinnedWidgetsHeightPx(next)
+      }
+    }
+    const onUp = (): void => {
+      void window.api.setConfig({
+        pinnedWidgetsWidthPx: clampPinnedWidth(pinnedWRef.current),
+        pinnedWidgetsHeightPx: clampPinnedHeight(pinnedHRef.current)
+      })
+      setPinnedBarResizing(false)
+      pinnedBarResizeRef.current = null
+    }
+    const side = pinnedWidgetsSideRef.current
+    const narrowStack = narrowForPinnedRef.current && (side === 'left' || side === 'right')
+    const cursor =
+      narrowStack || side === 'top' || side === 'bottom' ? 'ns-resize' : 'ew-resize'
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp, true)
+    window.addEventListener('pointercancel', onUp, true)
+    document.body.style.cursor = cursor
+    document.body.style.userSelect = 'none'
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp, true)
+      window.removeEventListener('pointercancel', onUp, true)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [pinnedBarResizing])
+
   const [metricsPinned, setMetricsPinned] = useState(false)
   const [downloadsPinned, setDownloadsPinned] = useState(false)
   const [activityPinned, setActivityPinned] = useState(false)
@@ -450,6 +736,8 @@ export default function App(): React.ReactElement {
   const [chatSending, setChatSending] = useState(false)
   const [chatStreamBuffer, setChatStreamBuffer] = useState('')
   const [activityChatTokens, setActivityChatTokens] = useState<ActivityChatTokens | null>(null)
+  const activityChatTokensRef = useRef<ActivityChatTokens | null>(null)
+  const [activityTokenHistory, setActivityTokenHistory] = useState<ActivityTokenHistoryPoint[]>([])
   const [pinnedWidgetsSide, setPinnedWidgetsSide] = useState<PinnedWidgetsSide>('left')
   const [pinnedDownloadsSnapshot, setPinnedDownloadsSnapshot] = useState<DownloadRow[]>([])
   const [metricsRefreshMs, setMetricsRefreshMs] = useState(3000)
@@ -460,6 +748,7 @@ export default function App(): React.ReactElement {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
+  const runtimeWasRunningRef = useRef(false)
 
   useEffect(() => {
     if (!chatSending && !chatStreamBuffer) return
@@ -564,6 +853,15 @@ export default function App(): React.ReactElement {
     await refreshRunDrawerQuick()
     await refreshLocalModelFiles()
   }, [refreshRunDrawerQuick, refreshLocalModelFiles])
+
+  const refreshDownloadsList = useCallback(async () => {
+    try {
+      const rows = await window.api.downloadsList()
+      setLocalDownloads(rows as DownloadRow[])
+    } catch {
+      /* ignore */
+    }
+  }, [])
 
   const runOllamaInstall = useCallback(async () => {
     const maxLogLines = 120
@@ -758,6 +1056,12 @@ export default function App(): React.ReactElement {
       if (typeof c.downloadsPinned === 'boolean') setDownloadsPinned(c.downloadsPinned)
       if (typeof c.activityPinned === 'boolean') setActivityPinned(c.activityPinned)
       setPinnedWidgetsSide(parsePinnedWidgetsSide(c.pinnedWidgetsSide))
+      if (typeof c.pinnedWidgetsWidthPx === 'number') {
+        setPinnedWidgetsWidthPx(clampPinnedWidth(c.pinnedWidgetsWidthPx))
+      }
+      if (typeof c.pinnedWidgetsHeightPx === 'number') {
+        setPinnedWidgetsHeightPx(clampPinnedHeight(c.pinnedWidgetsHeightPx))
+      }
       if (typeof c.metricsRefreshMs === 'number') {
         const ms = clampMetricsRefreshMs(c.metricsRefreshMs)
         setMetricsRefreshMs(ms)
@@ -766,6 +1070,14 @@ export default function App(): React.ReactElement {
       const scheme = parseColorScheme(c.colorScheme)
       setColorScheme(scheme)
       applyColorSchemeToDocument(scheme)
+      if (typeof c.chatMaxTokens === 'number') {
+        setChatMaxTokensDraft(String(clampChatMaxTokens(c.chatMaxTokens)))
+      }
+      if (typeof c.integrationListenEnabled === 'boolean') setIntegrationListenEnabled(c.integrationListenEnabled)
+      if (typeof c.integrationPort === 'number') {
+        setIntegrationPortDraft(String(clampIntegrationPort(c.integrationPort)))
+      }
+      if (typeof c.integrationToken === 'string') setIntegrationTokenDraft(c.integrationToken)
     })
   }, [refreshPaths, loadConversations, loadWiki, refreshRuntimeStatus, applyRuntimeInstallPaths])
 
@@ -798,6 +1110,10 @@ export default function App(): React.ReactElement {
   }, [drawer, paths])
 
   useEffect(() => {
+    void refreshDownloadsList()
+  }, [refreshDownloadsList])
+
+  useEffect(() => {
     const id = window.setInterval(() => {
       void (async () => {
         const jobs = hfDownloadJobsRef.current
@@ -805,6 +1121,7 @@ export default function App(): React.ReactElement {
         if (repoIds.length === 0) return
         const next: Record<string, HfCardDownloadState> = { ...jobs }
         let changed = false
+        let refreshDownloadsAfter = false
         for (const repoId of repoIds) {
           const cur = jobs[repoId]
           const raw = await window.api.hfDownloadStatus(cur.jobId)
@@ -815,6 +1132,7 @@ export default function App(): React.ReactElement {
             continue
           }
           if (st.status === 'complete' || st.status === 'error' || st.status === 'cancelled') {
+            if (st.status === 'complete') refreshDownloadsAfter = true
             delete next[repoId]
             changed = true
             continue
@@ -835,11 +1153,14 @@ export default function App(): React.ReactElement {
             changed = true
           }
         }
-        if (changed) setHfDownloadJobs(next)
+        if (changed) {
+          setHfDownloadJobs(next)
+          if (refreshDownloadsAfter) void refreshDownloadsList()
+        }
       })()
     }, 400)
     return () => clearInterval(id)
-  }, [])
+  }, [refreshDownloadsList])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -929,6 +1250,44 @@ export default function App(): React.ReactElement {
       window.clearInterval(id)
     }
   }, [metricsPinned, metricsRefreshMs])
+
+  useEffect(() => {
+    const running = Boolean(runtimeStatus?.running)
+    const was = runtimeWasRunningRef.current
+    runtimeWasRunningRef.current = running
+    if (!running) {
+      setActivityTokenHistory([])
+      return
+    }
+    if (running && !was) {
+      setActivityTokenHistory([])
+    }
+  }, [runtimeStatus?.running])
+
+  useEffect(() => {
+    return window.api.onRuntimeChatProgress((p) => {
+      if (p.kind !== 'usage') return
+      const dp = p.promptTokens
+      const dc = p.completionTokens
+      if (dp == null && dc == null) return
+      const addP = typeof dp === 'number' && !Number.isNaN(dp) ? dp : 0
+      const addC = typeof dc === 'number' && !Number.isNaN(dc) ? dc : 0
+      if (addP === 0 && addC === 0) return
+      setActivityTokenHistory((prev) => {
+        const last = prev[prev.length - 1]
+        const baseP = last?.promptCum ?? 0
+        const baseC = last?.completionCum ?? 0
+        return [
+          ...prev,
+          {
+            ts: Date.now(),
+            promptCum: baseP + addP,
+            completionCum: baseC + addC
+          }
+        ].slice(-400)
+      })
+    })
+  }, [])
 
   useEffect(() => {
     if (!downloadsPinned) {
@@ -1207,9 +1566,11 @@ export default function App(): React.ReactElement {
         repoId,
         revision: 'main',
         filename: file.path,
-        destDir
+        destDir,
+        chatDisplayName: repoId
       })) as { id: string; progress?: number; bytesReceived?: number; bytesTotal?: number; status?: string }
       setLastJobId(j.id)
+      void refreshDownloadsList()
       setHfDownloadJobs((prev) => ({
         ...prev,
         [repoId]: {
@@ -1249,9 +1610,11 @@ export default function App(): React.ReactElement {
         repoId: selectedModel,
         revision: 'main',
         filename: downloadFile,
-        destDir
+        destDir,
+        chatDisplayName: selectedModel
       })) as { id: string; progress?: number; bytesReceived?: number; bytesTotal?: number; status?: string }
       setLastJobId(j.id)
+      void refreshDownloadsList()
       setHfDownloadJobs((prev) => ({
         ...prev,
         [selectedModel]: {
@@ -1354,21 +1717,28 @@ export default function App(): React.ReactElement {
     const promptTokenEstimate = Math.max(1, Math.ceil(totalChars / 4))
     setChatSending(true)
     setChatStreamBuffer('')
-    setActivityChatTokens({
+    const initialTok: ActivityChatTokens = {
       prompt: promptTokenEstimate,
       completion: 0,
       promptIsEstimate: true,
       completionIsEstimate: true,
-    })
+    }
+    activityChatTokensRef.current = initialTok
+    setActivityChatTokens(initialTok)
     const offChat = window.api.onRuntimeChatProgress((p) => {
       if (p.requestId !== requestId) return
       if (p.kind === 'token' && p.text) {
         const chunk = p.text
         setChatStreamBuffer((prev) => prev + chunk)
         setActivityChatTokens((prev) => {
-          if (!prev || !prev.completionIsEstimate) return prev
+          if (!prev || !prev.completionIsEstimate) {
+            activityChatTokensRef.current = prev
+            return prev
+          }
           const delta = Math.max(1, Math.ceil(chunk.length / 4))
-          return { ...prev, completion: prev.completion + delta }
+          const next = { ...prev, completion: prev.completion + delta }
+          activityChatTokensRef.current = next
+          return next
         })
       }
       if (p.kind === 'usage') {
@@ -1381,26 +1751,43 @@ export default function App(): React.ReactElement {
               promptIsEstimate: true,
               completionIsEstimate: true,
             } satisfies ActivityChatTokens)
-          return {
+          const next = {
             prompt: p.promptTokens != null ? p.promptTokens : base.prompt,
             completion: p.completionTokens != null ? p.completionTokens : base.completion,
             promptIsEstimate: p.promptTokens != null ? false : base.promptIsEstimate,
-            completionIsEstimate: p.completionTokens != null ? false : base.completionIsEstimate,
+            completionIsEstimate: p.completionTokens != null ? false : base.completionIsEstimate
           }
+          activityChatTokensRef.current = next
+          return next
         })
       }
     })
     try {
       const reply = await window.api.runtimeChat(msgs, requestId)
-      await window.api.messageAppend(convId, 'assistant', reply)
+      const snap = activityChatTokensRef.current
+      await window.api.messageAppend(
+        convId,
+        'assistant',
+        reply,
+        undefined,
+        snap
+          ? {
+              promptTokens: snap.prompt,
+              completionTokens: snap.completion,
+              promptIsEstimate: snap.promptIsEstimate,
+              completionIsEstimate: snap.completionIsEstimate
+            }
+          : undefined
+      )
       const m = await window.api.conversationMessages(convId)
-      setMessages(m as { role: string; content: string }[])
+      setMessages(m as ChatMessageVm[])
     } catch (e) {
       setErr(String(e))
     } finally {
       offChat()
       setChatSending(false)
       setChatStreamBuffer('')
+      activityChatTokensRef.current = null
       setActivityChatTokens(null)
     }
   }
@@ -1419,7 +1806,7 @@ export default function App(): React.ReactElement {
     setConvId(id)
     setMobileConvOpen(false)
     const m = await window.api.conversationMessages(id)
-    setMessages(m as { role: string; content: string }[])
+    setMessages(m as ChatMessageVm[])
   }
 
   async function confirmDeleteConversation(): Promise<void> {
@@ -1489,26 +1876,26 @@ export default function App(): React.ReactElement {
   const loadedModelTitle = useMemo(() => {
     if (!runtimeStatus?.modelPath?.trim()) return 'Model ready'
     const raw = runtimeStatus.modelPath.trim()
-    if (
-      runtimeStatus.kind === 'llamacpp' &&
-      (raw.includes('/') || raw.includes('\\') || /^[a-zA-Z]:[\\/]/.test(raw))
-    ) {
+    const win = paths?.platform === 'win32'
+    const fromHub = chatAuthorLabelForModelPath(raw, localDownloads, Boolean(win))
+    if (fromHub) return fromHub
+    if (runtimeStatus.kind === 'llamacpp' && looksLikeLocalModelFilePath(raw)) {
       return fileNameFromPath(raw) || raw
     }
     return raw
-  }, [runtimeStatus])
+  }, [runtimeStatus, localDownloads, paths?.platform])
   const assistantResponderLabel = useMemo(() => {
     if (!runtimeStatus?.running) return 'Assistant'
     const raw = runtimeStatus.modelPath?.trim()
     if (!raw) return 'Assistant'
-    if (
-      runtimeStatus.kind === 'llamacpp' &&
-      (raw.includes('/') || raw.includes('\\') || /^[a-zA-Z]:[\\/]/.test(raw))
-    ) {
+    const win = paths?.platform === 'win32'
+    const fromHub = chatAuthorLabelForModelPath(raw, localDownloads, Boolean(win))
+    if (fromHub) return fromHub
+    if (runtimeStatus.kind === 'llamacpp' && looksLikeLocalModelFilePath(raw)) {
       return fileNameFromPath(raw) || raw
     }
     return raw
-  }, [runtimeStatus])
+  }, [runtimeStatus, localDownloads, paths?.platform])
   const topTitle = mainView === 'chat' ? 'Chat' : 'Knowledge wiki'
   const topSub =
     mainView === 'chat'
@@ -1571,18 +1958,27 @@ export default function App(): React.ReactElement {
 
       <div className={`shell-content shell-content--pinned-${pinnedWidgetsSide}`}>
         {(metricsPinned || downloadsPinned || activityPinned) && (
-          <aside className="pinned-widgets-aside" aria-label="Pinned widgets">
+          <aside
+            className={`pinned-widgets-aside ${pinnedBarResizing ? 'pinned-widgets-aside--resizing' : ''}`}
+            aria-label="Pinned widgets"
+            style={pinnedWidgetsAsideStyle(
+              narrowSlideConv,
+              pinnedWidgetsSide,
+              pinnedWidgetsWidthPx,
+              pinnedWidgetsHeightPx
+            )}
+          >
             <div className="pinned-widgets-aside-header">
               <span className="pinned-widgets-aside-title">Pinned widgets</span>
               <div className="pinned-widgets-dock-symbols" role="group" aria-label="Widget bar position">
                 {(
                   [
-                    { side: 'left' as const, icon: 'fa-arrow-left', title: 'Dock bar on the left (beside nav)' },
-                    { side: 'right' as const, icon: 'fa-arrow-right', title: 'Dock bar on the right (after main)' },
-                    { side: 'top' as const, icon: 'fa-arrow-up', title: 'Dock bar on top (above main)' },
-                    { side: 'bottom' as const, icon: 'fa-arrow-down', title: 'Dock bar on the bottom (below main)' }
+                    { side: 'left' as const, DockIcon: IconDockLeft, title: 'Dock bar on the left (beside nav)' },
+                    { side: 'right' as const, DockIcon: IconDockRight, title: 'Dock bar on the right (after main)' },
+                    { side: 'top' as const, DockIcon: IconDockTop, title: 'Dock bar on top (above main)' },
+                    { side: 'bottom' as const, DockIcon: IconDockBottom, title: 'Dock bar on the bottom (below main)' }
                   ] as const
-                ).map(({ side, icon, title }) => (
+                ).map(({ side, DockIcon, title }) => (
                   <button
                     key={side}
                     type="button"
@@ -1595,7 +1991,7 @@ export default function App(): React.ReactElement {
                       void saveMetricsWidgetConfig({ pinnedWidgetsSide: side })
                     }}
                   >
-                    <i className={`fa-solid ${icon}`} aria-hidden />
+                    <DockIcon />
                   </button>
                 ))}
               </div>
@@ -1634,6 +2030,8 @@ export default function App(): React.ReactElement {
                   }
                   chatSending={chatSending}
                   chatTokens={activityChatTokens}
+                  tokenHistory={activityTokenHistory}
+                  runtimeOn={runtimeOn}
                   onUnpin={() => {
                     setActivityPinned(false)
                     void saveMetricsWidgetConfig({ activityPinned: false })
@@ -1646,6 +2044,34 @@ export default function App(): React.ReactElement {
                 />
               )}
             </div>
+            <div
+              role="separator"
+              aria-orientation={
+                narrowSlideConv && (pinnedWidgetsSide === 'left' || pinnedWidgetsSide === 'right')
+                  ? 'horizontal'
+                  : pinnedWidgetsSide === 'left' || pinnedWidgetsSide === 'right'
+                    ? 'vertical'
+                    : 'horizontal'
+              }
+              aria-label="Resize pinned widgets panel"
+              className={
+                narrowSlideConv && (pinnedWidgetsSide === 'left' || pinnedWidgetsSide === 'right')
+                  ? 'pinned-widgets-resize-handle pinned-widgets-resize-handle--stacked'
+                  : `pinned-widgets-resize-handle pinned-widgets-resize-handle--${pinnedWidgetsSide}`
+              }
+              onPointerDown={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                pinnedWidgetsSideRef.current = pinnedWidgetsSide
+                pinnedBarResizeRef.current = {
+                  startX: e.clientX,
+                  startY: e.clientY,
+                  startW: pinnedWidgetsWidthPx,
+                  startH: pinnedWidgetsHeightPx
+                }
+                setPinnedBarResizing(true)
+              }}
+            />
           </aside>
         )}
         <div className="main-column">
@@ -1812,7 +2238,7 @@ export default function App(): React.ReactElement {
               ) : null}
               {settingsConfirmKind === 'factory' ? (
                 <p className="muted modal-text">
-                  Stops the runtime and cancels in-flight downloads. All saved settings (including custom models folder, llama binary path, Ollama URL, ports, and pinned widgets) return to defaults, and your Hugging Face token is removed from this device. Chats, knowledge base, wiki, caches, and model files are not changed by this action alone.
+                  Stops the runtime and cancels in-flight downloads. All saved settings (including custom models folder, llama binary path, Ollama URL, ports, max response tokens, IDE integration, and pinned widgets) return to defaults, and your Hugging Face token is removed from this device. Chats, knowledge base, wiki, caches, and model files are not changed by this action alone.
                 </p>
               ) : null}
               <div className="modal-actions">
@@ -1842,6 +2268,8 @@ export default function App(): React.ReactElement {
           {mainView === 'chat' && (
             <div
               className="chat-layout"
+              data-slide-conv-edge={slideConvEdge}
+              data-slide-kb-edge={slideKbEdge}
               style={
                 {
                   ['--slide-conv-width' as string]: `${slideConvWidthPx}px`,
@@ -1863,6 +2291,22 @@ export default function App(): React.ReactElement {
               <aside
                 className={`conv-sidebar ${mobileConvOpen ? 'conv-sidebar--open' : ''} ${slidePanelResizing === 'conv' ? 'slide-panel--resizing' : ''}`}
               >
+                {narrowSlideConv && mobileConvOpen && slideConvEdge === 'right' ? (
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize chat list width"
+                    className="slide-panel-resize-handle slide-panel-resize-handle--from-right-panel"
+                    onPointerDown={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const v = clampSlideConv(window.innerWidth - e.clientX)
+                      convWRef.current = v
+                      setSlideConvWidthPx(v)
+                      setSlidePanelResizing('conv')
+                    }}
+                  />
+                ) : null}
                 <div className="conv-sidebar-header">
                   <div className="conv-sidebar-header-row">
                     <button type="button" className="btn-new-chat" onClick={() => void newConversation()}>
@@ -1963,7 +2407,7 @@ export default function App(): React.ReactElement {
                     </div>
                   ))}
                 </div>
-                {narrowSlideConv && mobileConvOpen ? (
+                {narrowSlideConv && mobileConvOpen && slideConvEdge === 'left' ? (
                   <div
                     role="separator"
                     aria-orientation="vertical"
@@ -2013,6 +2457,7 @@ export default function App(): React.ReactElement {
                               : m.role}
                         </div>
                         <ChatRichContent content={m.content} />
+                        <div className="msg-token-foot">{bubbleTokenLine(m)}</div>
                       </div>
                     </div>
                   ))}
@@ -2034,6 +2479,9 @@ export default function App(): React.ReactElement {
                         ) : (
                           <FloatingDots label="Generating reply" />
                         )}
+                        {activityChatTokens ? (
+                          <div className="msg-token-foot">{streamingTokenFoot(activityChatTokens)}</div>
+                        ) : null}
                       </div>
                     </div>
                   ) : null}
@@ -2101,7 +2549,7 @@ export default function App(): React.ReactElement {
                 className={`kb-sidebar ${mobileKbOpen ? 'kb-sidebar--open' : ''} ${slidePanelResizing === 'kb' ? 'slide-panel--resizing' : ''}`}
                 aria-label="Knowledge snippets"
               >
-                {narrowSlideKb && mobileKbOpen ? (
+                {narrowSlideKb && mobileKbOpen && slideKbEdge === 'right' ? (
                   <div
                     role="separator"
                     aria-orientation="vertical"
@@ -2140,6 +2588,22 @@ export default function App(): React.ReactElement {
                     </div>
                   ))}
                 </div>
+                {narrowSlideKb && mobileKbOpen && slideKbEdge === 'left' ? (
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize knowledge panel width"
+                    className="slide-panel-resize-handle slide-panel-resize-handle--from-left-panel"
+                    onPointerDown={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const v = clampSlideKb(e.clientX)
+                      kbWRef.current = v
+                      setSlideKbWidthPx(v)
+                      setSlidePanelResizing('kb')
+                    }}
+                  />
+                ) : null}
               </aside>
             </div>
           )}
@@ -2887,6 +3351,128 @@ export default function App(): React.ReactElement {
                             {COLOR_SCHEME_LABELS[id]}
                           </option>
                         ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="drawer-section">
+                    <h3>Chat generation</h3>
+                    <p className="muted" style={{ marginTop: 0 }}>
+                      Caps how many tokens the model may generate per reply (Ollama <code className="inline-code">num_predict</code>, llama.cpp{' '}
+                      <code className="inline-code">max_tokens</code>). Takes effect on the next message.
+                    </p>
+                    <label style={{ display: 'block', marginTop: 12 }}>
+                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                        Max response tokens
+                      </span>
+                      <input
+                        type="number"
+                        className="input"
+                        style={{ width: '100%', maxWidth: 200 }}
+                        min={CHAT_MAX_TOKENS_MIN}
+                        max={CHAT_MAX_TOKENS_MAX}
+                        value={chatMaxTokensDraft}
+                        onChange={(e) => setChatMaxTokensDraft(e.target.value)}
+                        onBlur={() => {
+                          const n = parseInt(chatMaxTokensDraft.trim(), 10)
+                          const v = clampChatMaxTokens(Number.isFinite(n) ? n : CHAT_MAX_TOKENS_DEFAULT)
+                          setChatMaxTokensDraft(String(v))
+                          void window.api.setConfig({ chatMaxTokens: v })
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <div className="drawer-section">
+                    <h3>IDE integration (localhost)</h3>
+                    <p className="muted" style={{ marginTop: 0 }}>
+                      HTTP API on <strong>127.0.0.1</strong> for IntelliJ and other tools. Start the model runtime in this app first. Sample plugin and API
+                      notes live under <code className="inline-code">integrations/intellij-plugin</code> and <code className="inline-code">docs/intellij-integration.md</code>.
+                    </p>
+                    <label className="metrics-widget-check" style={{ marginTop: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={integrationListenEnabled}
+                        onChange={(e) => {
+                          const v = e.target.checked
+                          setIntegrationListenEnabled(v)
+                          void window.api.setConfig({ integrationListenEnabled: v })
+                        }}
+                      />
+                      <span>Enable HTTP bridge for plugins</span>
+                    </label>
+                    <label style={{ display: 'block', marginTop: 12 }}>
+                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                        Port
+                      </span>
+                      <input
+                        type="number"
+                        className="input"
+                        style={{ width: '100%', maxWidth: 200 }}
+                        min={1024}
+                        max={65535}
+                        value={integrationPortDraft}
+                        onChange={(e) => setIntegrationPortDraft(e.target.value)}
+                        onBlur={() => {
+                          const n = parseInt(integrationPortDraft.trim(), 10)
+                          const v = clampIntegrationPort(Number.isFinite(n) ? n : INTEGRATION_PORT_DEFAULT)
+                          setIntegrationPortDraft(String(v))
+                          void window.api.setConfig({ integrationPort: v })
+                        }}
+                      />
+                    </label>
+                    <label style={{ display: 'block', marginTop: 12 }}>
+                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                        Optional bearer token (if set, required for <code className="inline-code">/v1/*</code> only)
+                      </span>
+                      <input
+                        type="password"
+                        className="input"
+                        style={{ width: '100%', maxWidth: 360 }}
+                        autoComplete="off"
+                        value={integrationTokenDraft}
+                        onChange={(e) => setIntegrationTokenDraft(e.target.value)}
+                        onBlur={() => void window.api.setConfig({ integrationToken: integrationTokenDraft })}
+                      />
+                    </label>
+                  </div>
+                  <div className="drawer-section">
+                    <h3>Chat slide panels</h3>
+                    <p className="muted" style={{ marginTop: 0 }}>
+                      On medium widths the knowledge panel slides over the chat; at ≤720px the chat list does too. Wide layouts keep fixed columns.
+                    </p>
+                    <label style={{ display: 'block', marginTop: 12 }}>
+                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                        Chats list slides in from (≤720px)
+                      </span>
+                      <select
+                        className="select"
+                        style={{ width: '100%', maxWidth: 320 }}
+                        value={slideConvEdge}
+                        onChange={(e) => {
+                          const v = e.target.value as SlidePanelEdge
+                          setSlideConvEdge(v)
+                          persistSlideEdge(LS_SLIDE_CONV_EDGE, v)
+                        }}
+                      >
+                        <option value="left">Left edge</option>
+                        <option value="right">Right edge</option>
+                      </select>
+                    </label>
+                    <label style={{ display: 'block', marginTop: 12 }}>
+                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                        Knowledge panel slides in from (≤1100px)
+                      </span>
+                      <select
+                        className="select"
+                        style={{ width: '100%', maxWidth: 320 }}
+                        value={slideKbEdge}
+                        onChange={(e) => {
+                          const v = e.target.value as SlidePanelEdge
+                          setSlideKbEdge(v)
+                          persistSlideEdge(LS_SLIDE_KB_EDGE, v)
+                        }}
+                      >
+                        <option value="left">Left edge</option>
+                        <option value="right">Right edge</option>
                       </select>
                     </label>
                   </div>

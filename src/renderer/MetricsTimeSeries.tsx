@@ -262,7 +262,7 @@ export function MetricsTimeSeries({
   history: MetricsSnapshot[]
   variant?: MetricsTimeSeriesVariant
 }): ReactElement {
-  const layout = variant === 'pinned' ? LAYOUT_PINNED : LAYOUT_DRAWER
+  const layout = variant === 'drawer' ? LAYOUT_DRAWER : LAYOUT_PINNED
   const chron = useMemo(() => [...history].reverse(), [history])
   const ts = useMemo(() => chron.map((h) => h.ts), [chron])
   const rss = useMemo(() => chron.map((h) => h.processRssMb), [chron])
@@ -311,7 +311,7 @@ export function MetricsTimeSeries({
         <>
           <p className="muted metric-charts-hint">{chron.length} sample(s), oldest → newest (left to right).</p>
           <p className="muted metric-charts-hint metric-charts-hint--sub">
-            GPU charts appear when <code className="inline-code">nvidia-smi</code> is available. Model memory is the llama-server process RSS
+            GPU charts appear when <code className="inline-code">nvidia-smi</code> is available. Model memory is the llama-server process resident set
             (llama.cpp) or loaded model size from Ollama&apos;s <code className="inline-code">/api/ps</code> when the runtime is running.
           </p>
         </>
@@ -322,7 +322,7 @@ export function MetricsTimeSeries({
         </p>
       )}
       <MiniChart
-        title={variant === 'pinned' ? 'RSS' : 'Process memory (RSS)'}
+        title={variant === 'drawer' ? 'Process memory (resident set)' : 'Resident memory'}
         unit="MB"
         color="#7c6cf0"
         values={rss}
@@ -333,7 +333,7 @@ export function MetricsTimeSeries({
         variant={variant}
       />
       <MiniChart
-        title={variant === 'pinned' ? 'CPU' : 'Process CPU (approx.)'}
+        title={variant === 'drawer' ? 'Process CPU (approx.)' : 'CPU'}
         unit="%"
         color="#3db89d"
         values={cpu}
@@ -345,7 +345,7 @@ export function MetricsTimeSeries({
       />
       {hasGpu && (
         <MiniChart
-          title={variant === 'pinned' ? 'GPU MiB' : 'GPU memory used (NVIDIA)'}
+          title={variant === 'drawer' ? 'GPU memory used (NVIDIA)' : 'GPU MiB'}
           unit="MiB"
           color="#5a8dee"
           values={gpuUsed}
@@ -358,7 +358,7 @@ export function MetricsTimeSeries({
       )}
       {hasGpuUtil && (
         <MiniChart
-          title={variant === 'pinned' ? 'GPU %' : 'GPU memory utilization'}
+          title={variant === 'drawer' ? 'GPU memory utilization' : 'GPU %'}
           unit="%"
           color="#8b7ae8"
           values={gpuUtilPct}
@@ -371,7 +371,7 @@ export function MetricsTimeSeries({
       )}
       {hasModelMem && (
         <MiniChart
-          title={variant === 'pinned' ? 'Model' : 'Model memory (runtime)'}
+          title={variant === 'drawer' ? 'Model memory (runtime)' : 'Model'}
           unit="MiB"
           color="#e878b8"
           values={modelMem}
@@ -384,7 +384,7 @@ export function MetricsTimeSeries({
       )}
       {hasTok && (
         <MiniChart
-          title={variant === 'pinned' ? 'Tok/s' : 'Runtime tokens / sec'}
+          title={variant === 'drawer' ? 'Runtime tokens / sec' : 'Tok/s'}
           unit="tok/s"
           color="#e8a54b"
           values={tok}
@@ -397,7 +397,7 @@ export function MetricsTimeSeries({
       )}
       {hasCtx && (
         <MiniChart
-          title={variant === 'pinned' ? 'Ctx' : 'Context used (runtime)'}
+          title={variant === 'drawer' ? 'Context used (runtime)' : 'Ctx'}
           unit="tokens"
           color="#c4a35a"
           values={ctx}

@@ -1,5 +1,6 @@
 import type { ReactElement } from 'react'
 import type { RuntimeLoadProgress } from '@shared/types'
+import { ActivityTokenSessionChart, type ActivityTokenHistoryPoint } from './ActivityTokenSessionChart'
 
 export type ActivityChatTokens = {
   prompt: number
@@ -12,11 +13,16 @@ export function ActivityPinnedWidget(props: {
   modelLoad: RuntimeLoadProgress | null
   chatSending: boolean
   chatTokens: ActivityChatTokens | null
+  tokenHistory: ActivityTokenHistoryPoint[]
+  runtimeOn: boolean
   onUnpin: () => void
   onOpenChat: () => void
 }): ReactElement {
-  const { modelLoad, chatSending, chatTokens, onUnpin, onOpenChat } = props
+  const { modelLoad, chatSending, chatTokens, tokenHistory, runtimeOn, onUnpin, onOpenChat } = props
   const busy = modelLoad != null || chatSending
+  const hasTokenHistory = tokenHistory.length > 0
+  const showTokenPending = runtimeOn && !hasTokenHistory
+  const showEmpty = !runtimeOn && !busy
 
   function formatCount(n: number, isEst: boolean): string {
     const v = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0
@@ -27,7 +33,7 @@ export function ActivityPinnedWidget(props: {
     <aside className="activity-pinned-widget" aria-label="Generation activity">
       <div className="activity-pinned-widget-header">
         <span className="activity-pinned-widget-title">Activity</span>
-        <span className="activity-pinned-widget-interval">live</span>
+        <span className="activity-pinned-widget-interval">{runtimeOn ? 'since load' : 'idle'}</span>
         <div className="activity-pinned-widget-actions">
           <button type="button" className="activity-pinned-widget-link" onClick={onOpenChat}>
             Open chat
@@ -37,7 +43,7 @@ export function ActivityPinnedWidget(props: {
           </button>
         </div>
       </div>
-      {!busy ? (
+      {showEmpty ? (
         <p className="activity-pinned-widget-empty">No model load or reply in progress.</p>
       ) : (
         <div className="activity-pinned-body">
@@ -72,6 +78,20 @@ export function ActivityPinnedWidget(props: {
                   </dd>
                 </div>
               </dl>
+            </div>
+          ) : null}
+          {runtimeOn ? (
+            <div className="activity-pinned-block activity-pinned-block--session">
+              <div className="activity-pinned-block-title">Tokens this session</div>
+              {hasTokenHistory ? (
+                <div className="activity-pinned-token-chart-wrap">
+                  <ActivityTokenSessionChart history={tokenHistory} />
+                </div>
+              ) : showTokenPending ? (
+                <p className="muted activity-pinned-session-pending">
+                  Historic sent/received totals appear after each reply when the runtime reports usage.
+                </p>
+              ) : null}
             </div>
           ) : null}
         </div>

@@ -32,7 +32,7 @@ export function MetricsPinnedWidget(props: {
       </div>
       <div className="metrics-pinned-grid">
         <div className="metrics-pinned-stat">
-          <span className="metrics-pinned-label">RSS</span>
+          <span className="metrics-pinned-label">Resident memory</span>
           <span className="metrics-pinned-value">{snapshot?.processRssMb != null ? `${snapshot.processRssMb.toFixed(0)} MB` : '—'}</span>
         </div>
         <div className="metrics-pinned-stat">
