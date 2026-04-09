@@ -14,6 +14,8 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   colorScheme: 'violet',
   /** Upper bound on assistant completion length (Ollama `num_predict`, llama.cpp `max_tokens`). */
   chatMaxTokens: 512,
+  /** After each assistant reply, run a brief second pass to extract bullet notes into the knowledge base / wiki. */
+  wikiAutoExtract: true,
   /** Localhost HTTP API for IDE plugins (127.0.0.1 only). */
   integrationListenEnabled: false,
   integrationPort: 17373,
