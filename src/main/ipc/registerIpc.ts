@@ -20,7 +20,13 @@ import { createRuntime, type RuntimeAdapter } from '../services/runtime'
 import { installOllamaForPlatform } from '../services/ollamaInstaller'
 import { probeOllamaReachable } from '../services/runtime/ollamaAdapter'
 import * as chatService from '../services/chatService'
+import { recordChatRoundtripMs } from '../services/chatLatencyStats'
 import * as kbService from '../services/kbService'
+import {
+  parseWikiExtractResponse,
+  runWikiExtractChat,
+  wikiExtractLimits
+} from '../services/wikiExtractService'
 import * as metricsService from '../services/metricsService'
 import * as trainOrchestrator from '../services/trainOrchestrator'
 import { logLine } from '../logger'
@@ -50,7 +56,8 @@ const configSchema = z.object({
   chatMaxTokens: z.number().int().min(1).max(262_144).optional(),
   integrationListenEnabled: z.boolean().optional(),
   integrationPort: z.number().int().min(1024).max(65535).optional(),
-  integrationToken: z.string().max(256).optional()
+  integrationToken: z.string().max(256).optional(),
+  wikiAutoExtract: z.boolean().optional()
 })
 
 function trainingScriptPath(): string {
@@ -351,8 +358,9 @@ export function registerIpc(ctx: IpcContext): void {
         if (!requestId) return
         event.sender.send(IPC.RUNTIME_CHAT_PROGRESS, { requestId, ...data })
       }
+      const chatStarted = Date.now()
       try {
-        return await rt.chat(payload.messages, {
+        const reply = await rt.chat(payload.messages, {
           maxTokens: chatMaxTokens,
           ...(requestId
             ? {
@@ -366,6 +374,8 @@ export function registerIpc(ctx: IpcContext): void {
               }
             : {})
         })
+        recordChatRoundtripMs(Date.now() - chatStarted)
+        return reply
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         emit({ kind: 'error', message })
@@ -440,6 +450,59 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(IPC.KB_CHUNKS, (_e, sourceId: string) => kbService.listChunksForSource(db, sourceId))
   ipcMain.handle(IPC.KB_WIKI_TOPICS, () => kbService.listWikiTopics(db))
   ipcMain.handle(IPC.KB_WIKI_PAGE, (_e, sourceId: string) => kbService.ensureWikiPageForSource(db, sourceId))
+  ipcMain.handle(IPC.KB_KNOWLEDGE_GRAPH, () => kbService.getKnowledgeGraph(db))
+
+  ipcMain.handle(IPC.KB_WIKI_EXTRACT_TURN, async (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        conversationId: z.string().min(1),
+        conversationTitle: z.string().max(512).optional(),
+        userMessage: z.string(),
+        assistantMessage: z.string()
+      })
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid wiki extract payload')
+
+    if (store.get('wikiAutoExtract') === false) {
+      return { ok: true as const, skipped: true, reason: 'disabled' }
+    }
+
+    const assistant = parsed.data.assistantMessage.trim()
+    if (assistant.length < wikiExtractLimits.minAssistantChars) {
+      return { ok: true as const, skipped: true, reason: 'short_reply' }
+    }
+
+    const rt = getRuntime()
+    if (!rt?.getStatus().running) {
+      return { ok: true as const, skipped: true, reason: 'no_runtime' }
+    }
+
+    try {
+      const rawOut = await runWikiExtractChat(rt, parsed.data.userMessage, assistant)
+      const distilled = parseWikiExtractResponse(rawOut)
+      if (!('title' in distilled)) {
+        return { ok: true as const, skipped: true, reason: 'nothing_to_save' }
+      }
+      const { title, body } = distilled
+      const t = Date.now()
+      const uri = `wiki-extract:${parsed.data.conversationId}:${t}`
+      const displayTitle = `Note: ${title}`
+      const source = kbService.ingestText(
+        db,
+        displayTitle,
+        uri,
+        body,
+        undefined,
+        parsed.data.conversationId
+      )
+      logLine('info', 'wiki_extract_ingested', { sourceId: source.id, conversationId: parsed.data.conversationId })
+      return { ok: true as const, skipped: false, sourceId: source.id, title: displayTitle }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      logLine('warn', 'wiki_extract_failed', { error: message })
+      return { ok: false as const, skipped: false, error: message }
+    }
+  })
 
   ipcMain.handle(IPC.METRICS_SNAPSHOT, async (_e, opts?: { persist?: boolean }) => {
     if (opts?.persist === false) {

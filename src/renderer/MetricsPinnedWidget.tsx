@@ -48,6 +48,14 @@ export function MetricsPinnedWidget(props: {
           </span>
         </div>
         <div className="metrics-pinned-stat">
+          <span className="metrics-pinned-label">Avg prompt→reply</span>
+          <span className="metrics-pinned-value">
+            {snapshot?.avgPromptToResponseMs != null && Number.isFinite(snapshot.avgPromptToResponseMs)
+              ? `${(snapshot.avgPromptToResponseMs / 1000).toFixed(snapshot.avgPromptToResponseMs >= 10_000 ? 0 : 1)} s`
+              : '—'}
+          </span>
+        </div>
+        <div className="metrics-pinned-stat">
           <span className="metrics-pinned-label">GPU</span>
           <span className="metrics-pinned-value">
             {snapshot?.gpuMemUsedMb != null && snapshot?.gpuMemTotalMb != null

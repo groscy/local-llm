@@ -88,6 +88,13 @@ contextBridge.exposeInMainWorld('api', {
   kbChunks: (sourceId: string) => invoke(IPC.KB_CHUNKS, sourceId),
   kbWikiTopics: () => invoke(IPC.KB_WIKI_TOPICS),
   kbWikiPage: (sourceId: string) => invoke(IPC.KB_WIKI_PAGE, sourceId),
+  kbKnowledgeGraph: () => invoke(IPC.KB_KNOWLEDGE_GRAPH),
+  kbWikiExtractTurn: (p: {
+    conversationId: string
+    conversationTitle?: string
+    userMessage: string
+    assistantMessage: string
+  }) => invoke(IPC.KB_WIKI_EXTRACT_TURN, p),
   metricsSnapshot: (opts?: { persist?: boolean }) => invoke(IPC.METRICS_SNAPSHOT, opts),
   metricsHistory: (limit?: number) => invoke(IPC.METRICS_HISTORY, limit),
   trainStart: (p: { baseModelPath: string; datasetPath: string; pythonPath?: string }) =>

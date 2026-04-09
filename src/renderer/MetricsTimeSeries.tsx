@@ -271,6 +271,15 @@ export function MetricsTimeSeries({
   const ctx = useMemo(() => chron.map((h) => h.runtimeCtxUsed), [chron])
   const gpuUsed = useMemo(() => chron.map((h) => h.gpuMemUsedMb), [chron])
   const modelMem = useMemo(() => chron.map((h) => h.modelMemoryMb), [chron])
+  const avgPromptToRespSec = useMemo(
+    () =>
+      chron.map((h) =>
+        h.avgPromptToResponseMs != null && Number.isFinite(h.avgPromptToResponseMs)
+          ? h.avgPromptToResponseMs / 1000
+          : undefined
+      ),
+    [chron]
+  )
 
   const hasTok = tok.some((v) => v !== undefined && v !== null && !Number.isNaN(v))
   const hasCtx = ctx.some((v) => v !== undefined && v !== null && !Number.isNaN(v))
@@ -290,6 +299,7 @@ export function MetricsTimeSeries({
     [chron]
   )
   const hasGpuUtil = gpuUtilPct.some((v) => v != null && !Number.isNaN(v))
+  const hasAvgPromptResp = avgPromptToRespSec.some((v) => v != null && !Number.isNaN(v))
 
   const timeDomain = useMemo(() => sharedTimeDomain(ts), [ts])
 
@@ -311,8 +321,9 @@ export function MetricsTimeSeries({
         <>
           <p className="muted metric-charts-hint">{chron.length} sample(s), oldest → newest (left to right).</p>
           <p className="muted metric-charts-hint metric-charts-hint--sub">
-            GPU charts appear when <code className="inline-code">nvidia-smi</code> is available. Model memory is the llama-server process resident set
+            GPU charts appear when <code className="inline-code">nvidia-smi</code> is available.             Model memory is the llama-server process resident set
             (llama.cpp) or loaded model size from Ollama&apos;s <code className="inline-code">/api/ps</code> when the runtime is running.
+            <strong> Avg prompt → reply</strong> is the rolling mean duration of successful chat completions (last 64), sampled at each tick.
           </p>
         </>
       )}
@@ -403,6 +414,19 @@ export function MetricsTimeSeries({
           values={ctx}
           ts={ts}
           formatTick={(v) => v.toFixed(0)}
+          timeDomain={timeDomain}
+          layout={layout}
+          variant={variant}
+        />
+      )}
+      {hasAvgPromptResp && (
+        <MiniChart
+          title={variant === 'drawer' ? 'Avg prompt → reply (rolling)' : 'Prompt→reply'}
+          unit="s"
+          color="#6ecff6"
+          values={avgPromptToRespSec}
+          ts={ts}
+          formatTick={(v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1))}
           timeDomain={timeDomain}
           layout={layout}
           variant={variant}

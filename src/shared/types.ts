@@ -138,6 +138,43 @@ export interface WikiTopic {
   chunkCount: number
 }
 
+/** Nodes and edges for the in-app knowledge graph visualization (sources, chunks, wiki pages). */
+export type KnowledgeGraphNodeKind = 'source' | 'chunk' | 'wiki'
+
+export interface KnowledgeGraphNode {
+  id: string
+  kind: KnowledgeGraphNodeKind
+  label: string
+  sublabel?: string
+  /** Parent KB source id when `kind === 'chunk'`. */
+  sourceId?: string
+}
+
+export type KnowledgeGraphEdgeKind = 'contains' | 'indexes' | 'compiled_from' | 'related'
+
+export interface KnowledgeGraphEdge {
+  from: string
+  to: string
+  kind: KnowledgeGraphEdgeKind
+}
+
+export interface KnowledgeGraphPayload {
+  nodes: KnowledgeGraphNode[]
+  edges: KnowledgeGraphEdge[]
+  /** True when some chunks were omitted from the graph for performance. */
+  truncated: boolean
+}
+
+/** Result of distilling a chat turn into a wiki note (`kb:wikiExtractTurn`). */
+export interface WikiExtractTurnResult {
+  ok: boolean
+  skipped?: boolean
+  reason?: string
+  sourceId?: string
+  title?: string
+  error?: string
+}
+
 export interface MetricsSnapshot {
   ts: number
   runtimeTokensPerSec?: number
@@ -148,6 +185,11 @@ export interface MetricsSnapshot {
   gpuMemTotalMb?: number
   /** llama.cpp child resident set or Ollama model size (approx.), MiB */
   modelMemoryMb?: number
+  /**
+   * Mean wall time (ms) for the last several successful chat completions (prompt sent → full reply),
+   * sampled when this snapshot was taken.
+   */
+  avgPromptToResponseMs?: number
 }
 
 export interface TrainJob {

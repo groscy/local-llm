@@ -58,6 +58,10 @@ export const IPC = {
   KB_CHUNKS: 'kb:chunks',
   KB_WIKI_TOPICS: 'kb:wikiTopics',
   KB_WIKI_PAGE: 'kb:wikiPage',
+  /** Structural graph: sources → chunks, wiki pages → chunks, optional related sources. */
+  KB_KNOWLEDGE_GRAPH: 'kb:knowledgeGraph',
+  /** After a chat turn: run a short local model pass to extract wiki notes and ingest (optional). */
+  KB_WIKI_EXTRACT_TURN: 'kb:wikiExtractTurn',
 
   // Metrics
   METRICS_SNAPSHOT: 'metrics:snapshot',

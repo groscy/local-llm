@@ -1,6 +1,8 @@
 import type {
   DownloadRow,
   HardwareSummary,
+  KnowledgeGraphPayload,
+  WikiExtractTurnResult,
   RuntimeChatProgress,
   RuntimeLoadProgress,
   RuntimeStatus
@@ -107,6 +109,13 @@ type Api = {
   kbChunks: (sourceId: string) => Promise<unknown[]>
   kbWikiTopics: () => Promise<unknown[]>
   kbWikiPage: (sourceId: string) => Promise<{ id: string; title: string; body: string }>
+  kbKnowledgeGraph: () => Promise<KnowledgeGraphPayload>
+  kbWikiExtractTurn: (p: {
+    conversationId: string
+    conversationTitle?: string
+    userMessage: string
+    assistantMessage: string
+  }) => Promise<WikiExtractTurnResult>
   metricsSnapshot: (opts?: { persist?: boolean }) => Promise<unknown>
   metricsHistory: (limit?: number) => Promise<unknown[]>
   trainStart: (p: { baseModelPath: string; datasetPath: string; pythonPath?: string }) => Promise<unknown>

@@ -4,6 +4,7 @@ import type {
   HardwareSummary,
   HfModelDetail,
   HfModelSummary,
+  KnowledgeGraphPayload,
   MetricsSnapshot,
   RuntimeLoadProgress,
   RuntimeStatus
@@ -19,6 +20,7 @@ import { DownloadsPinnedWidget } from './DownloadsPinnedWidget'
 import { FloatingDots } from './FloatingDots'
 import { MetricsTimeSeries } from './MetricsTimeSeries'
 import { MetricsPinnedWidget } from './MetricsPinnedWidget'
+import { KnowledgeGraphView } from './KnowledgeGraphView'
 
 const METRICS_REFRESH_PRESETS_MS = [
   1000, 2000, 3000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000, 3_600_000
@@ -211,8 +213,11 @@ function runtimeKindLabel(kind: RuntimeStatus['kind']): string {
 
 /** Chat row in the viewport (may omit DB-only fields while a user message is optimistic). */
 type ChatMessageVm = {
+  id?: string
   role: string
   content: string
+  /** Unix ms from DB or client when the message was stored / sent. */
+  createdAt?: number
   promptTokens?: number | null
   completionTokens?: number | null
   promptTokensIsEstimate?: boolean | null
@@ -245,6 +250,35 @@ function bubbleTokenLine(m: ChatMessageVm): string {
 function streamingTokenFoot(tokens: ActivityChatTokens): string {
   const fmt = (n: number, est: boolean) => `${est ? '~' : ''}${Math.max(0, Math.round(n))}`
   return `Sent ${fmt(tokens.prompt, tokens.promptIsEstimate)} tok · Generated ${fmt(tokens.completion, tokens.completionIsEstimate)} tok`
+}
+
+/** Compact time for chat bubbles; full date in `title` via native <time>. */
+function formatChatTimestamp(ms: number): string {
+  const d = new Date(ms)
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  if (sameDay) {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  }
+  const sameYear = d.getFullYear() === now.getFullYear()
+  if (sameYear) {
+    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+  }
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  })
+}
+
+function chatTimeTitle(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, {
+    dateStyle: 'full',
+    timeStyle: 'medium'
+  })
 }
 
 function looksLikeLocalModelFilePath(s: string): boolean {
@@ -512,6 +546,9 @@ export default function App(): React.ReactElement {
   const [wikiBody, setWikiBody] = useState('')
   const [wikiTitle, setWikiTitle] = useState('')
   const [wikiSelectedId, setWikiSelectedId] = useState<string | null>(null)
+  const [wikiArticleTab, setWikiArticleTab] = useState<'read' | 'graph'>('read')
+  const [kgPayload, setKgPayload] = useState<KnowledgeGraphPayload | null>(null)
+  const [kgLoading, setKgLoading] = useState(false)
 
   const [metricsBundle, setMetricsBundle] = useState<{
     snapshot: unknown
@@ -533,6 +570,7 @@ export default function App(): React.ReactElement {
   const [hfTokenInput, setHfTokenInput] = useState('')
   const [colorScheme, setColorScheme] = useState<ColorSchemeId>(DEFAULT_COLOR_SCHEME)
   const [chatMaxTokensDraft, setChatMaxTokensDraft] = useState(String(CHAT_MAX_TOKENS_DEFAULT))
+  const [wikiAutoExtract, setWikiAutoExtract] = useState(true)
   const [integrationListenEnabled, setIntegrationListenEnabled] = useState(false)
   const [integrationPortDraft, setIntegrationPortDraft] = useState(String(INTEGRATION_PORT_DEFAULT))
   const [integrationTokenDraft, setIntegrationTokenDraft] = useState('')
@@ -734,6 +772,7 @@ export default function App(): React.ReactElement {
   const [runtimeLoadProgress, setRuntimeLoadProgress] = useState<RuntimeLoadProgress | null>(null)
   const [runtimeStarting, setRuntimeStarting] = useState(false)
   const [chatSending, setChatSending] = useState(false)
+  const [streamingReplyStartedAt, setStreamingReplyStartedAt] = useState<number | null>(null)
   const [chatStreamBuffer, setChatStreamBuffer] = useState('')
   const [activityChatTokens, setActivityChatTokens] = useState<ActivityChatTokens | null>(null)
   const activityChatTokensRef = useRef<ActivityChatTokens | null>(null)
@@ -798,6 +837,24 @@ export default function App(): React.ReactElement {
     const t = await window.api.kbWikiTopics()
     setWikiTopics(t as { id: string; title: string; chunkCount: number }[])
   }, [])
+
+  const loadKnowledgeGraph = useCallback(async () => {
+    setKgLoading(true)
+    try {
+      const d = await window.api.kbKnowledgeGraph()
+      setKgPayload(d)
+    } catch {
+      setKgPayload(null)
+    } finally {
+      setKgLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (mainView === 'wiki' && wikiArticleTab === 'graph') {
+      void loadKnowledgeGraph()
+    }
+  }, [mainView, wikiArticleTab, wikiTopics.length, loadKnowledgeGraph])
 
   useEffect(() => {
     if (deleteConvId) setDeleteConvRemoveKb(false)
@@ -1073,6 +1130,7 @@ export default function App(): React.ReactElement {
       if (typeof c.chatMaxTokens === 'number') {
         setChatMaxTokensDraft(String(clampChatMaxTokens(c.chatMaxTokens)))
       }
+      setWikiAutoExtract(c.wikiAutoExtract !== false)
       if (typeof c.integrationListenEnabled === 'boolean') setIntegrationListenEnabled(c.integrationListenEnabled)
       if (typeof c.integrationPort === 'number') {
         setIntegrationPortDraft(String(clampIntegrationPort(c.integrationPort)))
@@ -1314,7 +1372,10 @@ export default function App(): React.ReactElement {
 
   const metricsWidgetControls = (
     <div className="drawer-section">
-      <h3>Pinned widgets</h3>
+      <h3 className="settings-section-title">
+        <i className="fa-solid fa-thumbtack" aria-hidden />
+        Pinned widgets
+      </h3>
       <label className="metrics-widget-check">
         <input
           type="checkbox"
@@ -1325,7 +1386,10 @@ export default function App(): React.ReactElement {
             void saveMetricsWidgetConfig({ metricsPinned: v })
           }}
         />
-        <span>Show live metrics in the Pinned widgets panel (does not write to history each tick)</span>
+        <span>
+          <i className="fa-solid fa-gauge-high" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
+          Show live metrics in the Pinned widgets panel (does not write to history each tick)
+        </span>
       </label>
       <label className="metrics-widget-check" style={{ marginTop: 14 }}>
         <input
@@ -1337,7 +1401,10 @@ export default function App(): React.ReactElement {
             void saveMetricsWidgetConfig({ downloadsPinned: v })
           }}
         />
-        <span>Show Hub download progress in the Pinned widgets panel</span>
+        <span>
+          <i className="fa-solid fa-download" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
+          Show Hub download progress in the Pinned widgets panel
+        </span>
       </label>
       <label className="metrics-widget-check" style={{ marginTop: 14 }}>
         <input
@@ -1349,10 +1416,14 @@ export default function App(): React.ReactElement {
             void saveMetricsWidgetConfig({ activityPinned: v })
           }}
         />
-        <span>Show model load and reply progress in the Pinned widgets panel</span>
+        <span>
+          <i className="fa-solid fa-bars-staggered" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
+          Show model load and reply progress in the Pinned widgets panel
+        </span>
       </label>
       <label style={{ display: 'block', marginTop: 16 }}>
         <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+          <i className="fa-solid fa-arrows-left-right" aria-hidden style={{ marginRight: 6, opacity: 0.6 }} />
           Panel side (when at least one widget is pinned)
         </span>
         <select
@@ -1372,6 +1443,7 @@ export default function App(): React.ReactElement {
         </select>
       </label>
       <p className="muted" style={{ margin: '10px 0 6px' }}>
+        <i className="fa-solid fa-clock" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
         Widget refresh rate (500 ms – 1 hour). Full stats drawer still records samples when you open it or press Record.
       </p>
       <select
@@ -1399,6 +1471,7 @@ export default function App(): React.ReactElement {
       <div className="row" style={{ marginTop: 12, alignItems: 'flex-end' }}>
         <label style={{ flex: 1, minWidth: 120 }}>
           <span className="muted" style={{ display: 'block', marginBottom: 4 }}>
+            <i className="fa-solid fa-stopwatch" aria-hidden style={{ marginRight: 6, opacity: 0.6 }} />
             Custom interval (seconds)
           </span>
           <input
@@ -1414,7 +1487,7 @@ export default function App(): React.ReactElement {
         </label>
         <button
           type="button"
-          className="btn-secondary"
+          className="btn-secondary settings-btn-icon"
           onClick={() => {
             const n = parseFloat(metricsCustomSec)
             if (Number.isNaN(n) || n < 0.5) return
@@ -1425,6 +1498,7 @@ export default function App(): React.ReactElement {
             void saveMetricsWidgetConfig({ metricsRefreshMs: ms })
           }}
         >
+          <i className="fa-solid fa-check" aria-hidden />
           Apply
         </button>
       </div>
@@ -1697,8 +1771,9 @@ export default function App(): React.ReactElement {
     setErr(null)
     const userText = draft.trim()
     setDraft('')
+    const userSentAt = Date.now()
     await window.api.messageAppend(convId, 'user', userText)
-    setMessages((prev) => [...prev, { role: 'user', content: userText }])
+    setMessages((prev) => [...prev, { role: 'user', content: userText, createdAt: userSentAt }])
     let context = userText
     if (ragSnippets.length) {
       context =
@@ -1716,6 +1791,7 @@ export default function App(): React.ReactElement {
     const totalChars = msgs.reduce((acc, m) => acc + m.content.length, 0)
     const promptTokenEstimate = Math.max(1, Math.ceil(totalChars / 4))
     setChatSending(true)
+    setStreamingReplyStartedAt(Date.now())
     setChatStreamBuffer('')
     const initialTok: ActivityChatTokens = {
       prompt: promptTokenEstimate,
@@ -1781,11 +1857,26 @@ export default function App(): React.ReactElement {
       )
       const m = await window.api.conversationMessages(convId)
       setMessages(m as ChatMessageVm[])
+      const convTitle = conversations.find((c) => c.id === convId)?.title
+      void window.api
+        .kbWikiExtractTurn({
+          conversationId: convId,
+          conversationTitle: convTitle,
+          userMessage: userText,
+          assistantMessage: reply
+        })
+        .then((r) => {
+          if (r.ok && r.skipped === false && r.sourceId) void loadWiki()
+        })
+        .catch(() => {
+          /* extraction is best-effort */
+        })
     } catch (e) {
       setErr(String(e))
     } finally {
       offChat()
       setChatSending(false)
+      setStreamingReplyStartedAt(null)
       setChatStreamBuffer('')
       activityChatTokensRef.current = null
       setActivityChatTokens(null)
@@ -1859,6 +1950,7 @@ export default function App(): React.ReactElement {
   }
 
   async function openWikiPage(sourceId: string): Promise<void> {
+    setWikiArticleTab('read')
     setWikiSelectedId(sourceId)
     const p = await window.api.kbWikiPage(sourceId)
     setWikiTitle(p.title)
@@ -2238,7 +2330,7 @@ export default function App(): React.ReactElement {
               ) : null}
               {settingsConfirmKind === 'factory' ? (
                 <p className="muted modal-text">
-                  Stops the runtime and cancels in-flight downloads. All saved settings (including custom models folder, llama binary path, Ollama URL, ports, max response tokens, IDE integration, and pinned widgets) return to defaults, and your Hugging Face token is removed from this device. Chats, knowledge base, wiki, caches, and model files are not changed by this action alone.
+                  Stops the runtime and cancels in-flight downloads. All saved settings (including custom models folder, llama binary path, Ollama URL, ports, max response tokens, auto wiki extraction from chat, IDE integration, and pinned widgets) return to defaults, and your Hugging Face token is removed from this device. Chats, knowledge base, wiki, caches, and model files are not changed by this action alone.
                 </p>
               ) : null}
               <div className="modal-actions">
@@ -2440,21 +2532,32 @@ export default function App(): React.ReactElement {
                     </div>
                   )}
                   {messages.map((m, i) => (
-                    <div key={i} className={`msg-row ${m.role === 'user' ? 'user' : 'assistant'}`}>
+                    <div key={m.id ?? `m-${i}`} className={`msg-row ${m.role === 'user' ? 'user' : 'assistant'}`}>
                       <div className="msg-bubble">
-                        <div
-                          className="msg-role"
-                          title={
-                            m.role === 'assistant' && runtimeStatus?.running && runtimeStatus.modelPath
-                              ? runtimeStatus.modelPath
-                              : undefined
-                          }
-                        >
-                          {m.role === 'assistant'
-                            ? assistantResponderLabel
-                            : m.role === 'user'
-                              ? 'you'
-                              : m.role}
+                        <div className="msg-bubble-top">
+                          <div
+                            className="msg-role"
+                            title={
+                              m.role === 'assistant' && runtimeStatus?.running && runtimeStatus.modelPath
+                                ? runtimeStatus.modelPath
+                                : undefined
+                            }
+                          >
+                            {m.role === 'assistant'
+                              ? assistantResponderLabel
+                              : m.role === 'user'
+                                ? 'you'
+                                : m.role}
+                          </div>
+                          {typeof m.createdAt === 'number' && Number.isFinite(m.createdAt) ? (
+                            <time
+                              className="msg-time"
+                              dateTime={new Date(m.createdAt).toISOString()}
+                              title={chatTimeTitle(m.createdAt)}
+                            >
+                              {formatChatTimestamp(m.createdAt)}
+                            </time>
+                          ) : null}
                         </div>
                         <ChatRichContent content={m.content} />
                         <div className="msg-token-foot">{bubbleTokenLine(m)}</div>
@@ -2464,15 +2567,26 @@ export default function App(): React.ReactElement {
                   {chatSending ? (
                     <div className="msg-row assistant">
                       <div className="msg-bubble msg-bubble--streaming">
-                        <div
-                          className="msg-role"
-                          title={
-                            runtimeStatus?.running && runtimeStatus.modelPath
-                              ? runtimeStatus.modelPath
-                              : undefined
-                          }
-                        >
-                          {assistantResponderLabel}
+                        <div className="msg-bubble-top">
+                          <div
+                            className="msg-role"
+                            title={
+                              runtimeStatus?.running && runtimeStatus.modelPath
+                                ? runtimeStatus.modelPath
+                                : undefined
+                            }
+                          >
+                            {assistantResponderLabel}
+                          </div>
+                          {streamingReplyStartedAt != null ? (
+                            <time
+                              className="msg-time"
+                              dateTime={new Date(streamingReplyStartedAt).toISOString()}
+                              title={chatTimeTitle(streamingReplyStartedAt)}
+                            >
+                              {formatChatTimestamp(streamingReplyStartedAt)}
+                            </time>
+                          ) : null}
                         </div>
                         {chatStreamBuffer ? (
                           <ChatRichContent content={chatStreamBuffer} plainStreaming />
@@ -2497,32 +2611,34 @@ export default function App(): React.ReactElement {
                       </span>
                     </div>
                   ) : null}
-                  <div className="rag-inline">
-                    <input
-                      className="input"
-                      placeholder="Search knowledge base…"
-                      value={ragQuery}
-                      onChange={(e) => setRagQuery(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && void runRag()}
-                    />
-                    <button type="button" className="btn-secondary" onClick={() => void runRag()} disabled={ragLoading}>
-                      {ragLoading ? 'Searching…' : 'Pull into chat'}
-                    </button>
-                    {ragSnippets.length > 0 && <span className="rag-badge">{ragSnippets.length} snippets active</span>}
-                  </div>
-                  {convId && messages.length > 0 && (
-                    <div className="save-chat-kb-row">
-                      <button
-                        type="button"
-                        className="btn-secondary btn-save-chat-kb"
-                        disabled={saveChatKbBusy}
-                        onClick={() => void saveCurrentChatToKb()}
-                        title="Adds this thread as a wiki source so it can be removed with the chat if you choose"
-                      >
-                        {saveChatKbBusy ? 'Saving…' : 'Save chat to knowledge base'}
+                  <div className="composer-toolbar">
+                    <div className="rag-inline">
+                      <input
+                        className="input"
+                        placeholder="Search knowledge base…"
+                        value={ragQuery}
+                        onChange={(e) => setRagQuery(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && void runRag()}
+                      />
+                      <button type="button" className="btn-secondary" onClick={() => void runRag()} disabled={ragLoading}>
+                        {ragLoading ? 'Searching…' : 'Pull into chat'}
                       </button>
+                      {ragSnippets.length > 0 && <span className="rag-badge">{ragSnippets.length} snippets active</span>}
                     </div>
-                  )}
+                    {convId && messages.length > 0 && (
+                      <div className="save-chat-kb-row">
+                        <button
+                          type="button"
+                          className="btn-secondary btn-save-chat-kb"
+                          disabled={saveChatKbBusy}
+                          onClick={() => void saveCurrentChatToKb()}
+                          title="Adds this thread as a wiki source so it can be removed with the chat if you choose"
+                        >
+                          {saveChatKbBusy ? 'Saving…' : 'Save chat to knowledge base'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   <div className="composer-box">
                     <textarea
                       placeholder={convId ? 'Message… (Enter to send, Shift+Enter for line)' : 'Pick or create a chat first'}
@@ -2636,17 +2752,58 @@ export default function App(): React.ReactElement {
                   ))}
                 </div>
               </nav>
-              <article className="wiki-article">
-                {wikiTitle ? (
+              <article
+                className={`wiki-article${wikiArticleTab === 'graph' ? ' wiki-article--graph' : ''}`}
+              >
+                <div className="wiki-article-tabs" role="tablist" aria-label="Wiki view">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={wikiArticleTab === 'read'}
+                    className={`wiki-article-tab${wikiArticleTab === 'read' ? ' active' : ''}`}
+                    onClick={() => setWikiArticleTab('read')}
+                  >
+                    Read
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={wikiArticleTab === 'graph'}
+                    className={`wiki-article-tab${wikiArticleTab === 'graph' ? ' active' : ''}`}
+                    onClick={() => {
+                      setWikiArticleTab('graph')
+                      void loadKnowledgeGraph()
+                    }}
+                  >
+                    Knowledge graph
+                  </button>
+                </div>
+
+                {wikiArticleTab === 'graph' ? (
+                  <KnowledgeGraphView
+                    data={kgPayload}
+                    loading={kgLoading}
+                    onRefresh={() => void loadKnowledgeGraph()}
+                    onPickSource={(id) => {
+                      setWikiArticleTab('read')
+                      void openWikiPage(id)
+                    }}
+                  />
+                ) : wikiTitle ? (
                   <>
                     <h1>{wikiTitle}</h1>
-                    <p className="wiki-lead">Compiled from your ingested sources. Use Pull into chat from the Chat view to cite this material.</p>
+                    <p className="wiki-lead">
+                      Compiled from your ingested sources. Use Pull into chat from the Chat view to cite this material.
+                    </p>
                     <div className="wiki-body wiki-prose">{wikiBody}</div>
                   </>
                 ) : (
                   <>
                     <h1>Your wiki</h1>
-                    <p className="wiki-lead">Select a topic or add a document. Content is chunked and searchable from Chat.</p>
+                    <p className="wiki-lead">
+                      Select a topic or add a document. Content is chunked and searchable from Chat. Open the{' '}
+                      <strong>Knowledge graph</strong> tab to see how sources, chunks, and wiki pages connect.
+                    </p>
                   </>
                 )}
               </article>
@@ -2666,7 +2823,12 @@ export default function App(): React.ReactElement {
                 {drawer === 'runtime' && 'Inference runtime'}
                 {drawer === 'train' && 'Training'}
                 {drawer === 'metrics' && 'Metrics'}
-                {drawer === 'settings' && 'Settings'}
+                {drawer === 'settings' && (
+                  <>
+                    <i className="fa-solid fa-gear" aria-hidden style={{ marginRight: 10, opacity: 0.88 }} />
+                    Settings
+                  </>
+                )}
               </h2>
               <button type="button" className="drawer-close" onClick={() => setDrawer(null)} aria-label="Close">
                 ×
@@ -3329,243 +3491,363 @@ export default function App(): React.ReactElement {
               )}
 
               {drawer === 'settings' && (
-                <>
-                  <div className="drawer-section">
-                    <h3>Appearance</h3>
-                    <p className="muted" style={{ marginTop: 0 }}>
-                      Accent palette for buttons, highlights, and chat accents. Secondary panels use a light glass treatment so the backdrop shows
-                      through.
-                    </p>
-                    <label style={{ display: 'block', marginTop: 12 }}>
-                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                        Color scheme
-                      </span>
-                      <select
-                        className="select"
-                        style={{ width: '100%', maxWidth: 320 }}
-                        value={colorScheme}
-                        onChange={(e) => void saveColorScheme(parseColorScheme(e.target.value))}
-                      >
-                        {COLOR_SCHEME_IDS.map((id) => (
-                          <option key={id} value={id}>
-                            {COLOR_SCHEME_LABELS[id]}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-                  <div className="drawer-section">
-                    <h3>Chat generation</h3>
-                    <p className="muted" style={{ marginTop: 0 }}>
-                      Caps how many tokens the model may generate per reply (Ollama <code className="inline-code">num_predict</code>, llama.cpp{' '}
-                      <code className="inline-code">max_tokens</code>). Takes effect on the next message.
-                    </p>
-                    <label style={{ display: 'block', marginTop: 12 }}>
-                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                        Max response tokens
-                      </span>
-                      <input
-                        type="number"
-                        className="input"
-                        style={{ width: '100%', maxWidth: 200 }}
-                        min={CHAT_MAX_TOKENS_MIN}
-                        max={CHAT_MAX_TOKENS_MAX}
-                        value={chatMaxTokensDraft}
-                        onChange={(e) => setChatMaxTokensDraft(e.target.value)}
-                        onBlur={() => {
-                          const n = parseInt(chatMaxTokensDraft.trim(), 10)
-                          const v = clampChatMaxTokens(Number.isFinite(n) ? n : CHAT_MAX_TOKENS_DEFAULT)
-                          setChatMaxTokensDraft(String(v))
-                          void window.api.setConfig({ chatMaxTokens: v })
-                        }}
-                      />
-                    </label>
-                  </div>
-                  <div className="drawer-section">
-                    <h3>IDE integration (localhost)</h3>
-                    <p className="muted" style={{ marginTop: 0 }}>
-                      HTTP API on <strong>127.0.0.1</strong> for IntelliJ and other tools. Start the model runtime in this app first. Sample plugin and API
-                      notes live under <code className="inline-code">integrations/intellij-plugin</code> and <code className="inline-code">docs/intellij-integration.md</code>.
-                    </p>
-                    <label className="metrics-widget-check" style={{ marginTop: 12 }}>
-                      <input
-                        type="checkbox"
-                        checked={integrationListenEnabled}
-                        onChange={(e) => {
-                          const v = e.target.checked
-                          setIntegrationListenEnabled(v)
-                          void window.api.setConfig({ integrationListenEnabled: v })
-                        }}
-                      />
-                      <span>Enable HTTP bridge for plugins</span>
-                    </label>
-                    <label style={{ display: 'block', marginTop: 12 }}>
-                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                        Port
-                      </span>
-                      <input
-                        type="number"
-                        className="input"
-                        style={{ width: '100%', maxWidth: 200 }}
-                        min={1024}
-                        max={65535}
-                        value={integrationPortDraft}
-                        onChange={(e) => setIntegrationPortDraft(e.target.value)}
-                        onBlur={() => {
-                          const n = parseInt(integrationPortDraft.trim(), 10)
-                          const v = clampIntegrationPort(Number.isFinite(n) ? n : INTEGRATION_PORT_DEFAULT)
-                          setIntegrationPortDraft(String(v))
-                          void window.api.setConfig({ integrationPort: v })
-                        }}
-                      />
-                    </label>
-                    <label style={{ display: 'block', marginTop: 12 }}>
-                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                        Optional bearer token (if set, required for <code className="inline-code">/v1/*</code> only)
-                      </span>
+                <div className="settings-page">
+                  <section className="settings-group" aria-labelledby="settings-grp-look">
+                    <h2 id="settings-grp-look" className="settings-group-heading">
+                      <i className="fa-solid fa-palette" aria-hidden />
+                      Look &amp; layout
+                    </h2>
+                    <div className="drawer-section">
+                      <h3 className="settings-section-title">
+                        <i className="fa-solid fa-swatchbook" aria-hidden />
+                        Appearance
+                      </h3>
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        Accent palette for buttons, highlights, and chat accents. Secondary panels use a light glass treatment so the backdrop shows
+                        through.
+                      </p>
+                      <label style={{ display: 'block', marginTop: 12 }}>
+                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                          <i className="fa-solid fa-droplet" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
+                          Color scheme
+                        </span>
+                        <select
+                          className="select"
+                          style={{ width: '100%', maxWidth: 320 }}
+                          value={colorScheme}
+                          onChange={(e) => void saveColorScheme(parseColorScheme(e.target.value))}
+                        >
+                          {COLOR_SCHEME_IDS.map((id) => (
+                            <option key={id} value={id}>
+                              {COLOR_SCHEME_LABELS[id]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <div className="drawer-section">
+                      <h3 className="settings-section-title">
+                        <i className="fa-solid fa-table-columns" aria-hidden />
+                        Chat slide panels
+                      </h3>
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        On medium widths the knowledge panel slides over the chat; at ≤720px the chat list does too. Wide layouts keep fixed columns.
+                      </p>
+                      <label style={{ display: 'block', marginTop: 12 }}>
+                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                          <i className="fa-solid fa-comments" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
+                          Chats list slides in from (≤720px)
+                        </span>
+                        <select
+                          className="select"
+                          style={{ width: '100%', maxWidth: 320 }}
+                          value={slideConvEdge}
+                          onChange={(e) => {
+                            const v = e.target.value as SlidePanelEdge
+                            setSlideConvEdge(v)
+                            persistSlideEdge(LS_SLIDE_CONV_EDGE, v)
+                          }}
+                        >
+                          <option value="left">Left edge</option>
+                          <option value="right">Right edge</option>
+                        </select>
+                      </label>
+                      <label style={{ display: 'block', marginTop: 12 }}>
+                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                          <i className="fa-solid fa-book" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
+                          Knowledge panel slides in from (≤1100px)
+                        </span>
+                        <select
+                          className="select"
+                          style={{ width: '100%', maxWidth: 320 }}
+                          value={slideKbEdge}
+                          onChange={(e) => {
+                            const v = e.target.value as SlidePanelEdge
+                            setSlideKbEdge(v)
+                            persistSlideEdge(LS_SLIDE_KB_EDGE, v)
+                          }}
+                        >
+                          <option value="left">Left edge</option>
+                          <option value="right">Right edge</option>
+                        </select>
+                      </label>
+                    </div>
+                  </section>
+
+                  <section className="settings-group" aria-labelledby="settings-grp-chat">
+                    <h2 id="settings-grp-chat" className="settings-group-heading">
+                      <i className="fa-solid fa-comments" aria-hidden />
+                      Chat &amp; knowledge
+                    </h2>
+                    <div className="drawer-section">
+                      <h3 className="settings-section-title">
+                        <i className="fa-solid fa-wand-magic-sparkles" aria-hidden />
+                        Generation &amp; wiki
+                      </h3>
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        Caps how many tokens the model may generate per reply (Ollama <code className="inline-code">num_predict</code>, llama.cpp{' '}
+                        <code className="inline-code">max_tokens</code>). Takes effect on the next message.
+                      </p>
+                      <label style={{ display: 'block', marginTop: 12 }}>
+                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                          <i className="fa-solid fa-hashtag" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
+                          Max response tokens
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          style={{ width: '100%', maxWidth: 200 }}
+                          min={CHAT_MAX_TOKENS_MIN}
+                          max={CHAT_MAX_TOKENS_MAX}
+                          value={chatMaxTokensDraft}
+                          onChange={(e) => setChatMaxTokensDraft(e.target.value)}
+                          onBlur={() => {
+                            const n = parseInt(chatMaxTokensDraft.trim(), 10)
+                            const v = clampChatMaxTokens(Number.isFinite(n) ? n : CHAT_MAX_TOKENS_DEFAULT)
+                            setChatMaxTokensDraft(String(v))
+                            void window.api.setConfig({ chatMaxTokens: v })
+                          }}
+                        />
+                      </label>
+                      <label className="metrics-widget-check" style={{ marginTop: 16 }}>
+                        <input
+                          type="checkbox"
+                          checked={wikiAutoExtract}
+                          onChange={(e) => {
+                            const v = e.target.checked
+                            setWikiAutoExtract(v)
+                            void window.api.setConfig({ wikiAutoExtract: v })
+                          }}
+                        />
+                        <span>
+                          <i className="fa-solid fa-book-open" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
+                          Auto-extract wiki notes after each reply
+                        </span>
+                      </label>
+                      <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                        Runs a short second pass on the local model to distill bullet notes into the knowledge base. Notes are linked to the conversation so
+                        they can be removed with <strong>Save chat to knowledge base</strong>–style cleanup when you delete the chat. Turn off to save time and
+                        tokens.
+                      </p>
+                    </div>
+                  </section>
+
+                  <section className="settings-group" aria-labelledby="settings-grp-integ">
+                    <h2 id="settings-grp-integ" className="settings-group-heading">
+                      <i className="fa-solid fa-plug" aria-hidden />
+                      Integrations
+                    </h2>
+                    <div className="drawer-section">
+                      <h3 className="settings-section-title">
+                        <i className="fa-solid fa-code" aria-hidden />
+                        IDE bridge (localhost)
+                      </h3>
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        HTTP API on <strong>127.0.0.1</strong> for IntelliJ and other tools. Start the model runtime in this app first. Sample plugin and API
+                        notes live under <code className="inline-code">integrations/intellij-plugin</code> and <code className="inline-code">docs/intellij-integration.md</code>.
+                      </p>
+                      <label className="metrics-widget-check" style={{ marginTop: 12 }}>
+                        <input
+                          type="checkbox"
+                          checked={integrationListenEnabled}
+                          onChange={(e) => {
+                            const v = e.target.checked
+                            setIntegrationListenEnabled(v)
+                            void window.api.setConfig({ integrationListenEnabled: v })
+                          }}
+                        />
+                        <span>
+                          <i className="fa-solid fa-tower-broadcast" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
+                          Enable HTTP bridge for plugins
+                        </span>
+                      </label>
+                      <label style={{ display: 'block', marginTop: 12 }}>
+                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                          <i className="fa-solid fa-network-wired" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
+                          Port
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          style={{ width: '100%', maxWidth: 200 }}
+                          min={1024}
+                          max={65535}
+                          value={integrationPortDraft}
+                          onChange={(e) => setIntegrationPortDraft(e.target.value)}
+                          onBlur={() => {
+                            const n = parseInt(integrationPortDraft.trim(), 10)
+                            const v = clampIntegrationPort(Number.isFinite(n) ? n : INTEGRATION_PORT_DEFAULT)
+                            setIntegrationPortDraft(String(v))
+                            void window.api.setConfig({ integrationPort: v })
+                          }}
+                        />
+                      </label>
+                      <label style={{ display: 'block', marginTop: 12 }}>
+                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                          <i className="fa-solid fa-key" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
+                          Optional bearer token (if set, required for <code className="inline-code">/v1/*</code> only)
+                        </span>
+                        <input
+                          type="password"
+                          className="input"
+                          style={{ width: '100%', maxWidth: 360 }}
+                          autoComplete="off"
+                          value={integrationTokenDraft}
+                          onChange={(e) => setIntegrationTokenDraft(e.target.value)}
+                          onBlur={() => void window.api.setConfig({ integrationToken: integrationTokenDraft })}
+                        />
+                      </label>
+                    </div>
+                    <div className="drawer-section">
+                      <h3 className="settings-section-title">
+                        <i className="fa-solid fa-cloud-arrow-down" aria-hidden />
+                        Hugging Face
+                      </h3>
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        Token used for Hub downloads and private models. Stored with OS secure storage when you save.
+                      </p>
                       <input
                         type="password"
                         className="input"
-                        style={{ width: '100%', maxWidth: 360 }}
-                        autoComplete="off"
-                        value={integrationTokenDraft}
-                        onChange={(e) => setIntegrationTokenDraft(e.target.value)}
-                        onBlur={() => void window.api.setConfig({ integrationToken: integrationTokenDraft })}
+                        placeholder="hf_…"
+                        value={hfTokenInput}
+                        onChange={(e) => setHfTokenInput(e.target.value)}
                       />
-                    </label>
-                  </div>
-                  <div className="drawer-section">
-                    <h3>Chat slide panels</h3>
-                    <p className="muted" style={{ marginTop: 0 }}>
-                      On medium widths the knowledge panel slides over the chat; at ≤720px the chat list does too. Wide layouts keep fixed columns.
-                    </p>
-                    <label style={{ display: 'block', marginTop: 12 }}>
-                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                        Chats list slides in from (≤720px)
-                      </span>
-                      <select
-                        className="select"
-                        style={{ width: '100%', maxWidth: 320 }}
-                        value={slideConvEdge}
-                        onChange={(e) => {
-                          const v = e.target.value as SlidePanelEdge
-                          setSlideConvEdge(v)
-                          persistSlideEdge(LS_SLIDE_CONV_EDGE, v)
-                        }}
+                      <button
+                        type="button"
+                        className="btn-primary settings-btn-icon"
+                        style={{ marginTop: 8 }}
+                        onClick={() => void window.api.setHfToken(hfTokenInput || null).then(() => setHfTokenInput(''))}
                       >
-                        <option value="left">Left edge</option>
-                        <option value="right">Right edge</option>
-                      </select>
-                    </label>
-                    <label style={{ display: 'block', marginTop: 12 }}>
-                      <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                        Knowledge panel slides in from (≤1100px)
-                      </span>
-                      <select
-                        className="select"
-                        style={{ width: '100%', maxWidth: 320 }}
-                        value={slideKbEdge}
-                        onChange={(e) => {
-                          const v = e.target.value as SlidePanelEdge
-                          setSlideKbEdge(v)
-                          persistSlideEdge(LS_SLIDE_KB_EDGE, v)
-                        }}
-                      >
-                        <option value="left">Left edge</option>
-                        <option value="right">Right edge</option>
-                      </select>
-                    </label>
-                  </div>
-                  {metricsWidgetControls}
-                  <div className="drawer-section">
-                    <h3>Model install location</h3>
-                    <p className="muted" style={{ marginTop: 0 }}>
-                      Default folder for new Hugging Face downloads when the Hub leaves the destination as the app default. The folder is created
-                      if it does not exist.
-                    </p>
-                    <input
-                      className="input"
-                      value={modelsInstallPathDraft}
-                      onChange={(e) => setModelsInstallPathDraft(e.target.value)}
-                      placeholder="Absolute path to models folder"
-                    />
-                    <div className="row" style={{ marginTop: 8, flexWrap: 'wrap', gap: 8 }}>
-                      <button type="button" className="btn-secondary" onClick={() => void pickModelsInstallFolder()}>
-                        Browse…
-                      </button>
-                      <button type="button" className="btn-primary" onClick={() => void saveModelsInstallLocation()}>
-                        Save location
-                      </button>
-                      <button type="button" className="btn-secondary" onClick={() => void resetModelsInstallToDefault()}>
-                        Reset to app default
+                        <i className="fa-solid fa-floppy-disk" aria-hidden />
+                        Save token
                       </button>
                     </div>
-                    {modelsDirSaveErr ? (
-                      <p className="runtime-status-error" style={{ marginTop: 10 }} role="alert">
-                        {modelsDirSaveErr}
+                  </section>
+
+                  <section className="settings-group" aria-labelledby="settings-grp-storage">
+                    <h2 id="settings-grp-storage" className="settings-group-heading">
+                      <i className="fa-solid fa-hard-drive" aria-hidden />
+                      Storage &amp; paths
+                    </h2>
+                    <div className="drawer-section">
+                      <h3 className="settings-section-title">
+                        <i className="fa-solid fa-folder-open" aria-hidden />
+                        Model install location
+                      </h3>
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        Default folder for new Hugging Face downloads when the Hub leaves the destination as the app default. The folder is created
+                        if it does not exist.
                       </p>
-                    ) : null}
-                  </div>
-                  <div className="drawer-section">
-                    <h3>Hugging Face token</h3>
-                    <input
-                      type="password"
-                      className="input"
-                      placeholder="hf_…"
-                      value={hfTokenInput}
-                      onChange={(e) => setHfTokenInput(e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      style={{ marginTop: 8 }}
-                      onClick={() => void window.api.setHfToken(hfTokenInput || null).then(() => setHfTokenInput(''))}
-                    >
-                      Save
-                    </button>
-                  </div>
-                  <div className="drawer-section">
-                    <h3>Caches, models, and reset</h3>
-                    <p className="muted" style={{ marginTop: 0 }}>
-                      Destructive actions are confirmed in a dialog. Use them when troubleshooting or reclaiming disk space.
-                    </p>
-                    <div className="settings-danger-actions">
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        disabled={settingsMaintenanceBusy !== false}
-                        onClick={() => setSettingsConfirmKind('caches')}
-                      >
-                        {settingsMaintenanceBusy === 'caches' ? 'Working…' : 'Clear all caches'}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-danger"
-                        disabled={settingsMaintenanceBusy !== false}
-                        onClick={() => setSettingsConfirmKind('models')}
-                      >
-                        {settingsMaintenanceBusy === 'models' ? 'Deleting…' : 'Delete all models'}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-danger"
-                        disabled={settingsMaintenanceBusy !== false}
-                        onClick={() => setSettingsConfirmKind('factory')}
-                      >
-                        {settingsMaintenanceBusy === 'factory' ? 'Resetting…' : 'Reset settings to defaults'}
-                      </button>
+                      <input
+                        className="input"
+                        value={modelsInstallPathDraft}
+                        onChange={(e) => setModelsInstallPathDraft(e.target.value)}
+                        placeholder="Absolute path to models folder"
+                      />
+                      <div className="row" style={{ marginTop: 8, flexWrap: 'wrap', gap: 8 }}>
+                        <button
+                          type="button"
+                          className="btn-secondary settings-btn-icon"
+                          onClick={() => void pickModelsInstallFolder()}
+                        >
+                          <i className="fa-solid fa-folder-tree" aria-hidden />
+                          Browse…
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary settings-btn-icon"
+                          onClick={() => void saveModelsInstallLocation()}
+                        >
+                          <i className="fa-solid fa-floppy-disk" aria-hidden />
+                          Save location
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary settings-btn-icon"
+                          onClick={() => void resetModelsInstallToDefault()}
+                        >
+                          <i className="fa-solid fa-rotate-left" aria-hidden />
+                          Reset to app default
+                        </button>
+                      </div>
+                      {modelsDirSaveErr ? (
+                        <p className="runtime-status-error" style={{ marginTop: 10 }} role="alert">
+                          {modelsDirSaveErr}
+                        </p>
+                      ) : null}
                     </div>
-                    {settingsMaintenanceMessage ? (
-                      <p className="settings-action-success" role="status">
-                        {settingsMaintenanceMessage}
+                    <div className="drawer-section">
+                      <h3 className="settings-section-title">
+                        <i className="fa-solid fa-map" aria-hidden />
+                        Data paths (read-only)
+                      </h3>
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        Internal paths the app uses for chats, KB, wiki, and caches—useful when backing up or scripting.
                       </p>
-                    ) : null}
-                  </div>
-                  <div className="drawer-section">
-                    <h3>Data paths</h3>
-                    <pre className="code-block">{JSON.stringify(paths, null, 2)}</pre>
-                  </div>
-                </>
+                      <pre className="code-block">{JSON.stringify(paths, null, 2)}</pre>
+                    </div>
+                  </section>
+
+                  <section className="settings-group" aria-labelledby="settings-grp-widgets">
+                    <h2 id="settings-grp-widgets" className="settings-group-heading">
+                      <i className="fa-solid fa-gauge-high" aria-hidden />
+                      Widgets &amp; refresh
+                    </h2>
+                    {metricsWidgetControls}
+                  </section>
+
+                  <section className="settings-group settings-group--danger" aria-labelledby="settings-grp-maint">
+                    <h2 id="settings-grp-maint" className="settings-group-heading">
+                      <i className="fa-solid fa-triangle-exclamation" aria-hidden />
+                      Maintenance
+                    </h2>
+                    <div className="drawer-section">
+                      <h3 className="settings-section-title">
+                        <i className="fa-solid fa-wrench" aria-hidden />
+                        Caches, models, &amp; reset
+                      </h3>
+                      <p className="muted" style={{ marginTop: 0 }}>
+                        Destructive actions are confirmed in a dialog. Use them when troubleshooting or reclaiming disk space.
+                      </p>
+                      <div className="settings-danger-actions">
+                        <button
+                          type="button"
+                          className="btn-secondary settings-btn-icon"
+                          disabled={settingsMaintenanceBusy !== false}
+                          onClick={() => setSettingsConfirmKind('caches')}
+                        >
+                          <i className="fa-solid fa-broom" aria-hidden />
+                          {settingsMaintenanceBusy === 'caches' ? 'Working…' : 'Clear all caches'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-danger settings-btn-icon"
+                          disabled={settingsMaintenanceBusy !== false}
+                          onClick={() => setSettingsConfirmKind('models')}
+                        >
+                          <i className="fa-solid fa-trash-can" aria-hidden />
+                          {settingsMaintenanceBusy === 'models' ? 'Deleting…' : 'Delete all models'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-danger settings-btn-icon"
+                          disabled={settingsMaintenanceBusy !== false}
+                          onClick={() => setSettingsConfirmKind('factory')}
+                        >
+                          <i className="fa-solid fa-rotate-left" aria-hidden />
+                          {settingsMaintenanceBusy === 'factory' ? 'Resetting…' : 'Reset settings to defaults'}
+                        </button>
+                      </div>
+                      {settingsMaintenanceMessage ? (
+                        <p className="settings-action-success" role="status">
+                          <i className="fa-solid fa-circle-check" aria-hidden style={{ marginRight: 8 }} />
+                          {settingsMaintenanceMessage}
+                        </p>
+                      ) : null}
+                    </div>
+                  </section>
+                </div>
               )}
             </div>
           </div>
