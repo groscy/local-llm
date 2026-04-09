@@ -119,6 +119,21 @@ const MIGRATIONS: { version: number; sql: string }[] = [
     sql: `
       ALTER TABLE metrics_samples ADD COLUMN model_memory_mb REAL;
     `
+  },
+  {
+    version: 4,
+    sql: `
+      ALTER TABLE downloads ADD COLUMN chat_display_name TEXT;
+    `
+  },
+  {
+    version: 5,
+    sql: `
+      ALTER TABLE messages ADD COLUMN prompt_tokens INTEGER;
+      ALTER TABLE messages ADD COLUMN completion_tokens INTEGER;
+      ALTER TABLE messages ADD COLUMN prompt_tokens_estimated INTEGER;
+      ALTER TABLE messages ADD COLUMN completion_tokens_estimated INTEGER;
+    `
   }
 ]
 
