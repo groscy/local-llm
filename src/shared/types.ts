@@ -54,6 +54,8 @@ export interface DownloadJob {
   bytesReceived: number
   bytesTotal: number
   error?: string
+  /** Hub model id (e.g. org/name) saved at download time for chat author label when this file is loaded. */
+  chatDisplayName?: string
 }
 
 /** Row from `downloads` table (SQLite column names). */
@@ -70,6 +72,8 @@ export interface DownloadRow {
   /** Present while the file is actively downloading (merged from main-process job). */
   bytes_received?: number
   progress_percent?: number
+  /** Hugging Face model id (or custom label) stored when the file was downloaded; used as chat “author” when loaded. */
+  chat_display_name?: string
 }
 
 export interface RuntimeStatus {
@@ -95,6 +99,20 @@ export interface MessageRow {
   content: string
   createdAt: number
   modelId?: string
+  /** Prompt tokens for this turn (stored on the user message once the assistant reply completes). */
+  promptTokens?: number | null
+  /** Completion tokens for this reply (stored on the assistant message). */
+  completionTokens?: number | null
+  promptTokensIsEstimate?: boolean | null
+  completionTokensIsEstimate?: boolean | null
+}
+
+/** Optional usage snapshot when appending the assistant message after a chat completion. */
+export interface MessageAppendUsage {
+  promptTokens?: number
+  completionTokens?: number
+  promptIsEstimate?: boolean
+  completionIsEstimate?: boolean
 }
 
 export interface KbSource {
@@ -128,7 +146,7 @@ export interface MetricsSnapshot {
   processRssMb?: number
   gpuMemUsedMb?: number
   gpuMemTotalMb?: number
-  /** llama.cpp child RSS or Ollama model size (approx.), MiB */
+  /** llama.cpp child resident set or Ollama model size (approx.), MiB */
   modelMemoryMb?: number
 }
 
