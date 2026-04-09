@@ -4,11 +4,16 @@
     <vendor>Local</vendor>
 
     <description><![CDATA[
-    Talks to the <b>local-llm-desktop</b> HTTP bridge on 127.0.0.1 (enable under Settings in the desktop app).
+    Talks to the <b>local-llm-desktop</b> HTTP bridge on 127.0.0.1 (enable under Settings in the desktop app). Shows live <b>connection / health</b> in the tool window (GET /health).
+    Includes a <b>Local LLM</b> tool window: prompt the local model, optionally attach a structural <b>knowledge graph</b>
+    built from Java (PSI) and Kotlin (<b>text heuristics</b>, no Kotlin K1 PSI — compatible with Kotlin <b>K2</b> mode),
+    optional <b>apply file blocks</b> from model replies (with confirmation), a <b>domain vocabulary</b> view (terms grouped by package domain),
+    and follow-up when the model asks for clarification (<code>[CLARIFY]</code> protocol).
     Configure port and optional bearer token under <b>Settings → Tools → Local LLM Desktop</b>.
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.java</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <applicationConfigurable
@@ -16,13 +21,16 @@
                 instance="com.localllm.intellij.LocalLlmConfigurable"
                 id="com.localllm.intellij.settings"
                 displayName="Local LLM Desktop"/>
+        <toolWindow id="LocalLLM" secondary="true" anchor="right"
+                    factoryClass="com.localllm.intellij.LocalLlmToolWindowFactory"/>
+        <projectService serviceImplementation="com.localllm.intellij.LocalLlmBridgeService"/>
     </extensions>
 
     <actions>
         <action id="com.localllm.intellij.AskLocalLlm"
                 class="com.localllm.intellij.AskLocalLlmAction"
-                text="Ask Local LLM…"
-                description="Send prompt to Local LLM Desktop via localhost bridge">
+                text="Local LLM Chat…"
+                description="Open Local LLM tool window (prefills from selection when present)">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>

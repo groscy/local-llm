@@ -42,10 +42,13 @@ Same auth rules as `/v1/chat`. Returns `running`, `kind`, `modelPath`, `endpoint
 ```json
 {
   "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
     { "role": "user", "content": "Hello" }
   ]
 }
 ```
+
+`role` may be `system`, `user`, or `assistant`. The sample IntelliJ plugin sends a **system** message (instructions + optional codebase graph) and **user** messages; clarification rounds append **assistant** then **user** turns.
 
 Response `200`:
 
@@ -60,9 +63,10 @@ Uses the app’s **Max response tokens** setting. Errors return JSON `{ "error":
 
 ## Sample plugin
 
-See `integrations/intellij-plugin/` for a minimal IntelliJ Platform plugin (Gradle) with:
+See `integrations/intellij-plugin/` for an IntelliJ Platform plugin (Gradle) with:
 
 - **Settings → Tools → Local LLM Desktop** — port and token (must match the app).
-- **Tools → Ask Local LLM…** — uses selected editor text as the prompt, or asks for input.
+- **Local LLM** tool window — prompt the local model; optional **codebase knowledge graph** (Java via PSI, Kotlin via **text** so Kotlin **K2** mode is supported); **`[CLARIFY]`** follow-up dialogs when the model asks for clarification; optional **structured file apply** — if the model emits `<<<LOCAL_LLM_FILE path="relative/path">>>` … `<<<END_LOCAL_LLM_FILE>>>` blocks (full file contents), the plugin can write them under the project root after you confirm (see system prompt in the plugin); **Vocabulary…** builds a **domain vocabulary** from scanned sources (grouped by coarse package domain and full package) plus attached file context.
+- **Tools → Local LLM Chat…** — opens the tool window and prefills from the editor selection when present.
 
-Build from `integrations/intellij-plugin/` with **Gradle** (JDK 17+, Gradle 8+), e.g. `gradle buildPlugin` or `./gradlew buildPlugin`. Then **Settings → Plugins → ⚙ → Install Plugin from Disk…** and choose the ZIP under `build/distributions/` (for example `local-llm-intellij-0.1.0.zip`).
+Build from `integrations/intellij-plugin/` with **JDK 17+** and **Gradle 8.13+** (IntelliJ Platform Gradle Plugin 2.x). Prefer `./gradlew buildPlugin` / `gradlew.bat buildPlugin` (wrapper uses Gradle 9.4.1; bump the wrapper when Gradle 10 is released). Then **Settings → Plugins → ⚙ → Install Plugin from Disk…** and choose the ZIP under `build/distributions/` (for example `local-llm-intellij-0.2.4.zip`).

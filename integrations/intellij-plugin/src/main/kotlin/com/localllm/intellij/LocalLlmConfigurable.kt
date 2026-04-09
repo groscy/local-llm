@@ -2,9 +2,11 @@ package com.localllm.intellij
 
 import com.intellij.ide.util.PropertiesComponent
 import com.intellij.openapi.options.Configurable
+import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.FormBuilder
 import javax.swing.JComponent
+import javax.swing.ScrollPaneConstants
 
 class LocalLlmConfigurable : Configurable {
     private val portField = JBTextField()
@@ -14,10 +16,15 @@ class LocalLlmConfigurable : Configurable {
     override fun getDisplayName(): String = "Local LLM Desktop"
 
     override fun createComponent(): JComponent {
-        root = FormBuilder.createFormBuilder()
+        val form = FormBuilder.createFormBuilder()
             .addLabeledComponent("Bridge port (same as desktop app):", portField)
             .addLabeledComponent("Bearer token (optional):", tokenField)
             .panel
+        root = JBScrollPane(form).apply {
+            border = null
+            horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+            verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
+        }
         reset()
         return root!!
     }
