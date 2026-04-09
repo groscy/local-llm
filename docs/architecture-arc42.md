@@ -6,4 +6,4 @@ This documentation has been split into **one file per chapter** under:
 
 Start there for the chapter index and links.
 
-**Related:** [User Guide](./USER-GUIDE.md) · [IDE / IntelliJ HTTP bridge](./intellij-integration.md) · sample plugin under `integrations/intellij-plugin/`.
+**Related:** [Project plan / status](./PLAN.md) · [User Guide](./USER-GUIDE.md) · [IDE / IntelliJ HTTP bridge](./intellij-integration.md) · sample plugin under `integrations/intellij-plugin/`.

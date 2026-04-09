@@ -8,7 +8,7 @@ This guide explains how to install, configure, and run **Local LLM Desktop**: br
 
 ### 1.1 Computer requirements
 
-- **Windows** (x64), **macOS** (Intel or Apple Silicon), or **Linux** (x64), matching the zip you install.
+- **Windows** (x64), **macOS** (Intel or Apple Silicon), or **Linux** (x64), matching the **installer or zip** you use.
 - Enough **disk space** for models (often several gigabytes per model).
 - An **inference backend** (see section 5): either **Ollama** or **llama.cpp**’s `llama-server`.
 
@@ -22,13 +22,24 @@ This guide explains how to install, configure, and run **Local LLM Desktop**: br
 
 ## 2. Install the application
 
-### 2.1 From a release zip (recommended for end users)
+### 2.1 From an installer (recommended when available)
+
+| Platform | Artifact | What to do |
+|----------|-----------|------------|
+| **Windows** | `Local LLM Desktop-Setup-<version>.exe` | Run the installer, choose install location if prompted, use Start Menu or desktop shortcut. |
+| **macOS** | `Local LLM Desktop-<version>-<arch>.dmg` | Open the DMG, drag **Local LLM Desktop** into **Applications**. |
+| **Linux** | `Local LLM Desktop-<version>-linux-x64.deb` | **Debian / Ubuntu / Mint:** `sudo apt install ./Local\ LLM\ Desktop-<version>-linux-x64.deb` (or `sudo dpkg -i <file>.deb` then `sudo apt -f install` if dependencies are missing). Installs menu entry like a normal app. |
+| **Linux** | `Local LLM Desktop-<version>-linux-x64.AppImage` | Portable single file: `chmod +x` then run, or use an AppImage desktop integration tool. |
+
+Installers are produced from source with `**npm run dist:installer**` on the **same** OS you are targeting (output under `release/` or `release-builds/<timestamp>/`). **Linux packages must be built on Linux** (or **WSL2** with Ubuntu, from the Linux filesystem — not `/mnt/c/...` if native modules misbehave). **RPM** (Fedora/RHEL) is configured in `electron-builder.yml`; after `npm run build`, run `npx electron-builder --publish never --linux rpm` on an RPM-based system (or install the `rpm` toolchain on Debian if you need `.rpm` there). **zip** builds remain available if you prefer a portable folder.
+
+### 2.2 From a release zip (portable folder)
 
 1. Unzip `**Local LLM Desktop-<version>-<platform>.zip`** to a folder of your choice.
-2. Run `**Local LLM Desktop.exe**` (Windows) or the app bundle inside the zip (macOS/Linux layout depends on electron-builder output).
+2. Run `**Local LLM Desktop.exe`** (Windows) or the app bundle inside the zip (macOS/Linux layout depends on electron-builder output).
 3. On first launch, the app creates its **user data** folder (database, logs, default models directory). You do not need to run anything as administrator for normal use.
 
-### 2.2 From source (developers)
+### 2.3 From source (developers)
 
 1. Install **[Node.js](https://nodejs.org/)** (LTS 20 or 22 works well with this project).
 2. Clone or copy the project folder, then in a terminal:
@@ -51,7 +62,13 @@ npm run preview
 npm run dist:zip
 ```
 
-Output appears under `release/` or, if that folder is locked on Windows, under `release-builds/<timestamp>/`.
+**Create an installer** (NSIS on Windows, DMG on macOS, **.deb + AppImage** on Linux):
+
+```bash
+npm run dist:installer
+```
+
+Output appears under `release/` or, if that folder is locked on Windows, under `release-builds/<timestamp>/`. On Linux you should get both a **`.deb`** and an **`.AppImage`** in that directory.
 
 ---
 
@@ -134,7 +151,11 @@ Use **Stop** in the Runtime panel. For llama.cpp, the app manages the child proc
 
 - You can **ingest** text, files, or content from a conversation into the **knowledge base** (see Knowledge-related actions in the UI).
 - The app **chunks** text, indexes it for **search**, and can surface **wiki-style** topics and pages for browsing.
+- In **Knowledge wiki**, use the **Knowledge graph** tab for a visual map of **sources** (ingested topics), their **chunks**, and **wiki pages**, including how pages link to chunks and weak **related** links between sources with similar titles. Click a **source** or **chunk** to jump back to the **Read** tab for that topic. Large libraries are **sampled** in the graph so the view stays responsive; use **Refresh** after adding documents.
+- With the runtime running, **Settings → Chat generation → Auto-extract wiki notes after each reply** (on by default) runs a **second, short** local completion after every assistant message to distill **bullet notes** into the knowledge base. The model may answer **(skip)** when there is nothing worth saving. Extracted sources are tied to the **conversation** like “save chat to knowledge base” content, so they can be bulk-removed when you delete that chat (if you choose the option to remove linked knowledge). Disable the toggle to avoid the extra pass and token use.
 - How strongly retrieval affects a reply depends on how the app **composes** the user turn (including retrieved snippets) before sending it to the model; keep the runtime on while experimenting.
+
+**Repository wiki pages (optional):** If you develop from a git clone, Markdown under [`docs/wiki/`](./wiki/) describes the app architecture and knowledge semantics. Ingest those files with **+ Add document** if you want that material in your local wiki and RAG.
 
 ---
 
@@ -166,11 +187,11 @@ Beyond the table below, **Settings** includes:
 Slide-over **panel widths and edges** for chat/knowledge are stored separately in the window (not in this reset table).
 
 
-| Action                     | What it does                                                                                                                                                                                                                           |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Clear download cache**   | Clears app-side download registry/HF cache metadata as implemented; cancels active downloads as applicable.                                                                                                                            |
-| **Clear all caches**       | Broader cache clearing (see on-screen description when you use it).                                                                                                                                                                    |
-| **Delete all models**      | Deletes files under the **current** models directory after confirmation; stops runtime and cancels downloads first.                                                                                                                    |
+| Action                     | What it does                                                                                                                                                                                                                                                                                           |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Clear download cache**   | Clears app-side download registry/HF cache metadata as implemented; cancels active downloads as applicable.                                                                                                                                                                                            |
+| **Clear all caches**       | Broader cache clearing (see on-screen description when you use it).                                                                                                                                                                                                                                    |
+| **Delete all models**      | Deletes files under the **current** models directory after confirmation; stops runtime and cancels downloads first.                                                                                                                                                                                    |
 | **Factory reset (config)** | Resets **settings** to defaults (models folder, llama binary path, Ollama URL, ports, **max response tokens**, integration bridge options, widgets, **HF token**, and related UI prefs). Does **not** by itself delete chats, knowledge, wiki, or model files — read the confirmation text in the app. |
 
 
@@ -184,7 +205,7 @@ Slide-over **panel widths and edges** for chat/knowledge are stored separately i
 | **Runtime won’t start (Ollama)**                   | Confirm Ollama is installed and listening (browser or `curl` to your base URL). Check **Settings → Ollama base URL**. Use a model tag you already pulled (`ollama list`).                               |
 | **Runtime won’t start (llama.cpp)**                | Verify `llama-server` path, `.gguf` path, and port **8080** (or your configured port) not in use by another program.                                                                                    |
 | **HF search/download errors**                      | Add or refresh **HF token**; check model is public or your account has access; check disk space and models folder permissions.                                                                          |
-| **Packaging failed on Windows**                    | Close File Explorer windows pointing at `release\`, exit any running copy of the app, then run `npm run dist:zip` again. The script may write to `release-builds/<timestamp>/` if `release/` is locked. |
+| **Packaging failed on Windows**                    | Close File Explorer windows pointing at `release\`, exit any running copy of the app, then run `npm run dist:zip` or `npm run dist:installer` again. The script may write to `release-builds/<timestamp>/` if `release/` is locked. |
 | **SQLite / native module errors after `git pull`** | Run `npm install` again so `better-sqlite3` rebuilds for the current Electron version.                                                                                                                  |
 
 
@@ -207,7 +228,7 @@ The app writes logs under your **user data** directory, in a `**logs`** subfolde
 1. Install the app (zip or `npm run dev`).
 2. (Optional) Add **Hugging Face token** in Settings.
 3. Install **Ollama** *or* `**llama-server`**, then configure **Runtime** and **Start**.
-4. Download a `**.gguf`** (llama.cpp) or `**ollama pull**` a model (Ollama) and point the app at the right path or tag.
+4. Download a `**.gguf`** (llama.cpp) or `**ollama pull`** a model (Ollama) and point the app at the right path or tag.
 5. Open **Chat** and send a message.
 
 For architecture and technical detail, see the [arc42 architecture index](./architecture-arc42/README.md).
