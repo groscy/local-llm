@@ -8,5 +8,6 @@
 | Large model download | Resumable / cancellable | Download registry + HF client |
 | Token leak | Not in renderer disk | Memory + safeStorage; not in logs intentionally |
 | KB search | Sub-second for typical corpora | FTS5 + indexes on `kb_chunks` |
+| Tool calls **localhost** bridge | Same completion quality as in-app chat | Shared `RuntimeAdapter` + `chatMaxTokens`; non-streaming JSON response |
 
 → Next: [11. Risks and Technical Debt](./11-risks-and-technical-debt.md)

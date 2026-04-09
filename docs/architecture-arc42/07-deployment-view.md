@@ -13,7 +13,7 @@
 | Location | Content |
 |----------|---------|
 | App install / `resources` | Bundled JS, renderer assets, `training/` |
-| User data (`app.getPath('userData')`) | SQLite DB, `logs/`, default `models/`, config (electron-store) |
+| User data (`app.getPath('userData')`) | SQLite DB, `logs/`, default `models/`, config (electron-store); **integration server** has no separate install — it is main-process code enabled at runtime when configured |
 
 ## 7.3 Build script
 

@@ -9,5 +9,6 @@
 | Ollama / llama not installed | User confusion | Status/health checks and clear UI copy |
 | Training depends on user Python env | Job failures | Document Python deps; optional strict path in IPC |
 | `sandbox: false` | Larger attack surface vs sandboxed preload | Accept for Node-native addons/process spawning; keep context isolation |
+| **IDE integration** HTTP bridge left on | Any local process on the machine can hit **127.0.0.1** | **Off** by default; optional bearer token; document that “localhost” is not the same as “no risk” on a shared login session |
 
 → Next: [12. Glossary](./12-glossary.md)

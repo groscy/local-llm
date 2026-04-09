@@ -9,7 +9,8 @@ Local LLM Desktop is a cross-platform **Electron** application that lets users:
 - **Discover and download** Hugging Face model files into a local models directory.
 - **Run inference** via a pluggable **runtime**: local **llama.cpp** server or **Ollama**.
 - **Chat** with persisted conversations and optional **RAG** over a local knowledge base (chunking + SQLite FTS5 + wiki-style navigation).
-- **Observe** coarse **metrics** (runtime throughput, process CPU/RSS, optional GPU memory).
+- **Observe** coarse **metrics** (runtime throughput, process CPU and **resident memory**, optional GPU memory) with optional **pinned Activity** widget (load progress, per-reply token estimates, session token chart).
+- **Configure** inference and UX: **max response tokens**, **IDE localhost bridge** (optional HTTP on 127.0.0.1), slide-over panel edges, pinned widget dock side/size, appearance palette.
 - **Optionally train** small LoRA jobs via an external **Python** script shipped as an app resource.
 
 Stakeholder goals:
@@ -19,7 +20,7 @@ Stakeholder goals:
 | ----------------- | -------------------------------------------------------------------------------------------------------------------- |
 | Local-first       | Models and knowledge stay on disk under user control; network used mainly for HF and optional cloud APIs.            |
 | Single desktop UX | One window, React UI, no separate server install required for core flows (except user-provided Ollama/llama binary). |
-| Extensibility     | `RuntimeAdapter` isolates llama.cpp vs Ollama; IPC channel list is the integration surface for new features.         |
+| Extensibility     | `RuntimeAdapter` isolates llama.cpp vs Ollama; IPC is the primary UI integration surface; optional **localhost HTTP bridge** for external tools (e.g. IntelliJ). |
 
 
 ## 1.2 Quality Goals

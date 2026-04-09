@@ -10,18 +10,28 @@ sequenceDiagram
   participant PRE as Preload
   participant IPC as Main / registerIpc
   participant RT as RuntimeAdapter
-  participant KB as kbService
 
-  UI->>PRE: runtimeChat(messages)
+  Note over UI: Compose user message + optional KB snippets in UI
+  UI->>PRE: runtimeChat(messages, requestId)
   PRE->>IPC: IPC.RUNTIME_CHAT
-  IPC->>KB: optional retrieve context (if feature composes RAG in handler)
-  IPC->>RT: chat(messages)
-  RT-->>IPC: assistant text
-  IPC-->>PRE: result
-  PRE-->>UI: result
+  IPC->>RT: chat(messages, stream + maxTokens from store)
+  loop Streaming
+    RT-->>IPC: token deltas
+    IPC-->>PRE: RUNTIME_CHAT_PROGRESS (requestId)
+    PRE-->>UI: streamed text + usage when available
+  end
+  RT-->>IPC: final assistant text
+  IPC-->>PRE: Promise resolves (full reply)
+  PRE-->>UI: full reply
+  UI->>PRE: MESSAGE_APPEND (user + assistant, optional usage)
+  PRE->>IPC: IPC.MESSAGE_APPEND → chatService / SQLite
 ```
 
-*Note:* Exact RAG injection is implemented in the main handler path that builds the message list before calling the runtime; the important runtime constraint is that **all model I/O goes through main**, not the renderer.
+*Notes:*
+
+- **RAG context** is composed in the **renderer** (snippets appended to the outgoing user turn) before `runtimeChat`; main does not call `kbService` inside `RUNTIME_CHAT` today.
+- **Max completion tokens** (`chatMaxTokens` in electron-store) are applied in **main** for both the UI path and the **integration server** path.
+- **All model I/O** still goes through **main** (`RuntimeAdapter`), not the renderer.
 
 ## 6.2 Download flow (HF)
 
@@ -30,5 +40,9 @@ User triggers download → main validates paths → download manager streams fro
 ## 6.3 Training flow
 
 User starts job → main resolves `train_lora.py` (dev: `training/`; prod: `process.resourcesPath/training/`) → spawns Python with arguments → job row in `train_jobs` updated; status polled via IPC.
+
+## 6.4 IDE / tool integration (optional)
+
+When **integrationListenEnabled** is true, **`integrationServer`** serves **127.0.0.1** only. External clients `POST /v1/chat` with the same `ChatMessage[]` shape; main forwards to `RuntimeAdapter.chat` (non-streaming response). See [intellij-integration.md](../intellij-integration.md).
 
 → Next: [7. Deployment View](./07-deployment-view.md)

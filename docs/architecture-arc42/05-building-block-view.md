@@ -17,6 +17,8 @@ flowchart LR
   M --> FS[User filesystem — models, logs]
   M --> HF[Hugging Face Hub]
   M --> RT[Runtime — Ollama / llama.cpp]
+  M -.-> LOOP[Loopback HTTP — integrationServer]
+  LOOP -.-> RT
 ```
 
 ## 5.2 Level 2 — Main process modules (indicative)
@@ -34,12 +36,13 @@ flowchart LR
 | `services/trainOrchestrator.ts` | Python process for `train_lora.py`, job status. |
 | `services/hardwareSummary.ts` / `gpuProbe.ts` | Hardware introspection for UI. |
 | `services/dataMaintenance.ts` | Cache/model wipe, factory reset helpers. |
+| `services/integrationServer.ts` | Optional **127.0.0.1** HTTP bridge (`/health`, `/v1/runtime/status`, `/v1/chat`); reads `chatMaxTokens` and integration settings from store. |
 | `db/*` | `openDatabase`, `migrate` (versioned SQL). |
 | `logger.ts` | Structured log lines to user data `logs/`. |
 
 ## 5.3 Level 3 — Key data entities (SQLite)
 
-- **Chat:** `conversations`, `messages`
+- **Chat:** `conversations`, `messages` (optional `prompt_tokens`, `completion_tokens`, estimate flags per §5 migrations)
 - **HF:** `hf_model_cache`, `downloads`
 - **Knowledge:** `kb_sources`, `kb_chunks`, virtual `kb_chunks_fts`, `wiki_pages`, `wiki_page_chunks`
 - **Ops:** `metrics_samples`, `train_jobs`

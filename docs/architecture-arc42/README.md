@@ -30,5 +30,6 @@ Chapters live in this folder as separate files. Read them in order or jump by to
 | ---------- | -------------------------------------------------------------- |
 | 2026-04-08 | Initial Arc42-aligned architecture for Local LLM Desktop 0.1.0 |
 | 2026-04-08 | Split into per-chapter files under `architecture-arc42/`       |
+| 2026-04-08 | IDE localhost bridge, chat/token UX, settings surface, glossary |
 
 

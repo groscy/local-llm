@@ -9,5 +9,6 @@
 | ADR-3 | Zod on main only | Shared runtime validation | Keeps renderer bundle smaller; trust boundary at IPC. |
 | ADR-4 | electron-vite | Manual triple webpack | Fast HMR, aligned Vite config for three targets. |
 | ADR-5 | Zip + no default code signing | Signed installers | Reduces Windows symlink/privilege issues in dev CI; reversible via builder config. |
+| ADR-6 | Localhost HTTP bridge for tools | Require plugins to use IPC only | IPC is not available outside Electron; **127.0.0.1** HTTP reuses `RuntimeAdapter` with **off-by-default** toggle, optional bearer token, and no LAN bind. |
 
 → Next: [10. Quality Requirements](./10-quality-requirements.md)

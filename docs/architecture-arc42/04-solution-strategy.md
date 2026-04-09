@@ -7,5 +7,7 @@
 3. **Single database** for chat, KB, wiki linkage, HF cache metadata, downloads, metrics history, training job records.
 4. **FTS5** for lexical KB search with triggers keeping `kb_chunks_fts` in sync with `kb_chunks`.
 5. **Build pipeline:** `electron-vite build` → `out/` → `electron-builder` zip per platform.
+6. **Chat persistence:** Messages store optional **prompt/completion token counts** (and estimate flags) when the runtime reports usage; the renderer shows **sent / generated** summaries under bubbles.
+7. **Optional IDE bridge:** A small **Node `http.Server`** on **127.0.0.1** (toggle + port + token in electron-store) exposes `/health` and `/v1/chat` so tools reuse the same `RuntimeAdapter` as the UI.
 
 → Next: [5. Building Block View](./05-building-block-view.md)
