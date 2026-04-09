@@ -152,6 +152,7 @@ export class LlamaCppAdapter implements RuntimeAdapter {
         const { statusCode, json, raw } = await httpPostJson<{
           choices?: { message?: { content?: string } }[]
           error?: { message?: string }
+          usage?: { prompt_tokens?: number; completion_tokens?: number }
         }>(
           url,
           {
@@ -172,6 +173,17 @@ export class LlamaCppAdapter implements RuntimeAdapter {
         const text = json.choices?.[0]?.message?.content
         if (typeof text !== 'string') {
           throw new Error(`Unexpected llama.cpp response: ${raw.slice(0, 300)}`)
+        }
+        const u = json.usage
+        if (u && typeof u === 'object') {
+          const pt = u.prompt_tokens
+          const ct = u.completion_tokens
+          if (typeof pt === 'number' || typeof ct === 'number') {
+            opts?.onStreamUsage?.({
+              promptTokens: typeof pt === 'number' ? pt : undefined,
+              completionTokens: typeof ct === 'number' ? ct : undefined
+            })
+          }
         }
         return text
       }

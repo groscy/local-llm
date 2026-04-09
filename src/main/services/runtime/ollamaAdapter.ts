@@ -300,6 +300,8 @@ export class OllamaAdapter implements RuntimeAdapter {
         const { statusCode, json, raw } = await httpPostJson<{
           message?: { content?: string }
           error?: string
+          prompt_eval_count?: number
+          eval_count?: number
         }>(
           url,
           {
@@ -320,6 +322,14 @@ export class OllamaAdapter implements RuntimeAdapter {
         const content = json.message?.content
         if (typeof content !== 'string') {
           throw new Error(`Unexpected Ollama response (no message.content): ${raw.slice(0, 300)}`)
+        }
+        const pt = json.prompt_eval_count
+        const ct = json.eval_count
+        if (typeof pt === 'number' || typeof ct === 'number') {
+          opts?.onStreamUsage?.({
+            promptTokens: typeof pt === 'number' ? pt : undefined,
+            completionTokens: typeof ct === 'number' ? ct : undefined
+          })
         }
         return content
       }

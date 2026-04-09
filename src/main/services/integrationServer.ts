@@ -2,6 +2,7 @@ import http from 'http'
 import type Store from 'electron-store'
 import { z } from 'zod'
 import type { ChatMessage, RuntimeAdapter } from './runtime/types'
+import { recordChatRoundtripMs } from './chatLatencyStats'
 import { logLine } from '../logger'
 
 const DEFAULT_PORT = 17373
@@ -154,8 +155,20 @@ export function configureIntegrationServer(ctx: {
         const messages = parsed.data.messages as ChatMessage[]
         const maxTokens = readChatMaxTokens(store)
         try {
-          const reply = await rt.chat(messages, { maxTokens })
-          sendJson(res, 200, { reply, model: rt.getStatus().modelPath })
+          const usage: { promptTokens?: number; completionTokens?: number } = {}
+          const chatStarted = Date.now()
+          const reply = await rt.chat(messages, {
+            maxTokens,
+            onStreamUsage: (u) => {
+              if (typeof u.promptTokens === 'number') usage.promptTokens = u.promptTokens
+              if (typeof u.completionTokens === 'number') usage.completionTokens = u.completionTokens
+            }
+          })
+          recordChatRoundtripMs(Date.now() - chatStarted)
+          const body: Record<string, unknown> = { reply, model: rt.getStatus().modelPath }
+          if (typeof usage.promptTokens === 'number') body.promptTokens = usage.promptTokens
+          if (typeof usage.completionTokens === 'number') body.completionTokens = usage.completionTokens
+          sendJson(res, 200, body)
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e)
           logLine('warn', 'integration_chat_error', { message: msg })
