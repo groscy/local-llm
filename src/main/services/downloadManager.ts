@@ -104,18 +104,30 @@ export function registerDownloadInDb(
     localPath: string
     status: string
     bytesTotal: number
+    chatDisplayName?: string
   }
 ): void {
   const t = Date.now()
   db.prepare(
-    `INSERT INTO downloads (id, repo_id, revision, local_path, status, bytes_total, verified, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+    `INSERT INTO downloads (id, repo_id, revision, local_path, status, bytes_total, verified, created_at, updated_at, chat_display_name)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        status = excluded.status,
        bytes_total = excluded.bytes_total,
        local_path = excluded.local_path,
+       chat_display_name = COALESCE(excluded.chat_display_name, downloads.chat_display_name),
        updated_at = excluded.updated_at`
-  ).run(row.id, row.repoId, row.revision, row.localPath, row.status, row.bytesTotal, t, t)
+  ).run(
+    row.id,
+    row.repoId,
+    row.revision,
+    row.localPath,
+    row.status,
+    row.bytesTotal,
+    t,
+    t,
+    row.chatDisplayName?.trim() ? row.chatDisplayName.trim() : null
+  )
 }
 
 export function listDownloads(db: Database.Database): unknown[] {
@@ -159,7 +171,8 @@ export function startDownload(
     revision: job.revision,
     localPath: job.destPath,
     status: 'downloading',
-    bytesTotal: job.bytesTotal
+    bytesTotal: job.bytesTotal,
+    chatDisplayName: job.chatDisplayName
   })
 
   ;(async () => {
