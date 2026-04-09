@@ -1838,15 +1838,72 @@ html {
 
 .rag-inline {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   margin-bottom: 10px;
   flex-wrap: wrap;
 }
 
-.rag-inline input {
+.rag-autocomplete {
+  position: relative;
   flex: 1;
   min-width: 140px;
+}
+
+.rag-autocomplete .input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.rag-suggest-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 80;
+  max-height: min(280px, 42vh);
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38);
+}
+
+.rag-suggest-option {
+  padding: 8px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rag-suggest-option:hover,
+.rag-suggest-option--active {
+  background: color-mix(in srgb, var(--wiki-accent) 12%, transparent);
+}
+
+.rag-suggest-option-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+.rag-suggest-option-snippet {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.composer-toolbar .rag-autocomplete {
+  min-width: 0;
 }
 
 .rag-badge {

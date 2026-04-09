@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
   type ReactElement
 } from 'react'
@@ -627,6 +628,10 @@ export default function App(): React.ReactElement {
   const [ragQuery, setRagQuery] = useState('')
   const [ragSnippets, setRagSnippets] = useState<string[]>([])
   const [ragLoading, setRagLoading] = useState(false)
+  const [ragSuggestHits, setRagSuggestHits] = useState<KbSearchHit[]>([])
+  const [ragSuggestFocused, setRagSuggestFocused] = useState(false)
+  const [ragSuggestActive, setRagSuggestActive] = useState(-1)
+  const ragSuggestSeqRef = useRef(0)
 
   const [wikiTopics, setWikiTopics] = useState<WikiTopic[]>([])
   const [wikiHighlightTerms, setWikiHighlightTerms] = useState<WikiChatHighlightTerm[]>([])
@@ -975,6 +980,34 @@ export default function App(): React.ReactElement {
       window.clearTimeout(t)
     }
   }, [wikiSearchQuery, mainView])
+
+  useEffect(() => {
+    const q = ragQuery.trim()
+    if (!q) {
+      setRagSuggestHits([])
+      return
+    }
+    let cancelled = false
+    const seq = ++ragSuggestSeqRef.current
+    const t = window.setTimeout(() => {
+      if (typeof window.api.kbSearchHits !== 'function') {
+        if (!cancelled && seq === ragSuggestSeqRef.current) setRagSuggestHits([])
+        return
+      }
+      void window.api.kbSearchHits(q, 14).then((hits) => {
+        if (cancelled || seq !== ragSuggestSeqRef.current) return
+        setRagSuggestHits(hits)
+      })
+    }, 200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(t)
+    }
+  }, [ragQuery])
+
+  useEffect(() => {
+    setRagSuggestActive(-1)
+  }, [ragQuery, ragSuggestHits])
 
   const loadKnowledgeGraph = useCallback(async () => {
     setKgLoading(true)
@@ -2130,14 +2163,51 @@ export default function App(): React.ReactElement {
     }
   }
 
-  async function runRag(): Promise<void> {
-    if (!ragQuery.trim()) return
+  async function runRagWithQuery(q: string): Promise<void> {
+    const t = q.trim()
+    if (!t) return
     setRagLoading(true)
     try {
-      const snippets = await window.api.kbSearch(ragQuery, 8)
+      const snippets = await window.api.kbSearch(t, 8)
       setRagSnippets(snippets)
     } finally {
       setRagLoading(false)
+    }
+  }
+
+  async function runRag(): Promise<void> {
+    await runRagWithQuery(ragQuery)
+  }
+
+  async function applyRagSuggestion(hit: KbSearchHit): Promise<void> {
+    setRagQuery(hit.sourceTitle)
+    setRagSuggestFocused(false)
+    setRagSuggestActive(-1)
+    await runRagWithQuery(hit.sourceTitle)
+  }
+
+  function onRagSearchKeyDown(e: ReactKeyboardEvent<HTMLInputElement>): void {
+    if (!ragSuggestOpen || ragSuggestionRows.length === 0) {
+      if (e.key === 'Enter') void runRag()
+      return
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setRagSuggestActive((i) => Math.min(ragSuggestionRows.length - 1, i + 1))
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setRagSuggestActive((i) => Math.max(-1, i - 1))
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      setRagSuggestFocused(false)
+      setRagSuggestActive(-1)
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      if (ragSuggestActive >= 0) {
+        void applyRagSuggestion(ragSuggestionRows[ragSuggestActive])
+      } else {
+        void runRag()
+      }
     }
   }
 
@@ -2197,7 +2267,7 @@ export default function App(): React.ReactElement {
     }
   }
 
-  function onComposerKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>): void {
+  function onComposerKeyDown(e: ReactKeyboardEvent<HTMLTextAreaElement>): void {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       void sendChat()
@@ -2249,6 +2319,26 @@ export default function App(): React.ReactElement {
     if (!wikiHasSearch) return []
     return wikiSearchHits.filter((h) => !wikiTitleMatchIds.has(h.sourceId))
   }, [wikiHasSearch, wikiSearchHits, wikiTitleMatchIds])
+
+  const ragSuggestionRows = useMemo((): KbSearchHit[] => {
+    const q = ragQuery.trim().toLowerCase()
+    if (!q) return []
+    if (ragSuggestHits.length > 0) return ragSuggestHits
+    return wikiTopics
+      .filter((t) => t.title.toLowerCase().includes(q))
+      .slice(0, 12)
+      .map((t) => ({
+        sourceId: t.id,
+        sourceTitle: t.title,
+        chunkId: `browse:${t.id}`,
+        heading: null,
+        snippet: `${WIKI_KIND_LABELS[t.kind]}${t.chunkCount > 0 ? ` · ${t.chunkCount} chunks` : ''}`,
+        kind: t.kind
+      }))
+  }, [ragQuery, ragSuggestHits, wikiTopics])
+
+  const ragSuggestOpen =
+    ragSuggestFocused && ragSuggestionRows.length > 0 && !ragLoading
 
   const wikiBrowseByKind = useMemo(() => groupWikiTopicsByKind(wikiTopics), [wikiTopics])
   const wikiTitleMatchByKind = useMemo(
@@ -3015,13 +3105,58 @@ export default function App(): React.ReactElement {
                   ) : null}
                   <div className="composer-toolbar">
                     <div className="rag-inline">
-                      <input
-                        className="input"
-                        placeholder="Search knowledge base…"
-                        value={ragQuery}
-                        onChange={(e) => setRagQuery(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && void runRag()}
-                      />
+                      <div className="rag-autocomplete">
+                        <input
+                          className="input"
+                          role="combobox"
+                          aria-autocomplete="list"
+                          aria-expanded={ragSuggestOpen}
+                          aria-controls="rag-suggest-listbox"
+                          aria-activedescendant={
+                            ragSuggestOpen && ragSuggestActive >= 0
+                              ? `rag-suggest-opt-${ragSuggestActive}`
+                              : undefined
+                          }
+                          placeholder="Search knowledge base…"
+                          value={ragQuery}
+                          onChange={(e) => setRagQuery(e.target.value)}
+                          onFocus={() => setRagSuggestFocused(true)}
+                          onBlur={() => {
+                            window.setTimeout(() => setRagSuggestFocused(false), 200)
+                          }}
+                          onKeyDown={onRagSearchKeyDown}
+                        />
+                        {ragSuggestOpen ? (
+                          <ul
+                            id="rag-suggest-listbox"
+                            className="rag-suggest-list"
+                            role="listbox"
+                            aria-label="Knowledge base matches"
+                          >
+                            {ragSuggestionRows.map((h, i) => (
+                              <li
+                                key={`${h.sourceId}-${h.chunkId}-${i}`}
+                                id={`rag-suggest-opt-${i}`}
+                                role="option"
+                                aria-selected={i === ragSuggestActive}
+                                className={`rag-suggest-option${
+                                  i === ragSuggestActive ? ' rag-suggest-option--active' : ''
+                                }`}
+                                onMouseDown={(e) => {
+                                  e.preventDefault()
+                                  void applyRagSuggestion(h)
+                                }}
+                                onMouseEnter={() => setRagSuggestActive(i)}
+                              >
+                                <span className="rag-suggest-option-title">{h.sourceTitle}</span>
+                                {h.snippet ? (
+                                  <span className="rag-suggest-option-snippet">{h.snippet}</span>
+                                ) : null}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
                       <button type="button" className="btn-secondary" onClick={() => void runRag()} disabled={ragLoading}>
                         {ragLoading ? 'Searching…' : 'Pull into chat'}
                       </button>
