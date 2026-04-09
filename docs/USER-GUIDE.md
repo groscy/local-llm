@@ -57,15 +57,17 @@ Output appears under `release/` or, if that folder is locked on Windows, under `
 
 ## 3. First launch and navigation
 
-- The main window is a **single desktop app** with a **sidebar** and slide-out panels for tools.
+- The main window is a **single desktop app** with a **sidebar** and **slide-over** panels for tools on narrower layouts. You can **resize** panel widths and choose which **screen edge** the chat list and knowledge panel slide in from; those choices are remembered in the browser storage for that window.
 - Use the **navigation buttons** to open:
   - **Hugging Face** — search models, open details, download `.gguf` (or other) files.
   - **Runtime** — choose Ollama or llama.cpp, start/stop inference, see status.
   - **Training** — optional LoRA job launcher (requires Python).
-  - **Metrics** — charts for throughput, CPU/RSS, optional GPU.
-  - **Settings** — models folder, maintenance actions, Hugging Face token.
+  - **Metrics** — charts in a **two-column** layout for throughput, context usage, **process CPU and resident memory** (working set), and optional **GPU** memory when `nvidia-smi` is available.
+  - **Settings** — models folder, appearance, widgets, inference limits, IDE bridge, maintenance, Hugging Face token.
 
 The header shows a **runtime pill** (“Runtime on” / “Runtime off”); click it to jump to the Runtime panel.
+
+**Look and feel:** Accent presets and **rounded scrollbars** use the app’s theme tokens so the UI stays consistent in light and dark modes.
 
 ---
 
@@ -124,12 +126,15 @@ Use **Stop** in the Runtime panel. For llama.cpp, the app manages the child proc
 
 1. Ensure the **runtime is running** (section 5).
 2. Create or select a **conversation**, send messages. The app **stores** history in a local database.
+3. Under each assistant bubble, **token usage** can show **Sent** and **Generated** counts when the runtime reports them; totals accumulate per conversation for reference.
+
+**Max response length:** In **Settings**, set **Max response tokens** to cap how long each completion may run (applies to chat in the app and to the optional **IDE integration** HTTP bridge).
 
 ### 7.2 Knowledge (RAG) and wiki
 
 - You can **ingest** text, files, or content from a conversation into the **knowledge base** (see Knowledge-related actions in the UI).
 - The app **chunks** text, indexes it for **search**, and can surface **wiki-style** topics and pages for browsing.
-- How strongly retrieval affects a reply depends on how the app composes context for the model; keep the runtime on while experimenting.
+- How strongly retrieval affects a reply depends on how the app **composes** the user turn (including retrieved snippets) before sending it to the model; keep the runtime on while experimenting.
 
 ---
 
@@ -143,13 +148,22 @@ The shipped `**train_lora.py`** script is a **minimal stub**: it writes a small 
 
 ---
 
-## 9. Metrics
+## 9. Metrics and pinned activity
 
-Open **Metrics** to view **tokens/sec**, **context usage**, **process CPU/RSS**, and optional **GPU** memory (when `nvidia-smi` is available). You can pin a compact widget and adjust refresh interval in **Settings**.
+Open **Metrics** for the full drawer with **charts in a grid**. You can **pin** a compact **activity** strip (throughput, context, CPU, **resident memory**, GPU when available) to any **dock edge** and **resize** its thickness or length; dock side and dimensions are saved in app settings. Adjust the **metrics refresh interval** in **Settings** if you want calmer updates or quicker feedback.
 
 ---
 
 ## 10. Settings and maintenance
+
+Beyond the table below, **Settings** includes:
+
+- **Appearance** — accent / color scheme.
+- **Chat generation** — **max response tokens** for completions.
+- **IDE integration (localhost)** — optional **HTTP bridge** on **127.0.0.1** for editor plugins (port, optional bearer token); see [IntelliJ / IDE integration](./intellij-integration.md).
+- **Pinned widgets** — which metrics appear on the pinned strip, dock edge, refresh interval, and bar size.
+
+Slide-over **panel widths and edges** for chat/knowledge are stored separately in the window (not in this reset table).
 
 
 | Action                     | What it does                                                                                                                                                                                                                           |
@@ -157,7 +171,7 @@ Open **Metrics** to view **tokens/sec**, **context usage**, **process CPU/RSS**,
 | **Clear download cache**   | Clears app-side download registry/HF cache metadata as implemented; cancels active downloads as applicable.                                                                                                                            |
 | **Clear all caches**       | Broader cache clearing (see on-screen description when you use it).                                                                                                                                                                    |
 | **Delete all models**      | Deletes files under the **current** models directory after confirmation; stops runtime and cancels downloads first.                                                                                                                    |
-| **Factory reset (config)** | Resets **settings** to defaults (models folder preference, llama binary path, Ollama URL, ports, widgets, **HF token**). Does **not** by itself delete chats, knowledge, wiki, or model files — read the confirmation text in the app. |
+| **Factory reset (config)** | Resets **settings** to defaults (models folder, llama binary path, Ollama URL, ports, **max response tokens**, integration bridge options, widgets, **HF token**, and related UI prefs). Does **not** by itself delete chats, knowledge, wiki, or model files — read the confirmation text in the app. |
 
 
 ---
