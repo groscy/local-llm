@@ -1,0 +1,30 @@
+<idea-plugin>
+    <id>com.localllm.intellij</id>
+    <name>Local LLM Desktop Bridge</name>
+    <vendor>Local</vendor>
+
+    <description><![CDATA[
+    Talks to the <b>local-llm-desktop</b> HTTP bridge on 127.0.0.1 (enable under Settings in the desktop app).
+    Configure port and optional bearer token under <b>Settings → Tools → Local LLM Desktop</b>.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationConfigurable
+                parentId="tools"
+                instance="com.localllm.intellij.LocalLlmConfigurable"
+                id="com.localllm.intellij.settings"
+                displayName="Local LLM Desktop"/>
+    </extensions>
+
+    <actions>
+        <action id="com.localllm.intellij.AskLocalLlm"
+                class="com.localllm.intellij.AskLocalLlmAction"
+                text="Ask Local LLM…"
+                description="Send prompt to Local LLM Desktop via localhost bridge">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
