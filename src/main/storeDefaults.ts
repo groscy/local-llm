@@ -9,7 +9,15 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   downloadsPinned: false,
   activityPinned: false,
   pinnedWidgetsSide: 'left',
-  colorScheme: 'violet'
+  pinnedWidgetsWidthPx: 308,
+  pinnedWidgetsHeightPx: 360,
+  colorScheme: 'violet',
+  /** Upper bound on assistant completion length (Ollama `num_predict`, llama.cpp `max_tokens`). */
+  chatMaxTokens: 512,
+  /** Localhost HTTP API for IDE plugins (127.0.0.1 only). */
+  integrationListenEnabled: false,
+  integrationPort: 17373,
+  integrationToken: ''
 }
 
 export function resetElectronStoreToFactory(store: Store<Record<string, unknown>>): void {
