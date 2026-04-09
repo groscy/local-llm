@@ -1,7 +1,14 @@
 import { randomUUID } from 'crypto'
 import { readFileSync } from 'fs'
 import type Database from 'better-sqlite3'
-import type { KbChunk, KbSource, WikiTopic } from '@shared/types'
+import type {
+  KbChunk,
+  KbSource,
+  KnowledgeGraphEdge,
+  KnowledgeGraphNode,
+  KnowledgeGraphPayload,
+  WikiTopic
+} from '@shared/types'
 
 const CHUNK_SIZE = 1200
 const CHUNK_OVERLAP = 200
@@ -158,6 +165,108 @@ export function listWikiTopics(db: Database.Database): WikiTopic[] {
 export function getWikiPageBody(db: Database.Database, sourceId: string): string {
   const chunks = listChunksForSource(db, sourceId)
   return chunks.map((c, i) => `## Section ${i + 1}${c.heading ? `: ${c.heading}` : ''}\n\n${c.text}`).join('\n\n---\n\n')
+}
+
+const GRAPH_MAX_CHUNKS_PER_SOURCE = 18
+const GRAPH_MAX_TOTAL_CHUNKS = 200
+
+function tokenizeTitle(title: string): string[] {
+  const raw = title.toLowerCase().match(/[a-z0-9]{4,}/g)
+  return raw ? [...new Set(raw)] : []
+}
+
+/**
+ * Build a structural knowledge graph: KB sources linked to chunk nodes, wiki pages linked to chunks,
+ * wiki pages tied to their source when `page_id` is `src:<sourceId>`, and weak `related` edges between
+ * sources that share a long token in their titles.
+ */
+export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload {
+  const sources = db
+    .prepare(`SELECT id, title FROM kb_sources ORDER BY created_at ASC`)
+    .all() as { id: string; title: string }[]
+
+  const nodes: KnowledgeGraphNode[] = []
+  const edges: KnowledgeGraphEdge[] = []
+  let truncated = false
+  let chunksUsed = 0
+
+  for (const s of sources) {
+    nodes.push({ id: s.id, kind: 'source', label: s.title })
+  }
+
+  const chunkStmt = db.prepare(
+    `SELECT id, source_id as sourceId, ord, heading FROM kb_chunks WHERE source_id = ? ORDER BY ord ASC`
+  )
+
+  for (const s of sources) {
+    if (chunksUsed >= GRAPH_MAX_TOTAL_CHUNKS) {
+      truncated = true
+      break
+    }
+    const rows = chunkStmt.all(s.id) as { id: string; sourceId: string; ord: number; heading: string | null }[]
+    const cap = Math.min(GRAPH_MAX_CHUNKS_PER_SOURCE, GRAPH_MAX_TOTAL_CHUNKS - chunksUsed)
+    const slice = rows.slice(0, cap)
+    if (rows.length > slice.length) truncated = true
+    for (const r of slice) {
+      const ordLabel = `#${r.ord + 1}`
+      const sub =
+        r.heading && r.heading.trim()
+          ? r.heading.trim().slice(0, 42) + (r.heading.trim().length > 42 ? '…' : '')
+          : undefined
+      nodes.push({
+        id: r.id,
+        kind: 'chunk',
+        label: ordLabel,
+        sublabel: sub,
+        sourceId: s.id
+      })
+      edges.push({ from: s.id, to: r.id, kind: 'contains' })
+      chunksUsed++
+    }
+  }
+
+  const wikiRows = db.prepare(`SELECT id, title FROM wiki_pages`).all() as { id: string; title: string }[]
+  for (const w of wikiRows) {
+    nodes.push({ id: w.id, kind: 'wiki', label: w.title })
+  }
+
+  const linkRows = db
+    .prepare(`SELECT page_id as pageId, chunk_id as chunkId FROM wiki_page_chunks`)
+    .all() as { pageId: string; chunkId: string }[]
+
+  const chunkIds = new Set(nodes.filter((n) => n.kind === 'chunk').map((n) => n.id))
+  for (const l of linkRows) {
+    if (!chunkIds.has(l.chunkId)) continue
+    edges.push({ from: l.pageId, to: l.chunkId, kind: 'indexes' })
+  }
+
+  const sourceIdSet = new Set(sources.map((s) => s.id))
+  for (const w of wikiRows) {
+    if (w.id.startsWith('src:')) {
+      const sid = w.id.slice(4)
+      if (sourceIdSet.has(sid)) {
+        edges.push({ from: w.id, to: sid, kind: 'compiled_from' })
+      }
+    }
+  }
+
+  const titleTokens = new Map<string, string[]>()
+  for (const s of sources) {
+    titleTokens.set(s.id, tokenizeTitle(s.title))
+  }
+  for (let i = 0; i < sources.length; i++) {
+    for (let j = i + 1; j < sources.length; j++) {
+      const a = titleTokens.get(sources[i].id) ?? []
+      const b = titleTokens.get(sources[j].id) ?? []
+      if (a.length === 0 || b.length === 0) continue
+      const shared = a.some((t) => b.includes(t))
+      if (shared) {
+        edges.push({ from: sources[i].id, to: sources[j].id, kind: 'related' })
+      }
+    }
+  }
+
+  return { nodes, edges, truncated }
 }
 
 export function ensureWikiPageForSource(db: Database.Database, sourceId: string): { id: string; title: string; body: string } {
