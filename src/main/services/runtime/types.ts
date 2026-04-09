@@ -31,7 +31,7 @@ export interface RuntimeAdapter {
   fetchMetrics?(): Promise<{
     tokensPerSec?: number
     ctxUsed?: number
-    /** Loaded model footprint (llama child RSS or Ollama-reported size), MiB */
+    /** Loaded model footprint (llama child resident set or Ollama-reported size), MiB */
     modelMemoryMb?: number
   }>
 }
