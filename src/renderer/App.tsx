@@ -6,6 +6,7 @@ import type {
   HfModelSummary,
   KnowledgeGraphPayload,
   MetricsSnapshot,
+  PluginIntegrationReport,
   RuntimeLoadProgress,
   RuntimeStatus
 } from '@shared/types'
@@ -21,6 +22,7 @@ import { FloatingDots } from './FloatingDots'
 import { MetricsTimeSeries } from './MetricsTimeSeries'
 import { MetricsPinnedWidget } from './MetricsPinnedWidget'
 import { KnowledgeGraphView } from './KnowledgeGraphView'
+import { OllamaChatBar } from './OllamaChatBar'
 
 const METRICS_REFRESH_PRESETS_MS = [
   1000, 2000, 3000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000, 3_600_000
@@ -492,6 +494,10 @@ export default function App(): React.ReactElement {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
   const [localDownloads, setLocalDownloads] = useState<DownloadRow[]>([])
   const [localModelFilePaths, setLocalModelFilePaths] = useState<string[]>([])
+  const [ollamaChatTags, setOllamaChatTags] = useState<string[]>([])
+  const [ollamaChatTagsLoading, setOllamaChatTagsLoading] = useState(false)
+  const [ollamaChatTagsErr, setOllamaChatTagsErr] = useState<string | null>(null)
+  const [ollamaChatModelTag, setOllamaChatModelTag] = useState('llama3.2')
 
   const matchedLocalModelPath = useMemo(() => {
     const cur = modelPath.trim()
@@ -777,6 +783,7 @@ export default function App(): React.ReactElement {
   const [activityChatTokens, setActivityChatTokens] = useState<ActivityChatTokens | null>(null)
   const activityChatTokensRef = useRef<ActivityChatTokens | null>(null)
   const [activityTokenHistory, setActivityTokenHistory] = useState<ActivityTokenHistoryPoint[]>([])
+  const [integrationPluginReports, setIntegrationPluginReports] = useState<PluginIntegrationReport[]>([])
   const [pinnedWidgetsSide, setPinnedWidgetsSide] = useState<PinnedWidgetsSide>('left')
   const [pinnedDownloadsSnapshot, setPinnedDownloadsSnapshot] = useState<DownloadRow[]>([])
   const [metricsRefreshMs, setMetricsRefreshMs] = useState(3000)
@@ -911,6 +918,21 @@ export default function App(): React.ReactElement {
     await refreshLocalModelFiles()
   }, [refreshRunDrawerQuick, refreshLocalModelFiles])
 
+  const refreshOllamaChatTags = useCallback(async () => {
+    setOllamaChatTagsLoading(true)
+    setOllamaChatTagsErr(null)
+    try {
+      const r = await window.api.ollamaListTags()
+      setOllamaChatTags(Array.isArray(r.names) ? r.names : [])
+      if (r.error) setOllamaChatTagsErr(r.error)
+    } catch (e) {
+      setOllamaChatTags([])
+      setOllamaChatTagsErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setOllamaChatTagsLoading(false)
+    }
+  }, [])
+
   const refreshDownloadsList = useCallback(async () => {
     try {
       const rows = await window.api.downloadsList()
@@ -963,6 +985,17 @@ export default function App(): React.ReactElement {
       setOllamaInstallLog([])
     }
   }, [ollamaHost?.reachable])
+
+  useEffect(() => {
+    if (mainView !== 'chat') return
+    void refreshOllamaChatTags()
+  }, [mainView, ollamaHost?.reachable, refreshOllamaChatTags])
+
+  useEffect(() => {
+    if (runtimeStatus?.running !== true || runtimeStatus.kind !== 'ollama') return
+    const m = (runtimeStatus.modelPath ?? '').trim()
+    if (m) setOllamaChatModelTag(m)
+  }, [runtimeStatus?.running, runtimeStatus?.kind, runtimeStatus?.modelPath])
 
   useEffect(() => {
     return window.api.onRuntimeLoadProgress((p) => {
@@ -1138,6 +1171,17 @@ export default function App(): React.ReactElement {
       if (typeof c.integrationToken === 'string') setIntegrationTokenDraft(c.integrationToken)
     })
   }, [refreshPaths, loadConversations, loadWiki, refreshRuntimeStatus, applyRuntimeInstallPaths])
+
+  useEffect(() => {
+    const cap = 15
+    void window.api.integrationPluginReportsList().then((list) => {
+      setIntegrationPluginReports(list.slice(-cap))
+    })
+    const off = window.api.onIntegrationPluginReport((r) => {
+      setIntegrationPluginReports((prev) => [...prev, r].slice(-cap))
+    })
+    return off
+  }, [])
 
   useEffect(() => {
     if (runtimeKind !== 'llamacpp' || !llamaEnv?.detected || !llamaEnv.resolvedPath) return
@@ -1727,6 +1771,28 @@ export default function App(): React.ReactElement {
     }
   }
 
+  async function startOllamaFromChatBar(tag: string): Promise<void> {
+    if (runtimeStatus?.running || runtimeStarting) return
+    const trimmed = tag.trim()
+    if (!trimmed) return
+    setErr(null)
+    setRuntimeStarting(true)
+    setRuntimeLoadProgress(null)
+    try {
+      const s = await window.api.runtimeStart({ kind: 'ollama', modelPath: trimmed })
+      setRuntimeStatus(s)
+      setRuntimeKind('ollama')
+      setModelPath(trimmed)
+      await window.api.setConfig({ llamaBinaryPath: llamaBin, runtimeKind: 'ollama' })
+      void refreshRunDrawer()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setRuntimeStarting(false)
+      setRuntimeLoadProgress(null)
+    }
+  }
+
   async function stopRuntime(): Promise<void> {
     setErr(null)
     try {
@@ -2124,6 +2190,7 @@ export default function App(): React.ReactElement {
                   chatTokens={activityChatTokens}
                   tokenHistory={activityTokenHistory}
                   runtimeOn={runtimeOn}
+                  pluginReports={integrationPluginReports}
                   onUnpin={() => {
                     setActivityPinned(false)
                     void saveMetricsWidgetConfig({ activityPinned: false })
@@ -2199,11 +2266,13 @@ export default function App(): React.ReactElement {
                 </button>
               </>
             )}
-            <div className="top-bar-pin-group">
+            <div className="top-bar-pin-group" role="group" aria-label="Pin widgets to sidebar">
               <button
                 type="button"
                 className={`top-bar-pin ${metricsPinned ? 'active' : ''}`}
                 title={metricsPinned ? 'Unpin metrics from sidebar' : 'Pin live metrics to Pinned widgets panel'}
+                aria-label={metricsPinned ? 'Unpin metrics from sidebar' : 'Pin live metrics to Pinned widgets panel'}
+                aria-pressed={metricsPinned}
                 onClick={() => {
                   const next = !metricsPinned
                   setMetricsPinned(next)
@@ -2211,14 +2280,15 @@ export default function App(): React.ReactElement {
                 }}
               >
                 <span className="top-bar-pin-icon" aria-hidden>
-                  <i className="fa-solid fa-thumbtack" />
+                  <i className="fa-solid fa-chart-line" />
                 </span>
-                <span className="top-bar-pin-label">{metricsPinned ? 'Metrics' : 'Pin metrics'}</span>
               </button>
               <button
                 type="button"
                 className={`top-bar-pin ${downloadsPinned ? 'active' : ''}`}
                 title={downloadsPinned ? 'Unpin downloads from sidebar' : 'Pin download progress to Pinned widgets panel'}
+                aria-label={downloadsPinned ? 'Unpin downloads from sidebar' : 'Pin download progress to Pinned widgets panel'}
+                aria-pressed={downloadsPinned}
                 onClick={() => {
                   const next = !downloadsPinned
                   setDownloadsPinned(next)
@@ -2226,9 +2296,8 @@ export default function App(): React.ReactElement {
                 }}
               >
                 <span className="top-bar-pin-icon" aria-hidden>
-                  <i className="fa-solid fa-thumbtack" />
+                  <i className="fa-solid fa-download" />
                 </span>
-                <span className="top-bar-pin-label">{downloadsPinned ? 'Downloads' : 'Pin downloads'}</span>
               </button>
               <button
                 type="button"
@@ -2238,6 +2307,12 @@ export default function App(): React.ReactElement {
                     ? 'Unpin activity from sidebar'
                     : 'Pin model load & reply progress to Pinned widgets panel'
                 }
+                aria-label={
+                  activityPinned
+                    ? 'Unpin activity from sidebar'
+                    : 'Pin model load and reply progress to Pinned widgets panel'
+                }
+                aria-pressed={activityPinned}
                 onClick={() => {
                   const next = !activityPinned
                   setActivityPinned(next)
@@ -2245,9 +2320,8 @@ export default function App(): React.ReactElement {
                 }}
               >
                 <span className="top-bar-pin-icon" aria-hidden>
-                  <i className="fa-solid fa-thumbtack" />
+                  <i className="fa-solid fa-bolt" />
                 </span>
-                <span className="top-bar-pin-label">{activityPinned ? 'Activity' : 'Pin activity'}</span>
               </button>
             </div>
             <div
@@ -2611,6 +2685,23 @@ export default function App(): React.ReactElement {
                       </span>
                     </div>
                   ) : null}
+                  <OllamaChatBar
+                    baseUrl={ollamaHost?.baseUrl ?? 'http://127.0.0.1:11434'}
+                    hostProbed={ollamaHost != null}
+                    reachable={ollamaHost?.reachable === true}
+                    onOpenRun={() => setDrawer('runtime')}
+                    tags={ollamaChatTags}
+                    tagsLoading={ollamaChatTagsLoading}
+                    tagsError={ollamaChatTagsErr}
+                    onRefreshTags={() => void refreshOllamaChatTags()}
+                    modelTag={ollamaChatModelTag}
+                    onModelTagChange={setOllamaChatModelTag}
+                    runtimeOn={runtimeOn}
+                    runtimeKind={runtimeStatus?.kind}
+                    loadedModelPath={runtimeStatus?.modelPath}
+                    starting={runtimeStarting}
+                    onStart={() => void startOllamaFromChatBar(ollamaChatModelTag)}
+                  />
                   <div className="composer-toolbar">
                     <div className="rag-inline">
                       <input

@@ -755,8 +755,10 @@ html {
 .top-bar-pin {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
+  justify-content: center;
+  padding: 8px;
+  min-width: 36px;
+  min-height: 36px;
   border-radius: var(--radius-full);
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: var(--chip-secondary-bg);
@@ -786,23 +788,12 @@ html {
   justify-content: center;
   flex-shrink: 0;
   line-height: 1;
-  width: 1.1em;
   color: inherit;
 }
 
-.top-bar-pin-icon .fa-thumbtack {
-  font-size: 14px;
+.top-bar-pin-icon .fa-solid {
+  font-size: 15px;
   line-height: 1;
-}
-
-.top-bar-pin-label {
-  white-space: nowrap;
-}
-
-@media (max-width: 640px) {
-  .top-bar-pin-label {
-    display: none;
-  }
 }
 
 .top-bar-mobile-toggle {
@@ -1374,6 +1365,89 @@ html {
 
 .save-chat-kb-row {
   margin-top: 8px;
+}
+
+/* Ollama quick bar (chat composer) */
+.chat-ollama-bar {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--chip-secondary-bg);
+}
+
+.chat-ollama-bar-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  margin-bottom: 6px;
+}
+
+.chat-ollama-bar-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.chat-ollama-bar-url {
+  font-size: 11px;
+  min-width: 0;
+}
+
+.chat-ollama-bar-url .inline-code {
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.chat-ollama-bar-note {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.chat-ollama-bar-note--ok {
+  color: color-mix(in srgb, var(--wiki-accent) 85%, var(--text-secondary));
+}
+
+.chat-ollama-bar-note--warn {
+  color: color-mix(in srgb, #f59e0b 55%, var(--text-secondary));
+}
+
+.chat-ollama-bar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-ollama-bar-label {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.chat-ollama-bar-select {
+  min-width: 140px;
+  max-width: 220px;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.chat-ollama-bar-input {
+  flex: 1 1 160px;
+  min-width: 120px;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.chat-ollama-bar-err {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #f87171;
 }
 
 .btn-save-chat-kb {
@@ -4206,6 +4280,49 @@ select.select optgroup {
 
 .activity-pinned-block--session .activity-pinned-block-title {
   color: var(--accent-bright);
+}
+
+.activity-pinned-block--ide .activity-pinned-block-title {
+  color: var(--wiki-accent);
+}
+
+.activity-pinned-ide-feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.activity-pinned-ide-feed-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(var(--panel-rgb), 0.45);
+  border: 1px solid var(--border);
+}
+
+.activity-pinned-ide-feed-time {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.activity-pinned-ide-feed-kind {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.activity-pinned-ide-feed-msg {
+  color: var(--text);
+  word-break: break-word;
 }
 
 .activity-pinned-token-chart-wrap {

@@ -3,6 +3,7 @@ import type {
   HardwareSummary,
   KnowledgeGraphPayload,
   WikiExtractTurnResult,
+  PluginIntegrationReport,
   RuntimeChatProgress,
   RuntimeLoadProgress,
   RuntimeStatus
@@ -79,10 +80,13 @@ type Api = {
   onRuntimeLoadProgress: (callback: (payload: RuntimeLoadProgress) => void) => () => void
   /** Subscribe to streamed assistant tokens; correlate with `requestId` passed to `runtimeChat`. */
   onRuntimeChatProgress: (callback: (payload: RuntimeChatProgress) => void) => () => void
+  integrationPluginReportsList: () => Promise<PluginIntegrationReport[]>
+  onIntegrationPluginReport: (callback: (payload: PluginIntegrationReport) => void) => () => void
   openExternalUrl: (url: string) => Promise<{ ok: boolean }>
   runtimeStart: (p: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => Promise<RuntimeStatus>
   runtimeStop: () => Promise<RuntimeStatus>
   runtimeStatus: () => Promise<RuntimeStatus>
+  ollamaListTags: () => Promise<{ names: string[]; error?: string }>
   runtimeChat: (messages: { role: string; content: string }[], requestId: string) => Promise<string>
   conversationsList: () => Promise<unknown[]>
   conversationCreate: (title?: string) => Promise<unknown>

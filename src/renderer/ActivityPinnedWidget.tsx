@@ -1,6 +1,34 @@
 import type { ReactElement } from 'react'
-import type { RuntimeLoadProgress } from '@shared/types'
+import { useMemo } from 'react'
+import type { PluginIntegrationReport, RuntimeLoadProgress } from '@shared/types'
 import { ActivityTokenSessionChart, type ActivityTokenHistoryPoint } from './ActivityTokenSessionChart'
+
+function formatPluginReportTime(ms: number): string {
+  try {
+    return new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  } catch {
+    return ''
+  }
+}
+
+function pluginKindLabel(kind: PluginIntegrationReport['kind']): string {
+  switch (kind) {
+    case 'chat_completed':
+      return 'IDE chat'
+    case 'chat_failed':
+      return 'IDE chat failed'
+    case 'apply_completed':
+      return 'IDE apply'
+    case 'apply_failed':
+      return 'IDE apply failed'
+    case 'apply_cancelled':
+      return 'IDE apply cancelled'
+    case 'send_cancelled':
+      return 'IDE send cancelled'
+    default:
+      return kind
+  }
+}
 
 export type ActivityChatTokens = {
   prompt: number
@@ -15,14 +43,20 @@ export function ActivityPinnedWidget(props: {
   chatTokens: ActivityChatTokens | null
   tokenHistory: ActivityTokenHistoryPoint[]
   runtimeOn: boolean
+  /** Recent reports from IDE plugins (IntelliJ, etc.) via the localhost bridge. */
+  pluginReports?: PluginIntegrationReport[]
   onUnpin: () => void
   onOpenChat: () => void
 }): ReactElement {
-  const { modelLoad, chatSending, chatTokens, tokenHistory, runtimeOn, onUnpin, onOpenChat } = props
+  const { modelLoad, chatSending, chatTokens, tokenHistory, runtimeOn, pluginReports, onUnpin, onOpenChat } = props
   const busy = modelLoad != null || chatSending
   const hasTokenHistory = tokenHistory.length > 0
   const showTokenPending = runtimeOn && !hasTokenHistory
-  const showEmpty = !runtimeOn && !busy
+  const ideFeed = useMemo(() => {
+    if (!pluginReports?.length) return []
+    return [...pluginReports].sort((a, b) => b.receivedAt - a.receivedAt)
+  }, [pluginReports])
+  const showEmpty = !runtimeOn && !busy && ideFeed.length === 0
 
   function formatCount(n: number, isEst: boolean): string {
     const v = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0
@@ -47,6 +81,26 @@ export function ActivityPinnedWidget(props: {
         <p className="activity-pinned-widget-empty">No model load or reply in progress.</p>
       ) : (
         <div className="activity-pinned-body">
+          {ideFeed.length > 0 ? (
+            <div className="activity-pinned-block activity-pinned-block--ide">
+              <div className="activity-pinned-block-title">IDE plugin</div>
+              <ul className="activity-pinned-ide-feed" aria-label="IDE plugin activity">
+                {ideFeed.map((r, i) => (
+                  <li key={`${r.receivedAt}-${i}`} className="activity-pinned-ide-feed-item">
+                    <span className="activity-pinned-ide-feed-time" title={new Date(r.receivedAt).toISOString()}>
+                      {formatPluginReportTime(r.receivedAt)}
+                    </span>
+                    <span className="activity-pinned-ide-feed-kind">{pluginKindLabel(r.kind)}</span>
+                    {r.message ? (
+                      <span className="activity-pinned-ide-feed-msg" title={r.message}>
+                        {r.message.length > 120 ? `${r.message.slice(0, 117)}…` : r.message}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {modelLoad ? (
             <div className="activity-pinned-block">
               <div className="activity-pinned-block-title">Model load</div>
