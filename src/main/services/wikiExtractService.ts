@@ -9,7 +9,7 @@ const EXTRACT_SYSTEM = `You turn a chat turn into a tiny wiki note for a persona
 Output format (exactly):
 1) One line: TITLE: <short noun phrase, ≤8 words>
 2) Then either:
-   - A markdown bullet list (2–8 lines starting with "- "), each bullet one concrete fact, definition, step, or answer the assistant gave. Use the user's question only for context; do not quote chit-chat.
+   - Prefer a short Wikipedia-style article: optional 1–2 lead sentences, then ## Section headings with short paragraphs or bullets under each when there are several distinct points (2–4 sections max). Otherwise a markdown bullet list (2–8 lines starting with "- ") is fine.
    - Or if nothing is worth saving (pure greeting, pure refusal with no content, empty substance), output exactly:
 TITLE: (skip)
 BODY_NONE
