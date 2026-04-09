@@ -1,7 +1,23 @@
 import asciidoctorFactory from '@asciidoctor/core'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { useMemo, type ReactElement } from 'react'
+import {
+  Fragment,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+  type MutableRefObject,
+  type Ref
+} from 'react'
+import type { WikiChatHighlightTerm } from '@shared/types'
+import {
+  applyWikiHighlightsToElement,
+  CHAT_WIKI_KW_CLASS,
+  splitPlainTextWithWikiTerms
+} from './wikiChatDomHighlight'
 
 marked.use({
   gfm: true,
@@ -74,25 +90,169 @@ function renderRichString(content: string): string {
   }
 }
 
+function pickWikiKwEl(target: EventTarget | null): HTMLElement | null {
+  return target instanceof HTMLElement ? target.closest(`.${CHAT_WIKI_KW_CLASS}`) : null
+}
+
+function ChatWikiKeywordShell(props: {
+  children: ReactNode
+  onNavigate?: (sourceId: string) => void
+}): ReactElement {
+  const [tip, setTip] = useState<{ left: number; top: number; snippet: string } | null>(null)
+
+  const onOut = (e: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>) => {
+    const rel = e.relatedTarget
+    if (rel instanceof Node && e.currentTarget.contains(rel)) return
+    setTip(null)
+  }
+
+  return (
+    <div
+      className="msg-rich-wiki-shell"
+      onMouseOver={(e) => {
+        const el = pickWikiKwEl(e.target)
+        if (!el || !e.currentTarget.contains(el)) return
+        const sid = el.getAttribute('data-source-id')
+        if (!sid) return
+        const sn = el.getAttribute('data-snippet') ?? ''
+        const r = el.getBoundingClientRect()
+        setTip({ left: r.left, top: r.bottom + 6, snippet: sn })
+      }}
+      onMouseOut={onOut}
+      onFocus={(e) => {
+        const el = pickWikiKwEl(e.target)
+        if (!el || !e.currentTarget.contains(el)) return
+        const sn = el.getAttribute('data-snippet') ?? ''
+        const r = el.getBoundingClientRect()
+        setTip({ left: r.left, top: r.bottom + 6, snippet: sn })
+      }}
+      onBlur={onOut}
+      onClick={(e) => {
+        const el = pickWikiKwEl(e.target)
+        const sid = el?.getAttribute('data-source-id')
+        if (sid && props.onNavigate) {
+          e.preventDefault()
+          props.onNavigate(sid)
+        }
+      }}
+      onKeyDown={(e) => {
+        if (e.key !== 'Enter') return
+        const el = e.target instanceof HTMLElement ? e.target.closest(`.${CHAT_WIKI_KW_CLASS}`) : null
+        const sid = el?.getAttribute('data-source-id')
+        if (sid && props.onNavigate) {
+          e.preventDefault()
+          props.onNavigate(sid)
+        }
+      }}
+    >
+      {props.children}
+      {tip ? (
+        <div
+          className="chat-wiki-kw-tooltip-portal"
+          style={{ left: tip.left, top: tip.top }}
+          role="tooltip"
+        >
+          {tip.snippet}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function ChatRichContent(props: {
   content: string
   /** Incomplete Markdown/HTML is shown as escaped plain text while streaming. */
   plainStreaming?: boolean
+  /** Merged with `msg-rich` on the root (e.g. wiki article body). */
+  className?: string
+  /** Optional ref to the rich HTML root (for wiki TOC / tooling). */
+  richRootRef?: Ref<HTMLDivElement | null>
+  /** Called after sanitized HTML (and optional wiki-keyword wraps) is applied to the rich root. */
+  onRichDomReady?: (root: HTMLDivElement) => void
+  /** When set, phrases that match the knowledge base are linked to wiki articles. */
+  wikiHighlightTerms?: WikiChatHighlightTerm[]
+  onWikiKeywordNavigate?: (sourceId: string) => void
 }): ReactElement {
-  const { content, plainStreaming } = props
+  const {
+    content,
+    plainStreaming,
+    className,
+    richRootRef,
+    onRichDomReady,
+    wikiHighlightTerms,
+    onWikiKeywordNavigate
+  } = props
 
   const html = useMemo(() => {
     if (plainStreaming) return null
     return renderRichString(content)
   }, [content, plainStreaming])
 
+  const richRef = useRef<HTMLDivElement>(null)
+  const wikiShell = Boolean(wikiHighlightTerms?.length)
+
+  useLayoutEffect(() => {
+    const el = richRef.current
+    if (!el || plainStreaming) return
+    el.innerHTML = html ?? ''
+    if (wikiHighlightTerms?.length) {
+      applyWikiHighlightsToElement(el, wikiHighlightTerms)
+    }
+    onRichDomReady?.(el)
+  }, [html, plainStreaming, wikiHighlightTerms, onRichDomReady])
+
+  const rootClass = ['msg-rich', className].filter(Boolean).join(' ')
+
   if (plainStreaming) {
-    return (
-      <div className="msg-rich msg-rich--plain-stream">
-        <pre className="msg-rich-plain-pre">{content}</pre>
+    const preInner =
+      wikiShell && wikiHighlightTerms?.length ? (
+        splitPlainTextWithWikiTerms(content, wikiHighlightTerms).map((p, i) =>
+          p.kind === 'text' ? (
+            <Fragment key={`p-${i}`}>{p.value}</Fragment>
+          ) : (
+            <span
+              key={`k-${i}`}
+              className={CHAT_WIKI_KW_CLASS}
+              role="link"
+              tabIndex={0}
+              data-source-id={p.term.sourceId}
+              data-snippet={p.term.snippet.replace(/\s+/g, ' ').trim()}
+            >
+              {p.value}
+            </span>
+          )
+        )
+      ) : (
+        content
+      )
+
+    const block = (
+      <div className={`${rootClass} msg-rich--plain-stream`}>
+        <pre className="msg-rich-plain-pre">{preInner}</pre>
       </div>
+    )
+
+    return wikiShell ? (
+      <ChatWikiKeywordShell onNavigate={onWikiKeywordNavigate}>{block}</ChatWikiKeywordShell>
+    ) : (
+      block
     )
   }
 
-  return <div className="msg-rich" dangerouslySetInnerHTML={{ __html: html ?? '' }} />
+  const setRichEl = (el: HTMLDivElement | null): void => {
+    ;(richRef as MutableRefObject<HTMLDivElement | null>).current = el
+    const r = richRootRef
+    if (typeof r === 'function') r(el)
+    else if (r && typeof r === 'object' && 'current' in r) {
+      ;(r as MutableRefObject<HTMLDivElement | null>).current = el
+    }
+  }
+
+  const richBlock = <div ref={setRichEl} className={rootClass} />
+
+  return wikiShell ? (
+    <ChatWikiKeywordShell onNavigate={onWikiKeywordNavigate}>{richBlock}</ChatWikiKeywordShell>
+  ) : (
+    richBlock
+  )
 }
