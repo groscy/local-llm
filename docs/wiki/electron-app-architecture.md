@@ -23,15 +23,17 @@ This page summarizes how the **Local LLM Desktop** Electron app is structured so
 
 ## Notable services (main)
 
-| Area | Module (under `src/main/services/`) |
-|------|-------------------------------------|
-| Chat CRUD | `chatService.ts` |
-| Knowledge / wiki | `kbService.ts` |
-| HF API | `hfService.ts` |
-| Downloads | `downloadManager.ts` |
-| Runtime | `runtime/` (`llamaCppAdapter`, `ollamaAdapter`) |
-| Integration HTTP | `integrationServer.ts` |
-| Metrics | `metricsService.ts` |
+
+| Area             | Module (under `src/main/services/`)             |
+| ---------------- | ----------------------------------------------- |
+| Chat CRUD        | `chatService.ts`                                |
+| Knowledge / wiki | `kbService.ts`                                  |
+| HF API           | `hfService.ts`                                  |
+| Downloads        | `downloadManager.ts`                            |
+| Runtime          | `runtime/` (`llamaCppAdapter`, `ollamaAdapter`) |
+| Integration HTTP | `integrationServer.ts`                          |
+| Metrics          | `metricsService.ts`                             |
+
 
 ## Shared types
 

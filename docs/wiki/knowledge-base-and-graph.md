@@ -4,27 +4,31 @@ Use this page to understand what the **Knowledge wiki** and **Knowledge graph** 
 
 ## Tables (conceptual)
 
-- **`kb_sources`** — One row per ingested document or saved chat export: title, URI, optional `conversation_id` for linked cleanup.
-- **`kb_chunks`** — Ordered text segments belonging to a source; full-text index lives in **`kb_chunks_fts`** (triggers keep FTS in sync).
-- **`wiki_pages`** — Browsable compiled bodies; auto-generated pages use ids of the form `src:<kb_source_uuid>`.
-- **`wiki_page_chunks`** — Many-to-many: which chunks appear in which wiki page (used for graph **indexes** edges).
+- `**kb_sources`** — One row per ingested document or saved chat export: title, URI, optional `conversation_id` for linked cleanup.
+- `**kb_chunks`** — Ordered text segments belonging to a source; full-text index lives in `**kb_chunks_fts**` (triggers keep FTS in sync).
+- `**wiki_pages**` — Browsable compiled bodies; auto-generated pages use ids of the form `src:<kb_source_uuid>`.
+- `**wiki_page_chunks**` — Many-to-many: which chunks appear in which wiki page (used for graph **indexes** edges).
 
 ## Graph node kinds
 
-| Kind | Meaning |
-|------|---------|
-| **Source** | A `kb_sources` topic (your file, note, or saved chat). |
-| **Chunk** | A searchable segment under that source (shown up to a per-source and global cap in the graph for performance). |
-| **Wiki** | A `wiki_pages` row (title shown on the node). |
+
+| Kind       | Meaning                                                                                                        |
+| ---------- | -------------------------------------------------------------------------------------------------------------- |
+| **Source** | A `kb_sources` topic (your file, note, or saved chat).                                                         |
+| **Chunk**  | A searchable segment under that source (shown up to a per-source and global cap in the graph for performance). |
+| **Wiki**   | A `wiki_pages` row (title shown on the node).                                                                  |
+
 
 ## Graph edge kinds
 
-| Edge | Meaning |
-|------|---------|
-| **contains** | Source → chunk (ownership). |
-| **indexes** | Wiki page → chunk (from `wiki_page_chunks`). |
-| **compiled_from** | Wiki page → source when the page id is `src:<sourceId>`. |
-| **related** | Source ↔ source when both titles share at least one token of four or more letters (heuristic “see also”). |
+
+| Edge              | Meaning                                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------------------- |
+| **contains**      | Source → chunk (ownership).                                                                               |
+| **indexes**       | Wiki page → chunk (from `wiki_page_chunks`).                                                              |
+| **compiled_from** | Wiki page → source when the page id is `src:<sourceId>`.                                                  |
+| **related**       | Source ↔ source when both titles share at least one token of four or more letters (heuristic “see also”). |
+
 
 ## Using this in chat
 
