@@ -1,6 +1,6 @@
 import { ipcMain, dialog, safeStorage, BrowserWindow, shell } from 'electron'
 import { randomUUID } from 'crypto'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { existsSync, mkdirSync } from 'fs'
 import type Store from 'electron-store'
 import { z } from 'zod'
@@ -37,6 +37,7 @@ import { resetElectronStoreToFactory } from '../storeDefaults'
 import { configureIntegrationServer } from '../services/integrationServer'
 import { getPluginReportHistory } from '../services/pluginIntegrationHub'
 import { listGgufModelsInDir } from '../services/localModelsScan'
+import { hfDownloadDestFileName } from '../services/hfDownloadNaming'
 
 const configSchema = z.object({
   /** Set to `null` to clear and use the app default under user data. */
@@ -180,17 +181,21 @@ export function registerIpc(ctx: IpcContext): void {
     const payload = hfDownloadPayload.parse(raw)
     const destBase = payload.destDir ?? modelsDir()
     if (!existsSync(destBase)) mkdirSync(destBase, { recursive: true })
-    const destPath = join(destBase, payload.filename.split('/').pop() ?? payload.filename)
+    const revision = payload.revision || 'main'
+    const localName = hfDownloadDestFileName(payload.repoId, revision, payload.filename)
+    const destPath = join(destBase, localName)
     const job = {
       id: randomUUID(),
       repoId: payload.repoId,
-      revision: payload.revision || 'main',
+      revision,
       destPath,
       status: 'pending' as const,
       progress: 0,
       bytesReceived: 0,
       bytesTotal: 0,
-      chatDisplayName: payload.chatDisplayName?.trim() || payload.repoId
+      chatDisplayName:
+        payload.chatDisplayName?.trim() ||
+        `${payload.repoId} · ${basename(payload.filename.replace(/\\/g, '/'))}`
     }
     const token = getHfToken()
     const url = `https://huggingface.co/${payload.repoId}/resolve/${encodeURIComponent(job.revision)}/${payload.filename
@@ -454,9 +459,36 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(IPC.KB_SEARCH, (_e, query: string, limit?: number) =>
     kbService.searchChunks(db, query, limit ?? 8).map((c) => c.text)
   )
+  ipcMain.handle(IPC.KB_SEARCH_HITS, (_e, query: string, limit?: number) =>
+    kbService.searchKbHits(db, query, limit ?? 16)
+  )
   ipcMain.handle(IPC.KB_CHUNKS, (_e, sourceId: string) => kbService.listChunksForSource(db, sourceId))
   ipcMain.handle(IPC.KB_WIKI_TOPICS, () => kbService.listWikiTopics(db))
-  ipcMain.handle(IPC.KB_WIKI_PAGE, (_e, sourceId: string) => kbService.ensureWikiPageForSource(db, sourceId))
+  ipcMain.handle(IPC.KB_WIKI_PAGE, (_e, sourceId: string) =>
+    kbService.buildWikiPagePayload(db, sourceId)
+  )
+  ipcMain.handle(IPC.KB_WIKI_HIGHLIGHT_TERMS, () => kbService.listWikiChatHighlightTerms(db))
+  ipcMain.handle(IPC.KB_DELETE_SOURCE, (_e, sourceId: string) => {
+    const id = typeof sourceId === 'string' ? sourceId.trim() : ''
+    if (!id) throw new Error('source id required')
+    kbService.deleteKbSource(db, id)
+    return { ok: true as const }
+  })
+  ipcMain.handle(IPC.KB_EXPORT_WIKI_ZIP, async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const iso = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const opts = {
+      title: 'Export wiki as ZIP',
+      defaultPath: `wiki-export-${iso}.zip`,
+      filters: [{ name: 'ZIP archive', extensions: ['zip'] }]
+    }
+    const r = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts)
+    if (r.canceled || !r.filePath) return { ok: false as const, canceled: true as const }
+    let filePath = r.filePath
+    if (!filePath.toLowerCase().endsWith('.zip')) filePath += '.zip'
+    await kbService.exportWikiZip(db, filePath)
+    return { ok: true as const, path: filePath }
+  })
   ipcMain.handle(IPC.KB_KNOWLEDGE_GRAPH, () => kbService.getKnowledgeGraph(db))
 
   ipcMain.handle(IPC.KB_WIKI_EXTRACT_TURN, async (_e, raw: unknown) => {

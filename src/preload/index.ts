@@ -1,6 +1,15 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { IPC } from '@shared/ipc'
-import type { PluginIntegrationReport, RuntimeChatProgress, RuntimeLoadProgress } from '@shared/types'
+import type {
+  KbSearchHit,
+  PluginIntegrationReport,
+  RuntimeChatProgress,
+  RuntimeLoadProgress,
+  WikiChatHighlightTerm,
+  WikiExportZipResult,
+  WikiPagePayload,
+  WikiTopic
+} from '@shared/types'
 
 function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   return ipcRenderer.invoke(channel, ...args)
@@ -93,9 +102,13 @@ contextBridge.exposeInMainWorld('api', {
   kbIngestFile: () => invoke(IPC.KB_INGEST_FILE),
   kbSources: () => invoke(IPC.KB_SOURCES),
   kbSearch: (query: string, limit?: number) => invoke(IPC.KB_SEARCH, query, limit),
+  kbSearchHits: (query: string, limit?: number) => invoke<KbSearchHit[]>(IPC.KB_SEARCH_HITS, query, limit),
   kbChunks: (sourceId: string) => invoke(IPC.KB_CHUNKS, sourceId),
-  kbWikiTopics: () => invoke(IPC.KB_WIKI_TOPICS),
-  kbWikiPage: (sourceId: string) => invoke(IPC.KB_WIKI_PAGE, sourceId),
+  kbWikiTopics: () => invoke<WikiTopic[]>(IPC.KB_WIKI_TOPICS),
+  kbWikiPage: (sourceId: string) => invoke<WikiPagePayload>(IPC.KB_WIKI_PAGE, sourceId),
+  kbWikiHighlightTerms: () => invoke<WikiChatHighlightTerm[]>(IPC.KB_WIKI_HIGHLIGHT_TERMS),
+  kbDeleteSource: (sourceId: string) => invoke<{ ok: true }>(IPC.KB_DELETE_SOURCE, sourceId),
+  kbExportWikiZip: () => invoke<WikiExportZipResult>(IPC.KB_EXPORT_WIKI_ZIP),
   kbKnowledgeGraph: () => invoke(IPC.KB_KNOWLEDGE_GRAPH),
   kbWikiExtractTurn: (p: {
     conversationId: string

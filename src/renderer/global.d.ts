@@ -1,12 +1,17 @@
 import type {
   DownloadRow,
   HardwareSummary,
+  KbSearchHit,
   KnowledgeGraphPayload,
   WikiExtractTurnResult,
   PluginIntegrationReport,
   RuntimeChatProgress,
   RuntimeLoadProgress,
-  RuntimeStatus
+  RuntimeStatus,
+  WikiChatHighlightTerm,
+  WikiExportZipResult,
+  WikiPagePayload,
+  WikiTopic
 } from '@shared/types'
 
 export {}
@@ -110,9 +115,13 @@ type Api = {
   kbIngestFile: () => Promise<unknown>
   kbSources: () => Promise<unknown[]>
   kbSearch: (query: string, limit?: number) => Promise<string[]>
+  kbSearchHits: (query: string, limit?: number) => Promise<KbSearchHit[]>
   kbChunks: (sourceId: string) => Promise<unknown[]>
-  kbWikiTopics: () => Promise<unknown[]>
-  kbWikiPage: (sourceId: string) => Promise<{ id: string; title: string; body: string }>
+  kbWikiTopics: () => Promise<WikiTopic[]>
+  kbWikiPage: (sourceId: string) => Promise<WikiPagePayload>
+  kbWikiHighlightTerms: () => Promise<WikiChatHighlightTerm[]>
+  kbDeleteSource: (sourceId: string) => Promise<{ ok: true }>
+  kbExportWikiZip: () => Promise<WikiExportZipResult>
   kbKnowledgeGraph: () => Promise<KnowledgeGraphPayload>
   kbWikiExtractTurn: (p: {
     conversationId: string

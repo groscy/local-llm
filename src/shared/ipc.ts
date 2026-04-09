@@ -57,9 +57,17 @@ export const IPC = {
   KB_INGEST_CONVERSATION: 'kb:ingestConversation',
   KB_SOURCES: 'kb:sources',
   KB_SEARCH: 'kb:search',
+  /** Full-text search with source id/title and snippet (deduped per source). */
+  KB_SEARCH_HITS: 'kb:searchHits',
   KB_CHUNKS: 'kb:chunks',
   KB_WIKI_TOPICS: 'kb:wikiTopics',
   KB_WIKI_PAGE: 'kb:wikiPage',
+  /** Phrases from wiki titles, chunk headings, and glossary blocks for in-chat highlighting. */
+  KB_WIKI_HIGHLIGHT_TERMS: 'kb:wikiHighlightTerms',
+  /** Remove one KB source (chunks, FTS, compiled wiki page, links). */
+  KB_DELETE_SOURCE: 'kb:deleteSource',
+  /** Save dialog → write all wiki sources + manifest to a ZIP. */
+  KB_EXPORT_WIKI_ZIP: 'kb:exportWikiZip',
   /** Structural graph: sources → chunks, wiki pages → chunks, optional related sources. */
   KB_KNOWLEDGE_GRAPH: 'kb:knowledgeGraph',
   /** After a chat turn: run a short local model pass to extract wiki notes and ingest (optional). */
