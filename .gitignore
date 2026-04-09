@@ -3,6 +3,7 @@ build/
 out/
 dist/
 release/
+release-linux/
 release-builds/
 *.log
 .DS_Store

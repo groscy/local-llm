@@ -66,6 +66,9 @@ linux:
     - target: rpm
       arch:
         - x64
+    - target: pacman
+      arch:
+        - x64
   artifactName: ${productName}-${version}-linux-${arch}.${ext}
   category: Development
   synopsis: Local LLM desktop — Hugging Face, RAG wiki, optional training
@@ -99,6 +102,10 @@ rpm:
   artifactName: ${productName}-${version}-linux-${arch}.${ext}
 
 appImage:
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+
+# Arch Linux / pacman (install: sudo pacman -U ./<file>.pkg.tar.*)
+pacman:
   artifactName: ${productName}-${version}-linux-${arch}.${ext}
 
 # Do not publish to GitHub etc. from this config

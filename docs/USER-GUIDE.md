@@ -24,14 +24,17 @@ This guide explains how to install, configure, and run **Local LLM Desktop**: br
 
 ### 2.1 From an installer (recommended when available)
 
-| Platform | Artifact | What to do |
-|----------|-----------|------------|
-| **Windows** | `Local LLM Desktop-Setup-<version>.exe` | Run the installer, choose install location if prompted, use Start Menu or desktop shortcut. |
-| **macOS** | `Local LLM Desktop-<version>-<arch>.dmg` | Open the DMG, drag **Local LLM Desktop** into **Applications**. |
-| **Linux** | `Local LLM Desktop-<version>-linux-x64.deb` | **Debian / Ubuntu / Mint:** `sudo apt install ./Local\ LLM\ Desktop-<version>-linux-x64.deb` (or `sudo dpkg -i <file>.deb` then `sudo apt -f install` if dependencies are missing). Installs menu entry like a normal app. |
-| **Linux** | `Local LLM Desktop-<version>-linux-x64.AppImage` | Portable single file: `chmod +x` then run, or use an AppImage desktop integration tool. |
 
-Installers are produced from source with `**npm run dist:installer**` on the **same** OS you are targeting (output under `release/` or `release-builds/<timestamp>/`). **Linux packages must be built on Linux** (or **WSL2** with Ubuntu, from the Linux filesystem — not `/mnt/c/...` if native modules misbehave). **RPM** (Fedora/RHEL) is configured in `electron-builder.yml`; after `npm run build`, run `npx electron-builder --publish never --linux rpm` on an RPM-based system (or install the `rpm` toolchain on Debian if you need `.rpm` there). **zip** builds remain available if you prefer a portable folder.
+| Platform    | Artifact                                         | What to do                                                                                                                                                                                                                 |
+| ----------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Windows** | `Local LLM Desktop-Setup-<version>.exe`          | Run the installer, choose install location if prompted, use Start Menu or desktop shortcut.                                                                                                                                |
+| **macOS**   | `Local LLM Desktop-<version>-<arch>.dmg`         | Open the DMG, drag **Local LLM Desktop** into **Applications**.                                                                                                                                                            |
+| **Linux**   | `Local LLM Desktop-<version>-linux-x64.deb`      | **Debian / Ubuntu / Mint:** `sudo apt install ./Local\ LLM\ Desktop-<version>-linux-x64.deb` (or `sudo dpkg -i <file>.deb` then `sudo apt -f install` if dependencies are missing). Installs menu entry like a normal app. |
+| **Linux**   | `Local LLM Desktop-<version>-linux-x64.AppImage` | Portable single file: `chmod +x` then run, or use an AppImage desktop integration tool.                                                                                                                                    |
+| **Linux**   | `Local LLM Desktop-<version>-linux-x64.pkg.tar.*` | **Arch / pacman:** `sudo pacman -U ./Local\ LLM\ Desktop-<version>-linux-x64.pkg.tar.xz` (extension may be `.pkg.tar.zst` depending on build). Resolves dependencies like a normal package install.                        |
+
+
+Installers are produced from source with `**npm run dist:installer`** on the **same** OS you are targeting (output under `release/` or `release-builds/<timestamp>/`). **Linux packages** need a Linux toolchain: use `**npm run dist:linux:podman`** from **Windows or macOS** ([Podman](https://podman.io/) / Podman Desktop), `**npm run dist:linux`** on **Linux** or **WSL2** (Ubuntu, on the Linux filesystem — avoid `/mnt/c/...` if native modules misbehave). **RPM** (Fedora/RHEL) is configured in `electron-builder.yml`; after `npm run build`, run `npx electron-builder --publish never --linux rpm` on an RPM-based system (or install the `rpm` toolchain on Debian if you need `.rpm` there). **zip** builds remain available if you prefer a portable folder.
 
 ### 2.2 From a release zip (portable folder)
 
@@ -62,13 +65,31 @@ npm run preview
 npm run dist:zip
 ```
 
-**Create an installer** (NSIS on Windows, DMG on macOS, **.deb + AppImage** on Linux):
+**Create an installer** (NSIS on Windows, DMG on macOS, **.deb + AppImage + pacman (Arch)** on Linux):
 
 ```bash
 npm run dist:installer
 ```
 
-Output appears under `release/` or, if that folder is locked on Windows, under `release-builds/<timestamp>/`. On Linux you should get both a **`.deb`** and an **`.AppImage`** in that directory.
+**Linux release bundle** (`.deb`, `.AppImage`, **`.pkg.tar.*` (Arch)**, and portable `.zip`):
+
+- **From Windows or macOS** (Podman installed; start a Podman machine if required): native modules are built **inside Linux**:
+
+```bash
+npm run dist:linux:podman
+```
+
+  Artifacts land in `**release-linux/**` by default.
+
+- **From a Linux machine** (or WSL Ubuntu on the Linux filesystem):
+
+```bash
+npm run dist:linux
+```
+
+You can also use **GitHub Actions**: workflow **Build Linux release** (`.github/workflows/build-linux.yml`), or build `**Dockerfile.linux`** manually (see the file header).
+
+Output appears under `release/` or, if that folder is locked on Windows, under `release-builds/<timestamp>/`. On Linux (or Podman/CI) you should get a `**.deb**`, an `**.AppImage**`, a **`pacman` package** (`*.pkg.tar.*`), and a `**.zip**` in that directory.
 
 ---
 
@@ -155,7 +176,7 @@ Use **Stop** in the Runtime panel. For llama.cpp, the app manages the child proc
 - With the runtime running, **Settings → Chat generation → Auto-extract wiki notes after each reply** (on by default) runs a **second, short** local completion after every assistant message to distill **bullet notes** into the knowledge base. The model may answer **(skip)** when there is nothing worth saving. Extracted sources are tied to the **conversation** like “save chat to knowledge base” content, so they can be bulk-removed when you delete that chat (if you choose the option to remove linked knowledge). Disable the toggle to avoid the extra pass and token use.
 - How strongly retrieval affects a reply depends on how the app **composes** the user turn (including retrieved snippets) before sending it to the model; keep the runtime on while experimenting.
 
-**Repository wiki pages (optional):** If you develop from a git clone, Markdown under [`docs/wiki/`](./wiki/) describes the app architecture and knowledge semantics. Ingest those files with **+ Add document** if you want that material in your local wiki and RAG.
+**Repository wiki pages (optional):** If you develop from a git clone, Markdown under `[docs/wiki/](./wiki/)` describes the app architecture and knowledge semantics. Ingest those files with **+ Add document** if you want that material in your local wiki and RAG.
 
 ---
 
@@ -200,13 +221,13 @@ Slide-over **panel widths and edges** for chat/knowledge are stored separately i
 ## 11. Troubleshooting
 
 
-| Problem                                            | Things to try                                                                                                                                                                                           |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Runtime won’t start (Ollama)**                   | Confirm Ollama is installed and listening (browser or `curl` to your base URL). Check **Settings → Ollama base URL**. Use a model tag you already pulled (`ollama list`).                               |
-| **Runtime won’t start (llama.cpp)**                | Verify `llama-server` path, `.gguf` path, and port **8080** (or your configured port) not in use by another program.                                                                                    |
-| **HF search/download errors**                      | Add or refresh **HF token**; check model is public or your account has access; check disk space and models folder permissions.                                                                          |
+| Problem                                            | Things to try                                                                                                                                                                                                                       |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Runtime won’t start (Ollama)**                   | Confirm Ollama is installed and listening (browser or `curl` to your base URL). Check **Settings → Ollama base URL**. Use a model tag you already pulled (`ollama list`).                                                           |
+| **Runtime won’t start (llama.cpp)**                | Verify `llama-server` path, `.gguf` path, and port **8080** (or your configured port) not in use by another program.                                                                                                                |
+| **HF search/download errors**                      | Add or refresh **HF token**; check model is public or your account has access; check disk space and models folder permissions.                                                                                                      |
 | **Packaging failed on Windows**                    | Close File Explorer windows pointing at `release\`, exit any running copy of the app, then run `npm run dist:zip` or `npm run dist:installer` again. The script may write to `release-builds/<timestamp>/` if `release/` is locked. |
-| **SQLite / native module errors after `git pull`** | Run `npm install` again so `better-sqlite3` rebuilds for the current Electron version.                                                                                                                  |
+| **SQLite / native module errors after `git pull`** | Run `npm install` again so `better-sqlite3` rebuilds for the current Electron version.                                                                                                                                              |
 
 
 ### 11.1 Log files

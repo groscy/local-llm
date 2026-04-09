@@ -1,0 +1,29 @@
+# Linux release build (deb, AppImage, zip, pacman for Arch). OCI image — use with Podman (or any container CLI).
+# From Windows/macOS:
+#   npm run dist:linux:podman
+# Or manually from repo root:
+#   podman build -f Dockerfile.linux -t localllm-linux-build .
+#   podman create --name localllm-out localllm-linux-build
+#   podman cp localllm-out:/app/release/. ./release-linux/
+#   podman rm localllm-out
+FROM node:22-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fakeroot \
+    rpm \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+COPY . .
+
+ENV CSC_IDENTITY_AUTO_DISCOVERY=false
+ENV ALLOW_LINUX_PACKAGING_OUTSIDE_LINUX=1
+
+RUN npm run typecheck && npm run build \
+  && npx electron-builder --publish never --linux deb AppImage zip pacman
+
+# Artifacts: /app/release/

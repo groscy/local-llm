@@ -4,7 +4,7 @@
  *
  * - Windows: NSIS Setup .exe (per-user or elevated install, Start Menu + desktop shortcuts)
  * - macOS:     DMG (drag to Applications)
- * - Linux:     .deb (apt/dpkg) + AppImage (portable); .rpm available via electron-builder --linux rpm on RPM hosts
+ * - Linux:     .deb (apt/dpkg) + AppImage (portable) + .pkg.tar.* (Arch pacman); .rpm available via electron-builder --linux rpm on RPM hosts
  *
  * Output: ./release/ or ./release-builds/<timestamp>/ (same rules as package-zip.mjs).
  */
@@ -64,7 +64,7 @@ async function pickOutputDirRelative() {
 function installerLabel() {
   if (process.platform === 'win32') return 'electron-builder (Windows NSIS installer)'
   if (process.platform === 'darwin') return 'electron-builder (macOS DMG)'
-  return 'electron-builder (Linux .deb + AppImage)'
+  return 'electron-builder (Linux .deb + AppImage + pacman)'
 }
 
 async function main() {
@@ -86,7 +86,7 @@ async function main() {
   } else if (process.platform === 'darwin') {
     ebArgs.push('--mac', 'dmg')
   } else {
-    ebArgs.push('--linux', 'deb', 'AppImage')
+    ebArgs.push('--linux', 'deb', 'AppImage', 'pacman')
   }
 
   run(installerLabel(), npx, ebArgs)
@@ -100,6 +100,7 @@ async function main() {
     console.log('  Look for:\n')
     console.log('    - Local LLM Desktop-<version>-linux-x64.deb  →  sudo apt install ./<file>.deb   (or: sudo dpkg -i <file>.deb)\n')
     console.log('    - Local LLM Desktop-<version>-linux-x64.AppImage  →  chmod +x <file>.AppImage && ./<file>.AppImage\n')
+    console.log('    - Local LLM Desktop-<version>-linux-x64.pkg.tar.*  →  Arch: sudo pacman -U ./<file>\n')
     console.log('  Optional RPM (Fedora/RHEL, after npm run build): npx electron-builder --publish never -c.directories.output=release --linux rpm\n')
   }
 }

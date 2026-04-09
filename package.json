@@ -2,6 +2,7 @@
   "name": "local-llm-desktop",
   "version": "0.1.0",
   "author": "Local",
+  "homepage": "https://github.com/localllm/local-llm-desktop",
   "description": "Local LLM desktop app with Hugging Face, RAG wiki, and optional LoRA training",
   "main": "out/main/index.js",
   "type": "module",
@@ -12,6 +13,8 @@
     "typecheck": "tsc --noEmit",
     "dist:zip": "node scripts/package-zip.mjs",
     "dist:installer": "node scripts/package-installer.mjs",
+    "dist:linux": "node scripts/package-linux.mjs",
+    "dist:linux:podman": "node scripts/package-linux-podman.mjs",
     "icons": "node scripts/generate-icons.mjs",
     "postinstall": "electron-rebuild -f -w better-sqlite3"
   },

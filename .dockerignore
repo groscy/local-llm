@@ -1,0 +1,14 @@
+node_modules
+release
+release-linux
+release-builds
+out
+dist
+.git
+.github
+*.log
+.env
+.DS_Store
+integrations/intellij-plugin/.gradle
+integrations/intellij-plugin/build
+integrations/intellij-plugin/.intellijPlatform
