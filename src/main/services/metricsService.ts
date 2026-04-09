@@ -2,6 +2,7 @@ import { cpus, totalmem, freemem } from 'os'
 import type Database from 'better-sqlite3'
 import type { MetricsSnapshot } from '@shared/types'
 import type { RuntimeAdapter } from './runtime/types'
+import { averageChatRoundtripMs } from './chatLatencyStats'
 import { probeNvidiaGpuMemoryMb } from './gpuProbe'
 
 function processCpuApprox(): number {
@@ -35,6 +36,7 @@ export async function peekSnapshot(runtime: RuntimeAdapter | null): Promise<Metr
   }
   const rssMb = process.memoryUsage().rss / (1024 * 1024)
   const gpu = probeNvidiaGpuMemoryMb()
+  const avgPromptToResponseMs = averageChatRoundtripMs()
   return {
     ts,
     runtimeTokensPerSec,
@@ -43,7 +45,8 @@ export async function peekSnapshot(runtime: RuntimeAdapter | null): Promise<Metr
     processCpuPercent: processCpuApprox(),
     processRssMb: rssMb,
     gpuMemUsedMb: gpu?.usedMb,
-    gpuMemTotalMb: gpu?.totalMb
+    gpuMemTotalMb: gpu?.totalMb,
+    ...(avgPromptToResponseMs != null ? { avgPromptToResponseMs } : {})
   }
 }
 
@@ -53,8 +56,8 @@ export async function collectSnapshot(
 ): Promise<MetricsSnapshot> {
   const snap = await peekSnapshot(runtime)
   db.prepare(
-    `INSERT INTO metrics_samples (ts, runtime_tokens_per_sec, runtime_ctx_used, process_cpu_percent, process_rss_mb, gpu_mem_used_mb, gpu_mem_total_mb, model_memory_mb)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO metrics_samples (ts, runtime_tokens_per_sec, runtime_ctx_used, process_cpu_percent, process_rss_mb, gpu_mem_used_mb, gpu_mem_total_mb, model_memory_mb, avg_prompt_to_response_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     snap.ts,
     snap.runtimeTokensPerSec ?? null,
@@ -63,7 +66,8 @@ export async function collectSnapshot(
     snap.processRssMb ?? null,
     snap.gpuMemUsedMb ?? null,
     snap.gpuMemTotalMb ?? null,
-    snap.modelMemoryMb ?? null
+    snap.modelMemoryMb ?? null,
+    snap.avgPromptToResponseMs ?? null
   )
   return snap
 }
@@ -74,7 +78,8 @@ export function recentHistory(db: Database.Database, limit: number): MetricsSnap
       `SELECT ts, runtime_tokens_per_sec as runtimeTokensPerSec, runtime_ctx_used as runtimeCtxUsed,
               process_cpu_percent as processCpuPercent, process_rss_mb as processRssMb,
               gpu_mem_used_mb as gpuMemUsedMb, gpu_mem_total_mb as gpuMemTotalMb,
-              model_memory_mb as modelMemoryMb
+              model_memory_mb as modelMemoryMb,
+              avg_prompt_to_response_ms as avgPromptToResponseMs
        FROM metrics_samples ORDER BY ts DESC LIMIT ?`
     )
     .all(limit) as MetricsSnapshot[]
