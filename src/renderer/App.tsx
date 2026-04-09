@@ -1,14 +1,29 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactElement
+} from 'react'
 import type {
   DownloadRow,
   HardwareSummary,
   HfModelDetail,
   HfModelSummary,
+  KbSearchHit,
   KnowledgeGraphPayload,
   MetricsSnapshot,
   PluginIntegrationReport,
   RuntimeLoadProgress,
-  RuntimeStatus
+  RuntimeStatus,
+  WikiChatHighlightTerm,
+  WikiGlossaryEntry,
+  WikiRelatedSource,
+  WikiSourceKind,
+  WikiTopic
 } from '@shared/types'
 import { evaluateModelForHardware } from '@shared/modelHardwareFit'
 import type { ColorSchemeId } from '@shared/colorScheme'
@@ -22,7 +37,42 @@ import { FloatingDots } from './FloatingDots'
 import { MetricsTimeSeries } from './MetricsTimeSeries'
 import { MetricsPinnedWidget } from './MetricsPinnedWidget'
 import { KnowledgeGraphView } from './KnowledgeGraphView'
-import { OllamaChatBar } from './OllamaChatBar'
+import { buildWikiTocGroupsFromRoot, WikiArticleTocNav, type WikiTocGroup } from './WikiArticleToc'
+
+function WikiEntryRemoveButton(props: { ariaLabel: string; onPress: () => void }): ReactElement {
+  return (
+    <button
+      type="button"
+      className="wiki-entry-remove"
+      aria-label={props.ariaLabel}
+      title="Remove from wiki"
+      onClick={(e: MouseEvent<HTMLButtonElement>) => {
+        e.stopPropagation()
+        props.onPress()
+      }}
+    >
+      <i className="fa-solid fa-trash-can" aria-hidden />
+    </button>
+  )
+}
+
+const WIKI_KIND_ORDER: WikiSourceKind[] = ['document', 'extracted_note', 'saved_chat', 'other']
+const WIKI_KIND_LABELS: Record<WikiSourceKind, string> = {
+  document: 'Documents',
+  extracted_note: 'Chat notes',
+  saved_chat: 'Saved chats',
+  other: 'Other'
+}
+
+function groupWikiTopicsByKind(topics: WikiTopic[]): Map<WikiSourceKind, WikiTopic[]> {
+  const m = new Map<WikiSourceKind, WikiTopic[]>()
+  for (const k of WIKI_KIND_ORDER) m.set(k, [])
+  for (const t of topics) {
+    const bucket = m.get(t.kind) ?? m.get('other')!
+    bucket.push(t)
+  }
+  return m
+}
 
 const METRICS_REFRESH_PRESETS_MS = [
   1000, 2000, 3000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000, 3_600_000
@@ -497,8 +547,6 @@ export default function App(): React.ReactElement {
   const [ollamaChatTags, setOllamaChatTags] = useState<string[]>([])
   const [ollamaChatTagsLoading, setOllamaChatTagsLoading] = useState(false)
   const [ollamaChatTagsErr, setOllamaChatTagsErr] = useState<string | null>(null)
-  const [ollamaChatModelTag, setOllamaChatModelTag] = useState('llama3.2')
-
   const matchedLocalModelPath = useMemo(() => {
     const cur = modelPath.trim()
     if (!cur || localModelFilePaths.length === 0) return ''
@@ -507,6 +555,17 @@ export default function App(): React.ReactElement {
       localModelFilePaths.find((p) => (win ? p.toLowerCase() === cur.toLowerCase() : p === cur)) ?? ''
     )
   }, [localModelFilePaths, modelPath, paths?.platform])
+
+  const topBarModelSelectValue = useMemo(() => {
+    const cur = modelPath.trim()
+    if (runtimeKind === 'llamacpp') {
+      return matchedLocalModelPath || ''
+    }
+    if (runtimeKind === 'ollama') {
+      return cur && ollamaChatTags.includes(cur) ? cur : ''
+    }
+    return ''
+  }, [runtimeKind, matchedLocalModelPath, modelPath, ollamaChatTags])
 
   const localModelDefaultSyncRef = useRef<{ kind: typeof runtimeKind; localLen: number }>({
     kind: runtimeKind,
@@ -532,8 +591,29 @@ export default function App(): React.ReactElement {
     if (matched) return
     if (switchedToLlama || listBecameAvailable) {
       setModelPath(files[0])
+      return
+    }
+    if (cur) {
+      setModelPath(files[0])
     }
   }, [runtimeKind, localModelFilePaths, paths?.platform, modelPath])
+
+  useEffect(() => {
+    if (runtimeKind !== 'ollama') return
+    if (ollamaChatTagsLoading) return
+
+    const tags = ollamaChatTags
+    const cur = modelPath.trim()
+
+    if (tags.length === 0) {
+      if (cur) setModelPath('')
+      return
+    }
+
+    if (!cur) return
+    if (tags.includes(cur)) return
+    setModelPath(tags[0])
+  }, [runtimeKind, ollamaChatTags, ollamaChatTagsLoading, modelPath])
 
   const [conversations, setConversations] = useState<{ id: string; title: string }[]>([])
   const [convId, setConvId] = useState<string | null>(null)
@@ -548,11 +628,20 @@ export default function App(): React.ReactElement {
   const [ragSnippets, setRagSnippets] = useState<string[]>([])
   const [ragLoading, setRagLoading] = useState(false)
 
-  const [wikiTopics, setWikiTopics] = useState<{ id: string; title: string; chunkCount: number }[]>([])
+  const [wikiTopics, setWikiTopics] = useState<WikiTopic[]>([])
+  const [wikiHighlightTerms, setWikiHighlightTerms] = useState<WikiChatHighlightTerm[]>([])
   const [wikiBody, setWikiBody] = useState('')
   const [wikiTitle, setWikiTitle] = useState('')
+  const [wikiGlossary, setWikiGlossary] = useState<WikiGlossaryEntry[]>([])
+  const [wikiRelated, setWikiRelated] = useState<WikiRelatedSource[]>([])
   const [wikiSelectedId, setWikiSelectedId] = useState<string | null>(null)
-  const [wikiArticleTab, setWikiArticleTab] = useState<'read' | 'graph'>('read')
+  const [wikiDeletePending, setWikiDeletePending] = useState<{ id: string; title: string } | null>(null)
+  const [wikiSearchQuery, setWikiSearchQuery] = useState('')
+  const [wikiSearchHits, setWikiSearchHits] = useState<KbSearchHit[]>([])
+  const [wikiSearchBusy, setWikiSearchBusy] = useState(false)
+  const [wikiExportBusy, setWikiExportBusy] = useState(false)
+  const [wikiTocGroups, setWikiTocGroups] = useState<WikiTocGroup[]>([])
+  const wikiSearchSeqRef = useRef(0)
   const [kgPayload, setKgPayload] = useState<KnowledgeGraphPayload | null>(null)
   const [kgLoading, setKgLoading] = useState(false)
 
@@ -840,10 +929,52 @@ export default function App(): React.ReactElement {
     }
   }, [renamingConvId])
 
-  const loadWiki = useCallback(async () => {
-    const t = await window.api.kbWikiTopics()
-    setWikiTopics(t as { id: string; title: string; chunkCount: number }[])
+  const onWikiRichDomReady = useCallback((root: HTMLDivElement) => {
+    setWikiTocGroups(buildWikiTocGroupsFromRoot(root))
   }, [])
+
+  const loadWiki = useCallback(async () => {
+    setWikiTopics(await window.api.kbWikiTopics())
+    try {
+      setWikiHighlightTerms(await window.api.kbWikiHighlightTerms())
+    } catch {
+      setWikiHighlightTerms([])
+    }
+  }, [])
+
+  useEffect(() => {
+    const q = wikiSearchQuery.trim()
+    if (mainView !== 'wiki') return
+    if (!q) {
+      setWikiSearchHits([])
+      setWikiSearchBusy(false)
+      return
+    }
+    let cancelled = false
+    const t = window.setTimeout(() => {
+      const seq = ++wikiSearchSeqRef.current
+      if (typeof window.api.kbSearchHits !== 'function') {
+        setWikiSearchHits([])
+        setWikiSearchBusy(false)
+        return
+      }
+      setWikiSearchBusy(true)
+      void window.api
+        .kbSearchHits(q, 20)
+        .then((hits) => {
+          if (cancelled || seq !== wikiSearchSeqRef.current) return
+          setWikiSearchHits(hits)
+        })
+        .finally(() => {
+          if (cancelled || seq !== wikiSearchSeqRef.current) return
+          setWikiSearchBusy(false)
+        })
+    }, 220)
+    return () => {
+      cancelled = true
+      window.clearTimeout(t)
+    }
+  }, [wikiSearchQuery, mainView])
 
   const loadKnowledgeGraph = useCallback(async () => {
     setKgLoading(true)
@@ -858,10 +989,14 @@ export default function App(): React.ReactElement {
   }, [])
 
   useEffect(() => {
-    if (mainView === 'wiki' && wikiArticleTab === 'graph') {
+    if (mainView === 'wiki') {
       void loadKnowledgeGraph()
     }
-  }, [mainView, wikiArticleTab, wikiTopics.length, loadKnowledgeGraph])
+  }, [mainView, wikiTopics.length, loadKnowledgeGraph])
+
+  useEffect(() => {
+    if (!wikiTitle.trim()) setWikiTocGroups([])
+  }, [wikiTitle])
 
   useEffect(() => {
     if (deleteConvId) setDeleteConvRemoveKb(false)
@@ -875,6 +1010,15 @@ export default function App(): React.ReactElement {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [deleteConvId])
+
+  useEffect(() => {
+    if (!wikiDeletePending) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setWikiDeletePending(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [wikiDeletePending])
 
   const refreshRuntimeStatus = useCallback(async () => {
     const s = await window.api.runtimeStatus()
@@ -922,7 +1066,15 @@ export default function App(): React.ReactElement {
     setOllamaChatTagsLoading(true)
     setOllamaChatTagsErr(null)
     try {
-      const r = await window.api.ollamaListTags()
+      const listTags = window.api.ollamaListTags
+      if (typeof listTags !== 'function') {
+        setOllamaChatTags([])
+        setOllamaChatTagsErr(
+          'The preload script is out of date (ollamaListTags missing). Stop the app, run npm run build, then start again — or use npm run dev so predev rebuilds preload.'
+        )
+        return
+      }
+      const r = await listTags()
       setOllamaChatTags(Array.isArray(r.names) ? r.names : [])
       if (r.error) setOllamaChatTagsErr(r.error)
     } catch (e) {
@@ -987,15 +1139,9 @@ export default function App(): React.ReactElement {
   }, [ollamaHost?.reachable])
 
   useEffect(() => {
-    if (mainView !== 'chat') return
+    if (!ollamaHost?.reachable) return
     void refreshOllamaChatTags()
-  }, [mainView, ollamaHost?.reachable, refreshOllamaChatTags])
-
-  useEffect(() => {
-    if (runtimeStatus?.running !== true || runtimeStatus.kind !== 'ollama') return
-    const m = (runtimeStatus.modelPath ?? '').trim()
-    if (m) setOllamaChatModelTag(m)
-  }, [runtimeStatus?.running, runtimeStatus?.kind, runtimeStatus?.modelPath])
+  }, [ollamaHost?.reachable, refreshOllamaChatTags])
 
   useEffect(() => {
     return window.api.onRuntimeLoadProgress((p) => {
@@ -1771,28 +1917,6 @@ export default function App(): React.ReactElement {
     }
   }
 
-  async function startOllamaFromChatBar(tag: string): Promise<void> {
-    if (runtimeStatus?.running || runtimeStarting) return
-    const trimmed = tag.trim()
-    if (!trimmed) return
-    setErr(null)
-    setRuntimeStarting(true)
-    setRuntimeLoadProgress(null)
-    try {
-      const s = await window.api.runtimeStart({ kind: 'ollama', modelPath: trimmed })
-      setRuntimeStatus(s)
-      setRuntimeKind('ollama')
-      setModelPath(trimmed)
-      await window.api.setConfig({ llamaBinaryPath: llamaBin, runtimeKind: 'ollama' })
-      void refreshRunDrawer()
-    } catch (e) {
-      setErr(String(e))
-    } finally {
-      setRuntimeStarting(false)
-      setRuntimeLoadProgress(null)
-    }
-  }
-
   async function stopRuntime(): Promise<void> {
     setErr(null)
     try {
@@ -1984,6 +2108,8 @@ export default function App(): React.ReactElement {
         setWikiSelectedId(null)
         setWikiBody('')
         setWikiTitle('')
+        setWikiGlossary([])
+        setWikiRelated([])
       }
     } catch (e) {
       setErr(String(e))
@@ -2016,11 +2142,59 @@ export default function App(): React.ReactElement {
   }
 
   async function openWikiPage(sourceId: string): Promise<void> {
-    setWikiArticleTab('read')
     setWikiSelectedId(sourceId)
     const p = await window.api.kbWikiPage(sourceId)
     setWikiTitle(p.title)
     setWikiBody(p.body)
+    setWikiGlossary(p.glossary)
+    setWikiRelated(p.relatedSources)
+  }
+
+  async function navigateChatKeywordToWiki(sourceId: string): Promise<void> {
+    setMainView('wiki')
+    await openWikiPage(sourceId)
+  }
+
+  async function exportWikiZipToDisk(): Promise<void> {
+    if (typeof window.api.kbExportWikiZip !== 'function') {
+      setErr('Export wiki is unavailable. Rebuild the app so preload includes kbExportWikiZip.')
+      return
+    }
+    setWikiExportBusy(true)
+    setErr(null)
+    try {
+      await window.api.kbExportWikiZip()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setWikiExportBusy(false)
+    }
+  }
+
+  async function confirmDeleteWikiEntry(): Promise<void> {
+    if (!wikiDeletePending) return
+    const { id } = wikiDeletePending
+    const wasViewingDeleted = wikiSelectedId === id
+    setWikiDeletePending(null)
+    if (typeof window.api.kbDeleteSource !== 'function') {
+      setErr('Remove from wiki is unavailable. Rebuild the app so preload includes kbDeleteSource.')
+      return
+    }
+    setErr(null)
+    try {
+      await window.api.kbDeleteSource(id)
+      if (wasViewingDeleted) {
+        setWikiSelectedId(null)
+        setWikiTitle('')
+        setWikiBody('')
+        setWikiGlossary([])
+        setWikiRelated([])
+      }
+      await loadWiki()
+      void loadKnowledgeGraph()
+    } catch (e) {
+      setErr(String(e))
+    }
   }
 
   function onComposerKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>): void {
@@ -2059,6 +2233,37 @@ export default function App(): React.ReactElement {
     mainView === 'chat'
       ? 'Ground replies with your wiki from the right panel.'
       : 'Browse sources built from files you ingest. Link snippets in chat.'
+
+  const wikiSearchTrimmed = wikiSearchQuery.trim()
+  const wikiHasSearch = wikiSearchTrimmed.length > 0
+  const wikiSearchQLower = wikiSearchTrimmed.toLowerCase()
+  const wikiTitleMatchTopics = useMemo(() => {
+    if (!wikiHasSearch) return wikiTopics
+    return wikiTopics.filter((t) => t.title.toLowerCase().includes(wikiSearchQLower))
+  }, [wikiTopics, wikiHasSearch, wikiSearchQLower])
+  const wikiTitleMatchIds = useMemo(
+    () => new Set(wikiTitleMatchTopics.map((t) => t.id)),
+    [wikiTitleMatchTopics]
+  )
+  const wikiContentHits = useMemo(() => {
+    if (!wikiHasSearch) return []
+    return wikiSearchHits.filter((h) => !wikiTitleMatchIds.has(h.sourceId))
+  }, [wikiHasSearch, wikiSearchHits, wikiTitleMatchIds])
+
+  const wikiBrowseByKind = useMemo(() => groupWikiTopicsByKind(wikiTopics), [wikiTopics])
+  const wikiTitleMatchByKind = useMemo(
+    () => groupWikiTopicsByKind(wikiTitleMatchTopics),
+    [wikiTitleMatchTopics]
+  )
+  const wikiTitleMatchKindCount = useMemo(
+    () => WIKI_KIND_ORDER.filter((k) => (wikiTitleMatchByKind.get(k) ?? []).length > 0).length,
+    [wikiTitleMatchByKind]
+  )
+  const wikiSelectedKindLabel = useMemo(() => {
+    if (!wikiSelectedId) return null
+    const t = wikiTopics.find((x) => x.id === wikiSelectedId)
+    return t ? WIKI_KIND_LABELS[t.kind] : null
+  }, [wikiSelectedId, wikiTopics])
 
   return (
     <div className="shell">
@@ -2235,9 +2440,95 @@ export default function App(): React.ReactElement {
         )}
         <div className="main-column">
         <header className="top-bar">
-          <div>
+          <div className="top-bar-leading">
             <div className="top-bar-title">{topTitle}</div>
             <div className="top-bar-sub">{topSub}</div>
+          </div>
+          <div className="top-bar-runtime-wrap" aria-label="Model and runtime">
+            <div className="top-bar-runtime-row">
+              <select
+                id="top-bar-runtime-backend-select"
+                className="select top-bar-runtime-backend"
+                aria-label="Inference backend"
+                value={runtimeKind}
+                disabled={runtimeStarting || runtimeOn}
+                onChange={(e) => setRuntimeKind(e.target.value as 'llamacpp' | 'ollama')}
+              >
+                <option value="ollama">Ollama</option>
+                <option value="llamacpp">llama.cpp</option>
+              </select>
+              <select
+                id="top-bar-runtime-model-select"
+                className="select top-bar-runtime-model-select"
+                aria-label={runtimeKind === 'ollama' ? 'Ollama model' : 'Model weights file'}
+                disabled={runtimeStarting || runtimeOn}
+                value={topBarModelSelectValue}
+                onChange={(e) => {
+                  setModelPath(e.target.value)
+                }}
+              >
+                <option value="">
+                  {runtimeKind === 'ollama'
+                    ? ollamaChatTagsLoading
+                      ? 'Loading models…'
+                      : ollamaChatTagsErr
+                        ? 'Could not list models'
+                        : ollamaChatTags.length === 0
+                          ? 'No Ollama models found'
+                          : 'Choose Ollama model…'
+                    : localModelFilePaths.length === 0
+                      ? 'No .gguf in folder'
+                      : 'Choose model file…'}
+                </option>
+                {runtimeKind === 'llamacpp'
+                  ? localModelFilePaths.map((p) => (
+                      <option key={p} value={p} title={p}>
+                        {fileNameFromPath(p)}
+                      </option>
+                    ))
+                  : ollamaChatTags.map((tag) => (
+                      <option key={tag} value={tag} title={tag}>
+                        {tag}
+                      </option>
+                    ))}
+              </select>
+              {runtimeOn ? (
+                <button
+                  type="button"
+                  className="btn-secondary top-bar-runtime-action"
+                  disabled={runtimeStarting}
+                  onClick={() => void stopRuntime()}
+                >
+                  Unload
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-primary top-bar-runtime-action"
+                  disabled={runtimeStarting || !modelPath.trim()}
+                  onClick={() => void startRuntime()}
+                >
+                  {runtimeStarting ? 'Starting…' : 'Start'}
+                </button>
+              )}
+            </div>
+            {runtimeStarting ? (
+              <div className="top-bar-runtime-progress-wrap" role="status" aria-live="polite">
+                {runtimeLoadProgress?.percent != null ? (
+                  <div className="top-bar-runtime-progress-track">
+                    <div
+                      className="top-bar-runtime-progress-fill"
+                      style={{
+                        width: `${Math.min(100, Math.max(0, runtimeLoadProgress.percent))}%`
+                      }}
+                    />
+                  </div>
+                ) : null}
+                <span className="top-bar-runtime-progress-msg">
+                  {runtimeLoadProgress?.message ?? 'Starting…'}
+                </span>
+              </div>
+            ) : null}
           </div>
           <div className="top-bar-actions">
             {mainView === 'chat' && (
@@ -2326,7 +2617,7 @@ export default function App(): React.ReactElement {
             </div>
             <div
               className="runtime-pill"
-              title={runtimeOn ? 'Runtime connected' : 'Start a runtime from Run'}
+              title={runtimeOn ? 'Runtime details (Run panel)' : 'Runtime setup: top bar to start, Run for more options'}
               onClick={() => setDrawer('runtime')}
               style={{ cursor: 'pointer' }}
               role="button"
@@ -2370,6 +2661,34 @@ export default function App(): React.ReactElement {
                 </button>
                 <button type="button" className="btn-danger" onClick={() => void confirmDeleteConversation()}>
                   Delete chat
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {wikiDeletePending && (
+          <div
+            className="modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="wiki-delete-title"
+            onClick={() => setWikiDeletePending(null)}
+          >
+            <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+              <h2 id="wiki-delete-title" className="modal-title">
+                Remove wiki entry?
+              </h2>
+              <p className="muted modal-text">
+                <strong>{wikiDeletePending.title}</strong> will be removed from your library, including its search index
+                and compiled wiki page. This cannot be undone.
+              </p>
+              <div className="modal-actions">
+                <button type="button" className="btn-secondary" onClick={() => setWikiDeletePending(null)}>
+                  Cancel
+                </button>
+                <button type="button" className="btn-danger" onClick={() => void confirmDeleteWikiEntry()}>
+                  Remove entry
                 </button>
               </div>
             </div>
@@ -2633,7 +2952,11 @@ export default function App(): React.ReactElement {
                             </time>
                           ) : null}
                         </div>
-                        <ChatRichContent content={m.content} />
+                        <ChatRichContent
+                          content={m.content}
+                          wikiHighlightTerms={wikiHighlightTerms}
+                          onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
+                        />
                         <div className="msg-token-foot">{bubbleTokenLine(m)}</div>
                       </div>
                     </div>
@@ -2663,7 +2986,12 @@ export default function App(): React.ReactElement {
                           ) : null}
                         </div>
                         {chatStreamBuffer ? (
-                          <ChatRichContent content={chatStreamBuffer} plainStreaming />
+                          <ChatRichContent
+                            content={chatStreamBuffer}
+                            plainStreaming
+                            wikiHighlightTerms={wikiHighlightTerms}
+                            onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
+                          />
                         ) : (
                           <FloatingDots label="Generating reply" />
                         )}
@@ -2685,23 +3013,6 @@ export default function App(): React.ReactElement {
                       </span>
                     </div>
                   ) : null}
-                  <OllamaChatBar
-                    baseUrl={ollamaHost?.baseUrl ?? 'http://127.0.0.1:11434'}
-                    hostProbed={ollamaHost != null}
-                    reachable={ollamaHost?.reachable === true}
-                    onOpenRun={() => setDrawer('runtime')}
-                    tags={ollamaChatTags}
-                    tagsLoading={ollamaChatTagsLoading}
-                    tagsError={ollamaChatTagsErr}
-                    onRefreshTags={() => void refreshOllamaChatTags()}
-                    modelTag={ollamaChatModelTag}
-                    onModelTagChange={setOllamaChatModelTag}
-                    runtimeOn={runtimeOn}
-                    runtimeKind={runtimeStatus?.kind}
-                    loadedModelPath={runtimeStatus?.modelPath}
-                    starting={runtimeStarting}
-                    onStart={() => void startOllamaFromChatBar(ollamaChatModelTag)}
-                  />
                   <div className="composer-toolbar">
                     <div className="rag-inline">
                       <input
@@ -2820,84 +3131,291 @@ export default function App(): React.ReactElement {
               <nav className="wiki-nav" aria-label="Wiki topics">
                 <div className="wiki-nav-header">
                   <h3>Library</h3>
-                  <button
-                    type="button"
-                    className="btn-ingest"
-                    onClick={() => void window.api.kbIngestFile().then(() => void loadWiki())}
-                  >
-                    + Add document
-                  </button>
+                  <input
+                    id="wiki-library-search"
+                    type="search"
+                    className="wiki-search-input"
+                    placeholder="Search titles and content…"
+                    value={wikiSearchQuery}
+                    onChange={(e) => setWikiSearchQuery(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-busy={wikiHasSearch && wikiSearchBusy}
+                  />
+                  <div className="wiki-nav-actions">
+                    <button
+                      type="button"
+                      className="btn-ingest"
+                      onClick={() => void window.api.kbIngestFile().then(() => void loadWiki())}
+                    >
+                      + Add document
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary btn-wiki-export"
+                      disabled={wikiExportBusy}
+                      onClick={() => void exportWikiZipToDisk()}
+                    >
+                      {wikiExportBusy ? 'Exporting…' : 'Export wiki (ZIP)'}
+                    </button>
+                  </div>
                 </div>
                 <div className="wiki-topic-list">
-                  {wikiTopics.length === 0 && <p className="muted" style={{ padding: 12 }}>No sources yet. Add a document.</p>}
-                  {wikiTopics.map((t) => (
-                    <button
-                      key={t.id}
-                      type="button"
-                      className={`wiki-topic-btn ${wikiSelectedId === t.id ? 'active' : ''}`}
-                      onClick={() => void openWikiPage(t.id)}
-                    >
-                      {t.title}
-                      <span className="wiki-topic-meta">{t.chunkCount} sections indexed</span>
-                    </button>
-                  ))}
+                  {wikiTopics.length === 0 && (
+                    <p className="muted" style={{ padding: 12 }}>
+                      No sources yet. Add a document.
+                    </p>
+                  )}
+                  {wikiTopics.length > 0 && !wikiHasSearch &&
+                    WIKI_KIND_ORDER.map((kind) => {
+                      const list = wikiBrowseByKind.get(kind) ?? []
+                      if (list.length === 0) return null
+                      return (
+                        <div key={kind} className="wiki-topic-group">
+                          <p className="wiki-topic-group-label" id={`wiki-group-${kind}`}>
+                            {WIKI_KIND_LABELS[kind]}
+                          </p>
+                          <div className="wiki-topic-group-list" role="group" aria-labelledby={`wiki-group-${kind}`}>
+                            {list.map((t) => (
+                              <div key={t.id} className="wiki-library-entry">
+                                <button
+                                  type="button"
+                                  className={`wiki-topic-btn ${wikiSelectedId === t.id ? 'active' : ''}`}
+                                  onClick={() => void openWikiPage(t.id)}
+                                >
+                                  {t.title}
+                                  <span className="wiki-topic-meta">{t.chunkCount} sections indexed</span>
+                                </button>
+                                <WikiEntryRemoveButton
+                                  ariaLabel={`Remove ${t.title} from wiki`}
+                                  onPress={() => setWikiDeletePending({ id: t.id, title: t.title })}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  {wikiTopics.length > 0 && wikiHasSearch && (
+                    <>
+                      {wikiTitleMatchTopics.length > 0 && (
+                        <p className="wiki-search-section-label">Matching titles</p>
+                      )}
+                      {wikiTitleMatchKindCount > 1
+                        ? WIKI_KIND_ORDER.map((kind) => {
+                            const list = wikiTitleMatchByKind.get(kind) ?? []
+                            if (list.length === 0) return null
+                            return (
+                              <div key={kind} className="wiki-topic-group wiki-topic-group--compact">
+                                <p className="wiki-topic-group-sublabel" id={`wiki-search-title-${kind}`}>
+                                  {WIKI_KIND_LABELS[kind]}
+                                </p>
+                                <div
+                                  className="wiki-topic-group-list"
+                                  role="group"
+                                  aria-labelledby={`wiki-search-title-${kind}`}
+                                >
+                                  {list.map((t) => (
+                                    <div key={t.id} className="wiki-library-entry">
+                                      <button
+                                        type="button"
+                                        className={`wiki-topic-btn ${wikiSelectedId === t.id ? 'active' : ''}`}
+                                        onClick={() => void openWikiPage(t.id)}
+                                      >
+                                        {t.title}
+                                        <span className="wiki-topic-meta">
+                                          {t.chunkCount} sections indexed
+                                        </span>
+                                      </button>
+                                      <WikiEntryRemoveButton
+                                        ariaLabel={`Remove ${t.title} from wiki`}
+                                        onPress={() => setWikiDeletePending({ id: t.id, title: t.title })}
+                                      />
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )
+                          })
+                        : wikiTitleMatchTopics.map((t) => (
+                            <div key={t.id} className="wiki-library-entry">
+                              <button
+                                type="button"
+                                className={`wiki-topic-btn ${wikiSelectedId === t.id ? 'active' : ''}`}
+                                onClick={() => void openWikiPage(t.id)}
+                              >
+                                {t.title}
+                                <span className="wiki-topic-meta">{t.chunkCount} sections indexed</span>
+                              </button>
+                              <WikiEntryRemoveButton
+                                ariaLabel={`Remove ${t.title} from wiki`}
+                                onPress={() => setWikiDeletePending({ id: t.id, title: t.title })}
+                              />
+                            </div>
+                          ))}
+                      {(wikiContentHits.length > 0 || wikiSearchBusy) && (
+                        <p className="wiki-search-section-label">In content</p>
+                      )}
+                      {wikiSearchBusy && wikiContentHits.length === 0 && (
+                        <p className="muted wiki-search-status">Searching…</p>
+                      )}
+                      {wikiContentHits.map((h) => (
+                        <div key={h.sourceId} className="wiki-library-entry">
+                          <button
+                            type="button"
+                            className={`wiki-search-hit-btn ${wikiSelectedId === h.sourceId ? 'active' : ''}`}
+                            onClick={() => void openWikiPage(h.sourceId)}
+                          >
+                            <span className="wiki-search-hit-title-row">
+                              <span className="wiki-search-hit-title">{h.sourceTitle}</span>
+                              <span className="wiki-source-kind-pill">{WIKI_KIND_LABELS[h.kind]}</span>
+                            </span>
+                            {h.heading ? (
+                              <span className="wiki-search-hit-heading">{h.heading}</span>
+                            ) : null}
+                            <span className="wiki-search-hit-snippet">{h.snippet}</span>
+                          </button>
+                          <WikiEntryRemoveButton
+                            ariaLabel={`Remove ${h.sourceTitle} from wiki`}
+                            onPress={() =>
+                              setWikiDeletePending({ id: h.sourceId, title: h.sourceTitle })
+                            }
+                          />
+                        </div>
+                      ))}
+                      {!wikiSearchBusy &&
+                        wikiTitleMatchTopics.length === 0 &&
+                        wikiContentHits.length === 0 && (
+                          <p className="muted wiki-search-status">No matches for that search.</p>
+                        )}
+                    </>
+                  )}
                 </div>
               </nav>
-              <article
-                className={`wiki-article${wikiArticleTab === 'graph' ? ' wiki-article--graph' : ''}`}
-              >
-                <div className="wiki-article-tabs" role="tablist" aria-label="Wiki view">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={wikiArticleTab === 'read'}
-                    className={`wiki-article-tab${wikiArticleTab === 'read' ? ' active' : ''}`}
-                    onClick={() => setWikiArticleTab('read')}
-                  >
-                    Read
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={wikiArticleTab === 'graph'}
-                    className={`wiki-article-tab${wikiArticleTab === 'graph' ? ' active' : ''}`}
-                    onClick={() => {
-                      setWikiArticleTab('graph')
-                      void loadKnowledgeGraph()
-                    }}
-                  >
-                    Knowledge graph
-                  </button>
-                </div>
+              <div className="wiki-main">
+              <article className="wiki-article">
+                {wikiTitle ? (
+                  <>
+                    <div className="wiki-article-inner">
+                      <header className="wiki-article-header">
+                        <div className="wiki-article-title-row">
+                          <h1 className="wiki-article-title">{wikiTitle}</h1>
+                          <div className="wiki-article-title-actions">
+                            {wikiSelectedKindLabel ? (
+                              <span className="wiki-source-kind-pill wiki-source-kind-pill--article">
+                                {wikiSelectedKindLabel}
+                              </span>
+                            ) : null}
+                            {wikiSelectedId ? (
+                              <WikiEntryRemoveButton
+                                ariaLabel={`Remove ${wikiTitle} from wiki`}
+                                onPress={() =>
+                                  setWikiDeletePending({ id: wikiSelectedId, title: wikiTitle })
+                                }
+                              />
+                            ) : null}
+                          </div>
+                        </div>
+                        <p className="wiki-article-hatnote wiki-lead">
+                          Compiled from your ingested sources. Use <strong>Pull into chat</strong> from the Chat view
+                          to cite this material.
+                        </p>
+                      </header>
 
-                {wikiArticleTab === 'graph' ? (
+                      <div className="wiki-article-main mw-parser-output">
+                        <WikiArticleTocNav groups={wikiTocGroups} />
+                        <ChatRichContent
+                          content={wikiBody}
+                          className="wiki-rich-body"
+                          onRichDomReady={onWikiRichDomReady}
+                        />
+                      </div>
+
+                      {wikiGlossary.length > 0 ? (
+                        <section
+                          className="wiki-glossary-panel wiki-article-end-section"
+                          aria-label="Glossary"
+                        >
+                          <h2 className="wiki-section-heading">Glossary</h2>
+                          <dl className="wiki-glossary-dl">
+                            {wikiGlossary.map((e, gi) => (
+                              <div key={`${e.term}-${gi}`} className="wiki-glossary-row">
+                                <dt>{e.term}</dt>
+                                <dd>{e.definition}</dd>
+                              </div>
+                            ))}
+                          </dl>
+                        </section>
+                      ) : null}
+
+                      {wikiRelated.length > 0 ? (
+                        <nav
+                          className="wiki-related-panel wiki-article-end-section"
+                          aria-label="Related knowledge"
+                        >
+                          <h2 className="wiki-section-heading">See also</h2>
+                          <p className="wiki-related-lead">
+                            Other library entries that share topical words with this article (links open in the wiki).
+                          </p>
+                          <ul className="wiki-related-list">
+                            {wikiRelated.map((r) => (
+                              <li key={r.id}>
+                                <button
+                                  type="button"
+                                  className="wiki-related-link"
+                                  onClick={() => void openWikiPage(r.id)}
+                                >
+                                  <span className="wiki-related-link-title">{r.title}</span>
+                                  <span className="wiki-source-kind-pill wiki-source-kind-pill--inline">
+                                    {WIKI_KIND_LABELS[r.kind]}
+                                  </span>
+                                </button>
+                                {r.sharedTerms.length > 0 ? (
+                                  <span className="wiki-related-terms">
+                                    {r.sharedTerms.map((term) => (
+                                      <span key={term} className="wiki-related-term-chip">
+                                        {term}
+                                      </span>
+                                    ))}
+                                  </span>
+                                ) : null}
+                              </li>
+                            ))}
+                          </ul>
+                        </nav>
+                      ) : null}
+                    </div>
+                  </>
+                ) : (
+                  <div className="wiki-article-inner wiki-article-empty">
+                    <h1 className="wiki-article-title">Your wiki</h1>
+                    <p className="wiki-lead">
+                      Select a topic or add a document. Content is chunked and searchable from Chat. The{' '}
+                      <strong>Knowledge graph</strong> section below shows how sources, chunks, and wiki pages connect.
+                    </p>
+                  </div>
+                )}
+              </article>
+              <section
+                className="wiki-graph-section"
+                aria-labelledby="wiki-knowledge-graph-heading"
+              >
+                <h2 id="wiki-knowledge-graph-heading" className="wiki-graph-section-heading">
+                  Knowledge graph
+                </h2>
+                <div className="wiki-graph-panel-wrap">
                   <KnowledgeGraphView
+                    hideToolbarTitle
                     data={kgPayload}
                     loading={kgLoading}
                     onRefresh={() => void loadKnowledgeGraph()}
                     onPickSource={(id) => {
-                      setWikiArticleTab('read')
                       void openWikiPage(id)
                     }}
                   />
-                ) : wikiTitle ? (
-                  <>
-                    <h1>{wikiTitle}</h1>
-                    <p className="wiki-lead">
-                      Compiled from your ingested sources. Use Pull into chat from the Chat view to cite this material.
-                    </p>
-                    <div className="wiki-body wiki-prose">{wikiBody}</div>
-                  </>
-                ) : (
-                  <>
-                    <h1>Your wiki</h1>
-                    <p className="wiki-lead">
-                      Select a topic or add a document. Content is chunked and searchable from Chat. Open the{' '}
-                      <strong>Knowledge graph</strong> tab to see how sources, chunks, and wiki pages connect.
-                    </p>
-                  </>
-                )}
-              </article>
+                </div>
+              </section>
+              </div>
             </div>
           )}
         </div>
@@ -3177,24 +3695,6 @@ export default function App(): React.ReactElement {
 
               {drawer === 'runtime' && (
                 <>
-                  {runtimeStarting ? (
-                    <div className="runtime-load-progress-banner" role="status" aria-live="polite">
-                      {runtimeLoadProgress?.percent != null ? (
-                        <div className="runtime-load-progress-bar">
-                          <div
-                            className="runtime-load-progress-bar-fill"
-                            style={{
-                              width: `${Math.min(100, Math.max(0, runtimeLoadProgress.percent))}%`
-                            }}
-                          />
-                        </div>
-                      ) : null}
-                      <p className="runtime-load-progress-message">
-                        {runtimeLoadProgress?.message ?? 'Starting runtime…'}
-                      </p>
-                    </div>
-                  ) : null}
-
                   {runtimeOn ? (
                     <div className="runtime-loaded-hero" role="region" aria-label="Loaded model">
                       <div className="runtime-loaded-hero-header">
@@ -3247,23 +3747,11 @@ export default function App(): React.ReactElement {
                   {!runtimeOn ? (
                     <>
                   <div className="drawer-section runtime-load-card">
-                    <h3 className="runtime-load-card-title">Load a model</h3>
+                    <h3 className="runtime-load-card-title">Runtime setup</h3>
                     <p className="muted runtime-load-card-lead">
-                      Choose backend and model, then start. Unload when you want to switch.
+                      Choose backend, model, and <strong>Start</strong> in the top bar. Use this panel for Ollama install,
+                      llama-server binary, and downloads.
                     </p>
-                    <label className="runtime-field-label" htmlFor="runtime-backend-select">
-                      Backend
-                    </label>
-                    <select
-                      id="runtime-backend-select"
-                      className="select"
-                      value={runtimeKind}
-                      disabled={runtimeStarting}
-                      onChange={(e) => setRuntimeKind(e.target.value as 'llamacpp' | 'ollama')}
-                    >
-                      <option value="ollama">Ollama</option>
-                      <option value="llamacpp">llama.cpp server</option>
-                    </select>
                     <div className="runtime-ollama-probe" role="status">
                       <div className="runtime-ollama-probe-row">
                         <span className="runtime-ollama-probe-label">Ollama on host</span>
@@ -3363,52 +3851,16 @@ export default function App(): React.ReactElement {
                   {runtimeKind === 'llamacpp' && llamaEnv?.detected && !llamaEnv.configuredValid && llamaEnv.resolvedPath ? (
                     <p className="muted runtime-llama-path-note">
                       No saved binary path on disk; using{' '}
-                      <code className="inline-code">{llamaEnv.resolvedPath}</code> from PATH. Save by loading a model or paste a path below.
+                      <code className="inline-code">{llamaEnv.resolvedPath}</code> from PATH. Save by starting a model from
+                      the top bar or paste a binary path below.
                     </p>
                   ) : null}
-                    <label className="runtime-field-label" htmlFor="runtime-local-model-select">
-                      {runtimeKind === 'ollama' ? 'Model' : 'Weights file'}
-                    </label>
-                    <p className="muted runtime-field-hint-inline">
-                      Folder scanned for .gguf:{' '}
-                      <span className="runtime-local-models-dir">{paths?.modelsDefault ?? '—'}</span>
-                    </p>
-                    <select
-                      id="runtime-local-model-select"
-                      className="select runtime-local-model-select"
-                      aria-label="Choose a downloaded GGUF model file"
-                      disabled={runtimeStarting}
-                      value={matchedLocalModelPath}
-                      onChange={(e) => {
-                        const v = e.target.value
-                        if (v) setModelPath(v)
-                      }}
-                    >
-                      <option value="">
-                        {localModelFilePaths.length === 0
-                          ? '— No .gguf files in folder —'
-                          : '— Pick file or type path below —'}
-                      </option>
-                      {localModelFilePaths.map((p) => (
-                        <option key={p} value={p} title={p}>
-                          {fileNameFromPath(p)}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      id="runtime-model-path-input"
-                      className="input runtime-model-path-input"
-                      value={modelPath}
-                      disabled={runtimeStarting}
-                      onChange={(e) => setModelPath(e.target.value)}
-                      placeholder={runtimeKind === 'ollama' ? 'e.g. llama3.2' : 'Full path to .gguf'}
-                      aria-label={runtimeKind === 'ollama' ? 'Ollama model tag' : 'Path to model weights'}
-                    />
-                    <p className="muted runtime-model-hint">
-                      {runtimeKind === 'ollama'
-                        ? 'Use a tag; pull runs on Start if needed. The list is only for llama.cpp.'
-                        : 'Pick from the list or paste a path (subfolders included).'}
-                    </p>
+                    {runtimeKind === 'llamacpp' ? (
+                      <p className="muted runtime-field-hint-inline">
+                        .gguf scan folder:{' '}
+                        <span className="runtime-local-models-dir">{paths?.modelsDefault ?? '—'}</span>
+                      </p>
+                    ) : null}
                     {runtimeKind === 'llamacpp' ? (
                       <>
                         <label className="runtime-field-label" htmlFor="runtime-llama-bin-input">
@@ -3428,16 +3880,8 @@ export default function App(): React.ReactElement {
                       </>
                     ) : null}
                     <div className="row runtime-load-primary-actions">
-                      <button
-                        type="button"
-                        className="btn-primary"
-                        disabled={runtimeStarting}
-                        onClick={() => void startRuntime()}
-                      >
-                        {runtimeStarting ? 'Starting…' : 'Load model'}
-                      </button>
                       <button type="button" className="btn-secondary" onClick={() => void refreshRunDrawer()}>
-                        Refresh
+                        Refresh status
                       </button>
                     </div>
                   </div>
@@ -3446,7 +3890,7 @@ export default function App(): React.ReactElement {
                     <summary>Hub downloads &amp; copy path</summary>
                     <div className="drawer-section runtime-drawer-advanced-body">
                       <p className="muted" style={{ marginTop: 0 }}>
-                        Finished downloads (newest first). “Use path” fills the field above for llama.cpp.
+                        Finished downloads (newest first). “Use path” fills the top bar model field for llama.cpp.
                       </p>
                       <p className="muted">
                         Default save folder:{' '}
