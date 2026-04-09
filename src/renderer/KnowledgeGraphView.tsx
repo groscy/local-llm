@@ -110,8 +110,11 @@ export function KnowledgeGraphView(props: {
   loading: boolean
   onRefresh: () => void
   onPickSource?: (sourceId: string) => void
+  /** When true, omit the toolbar title (parent supplies a section heading). */
+  hideToolbarTitle?: boolean
 }): ReactNode {
-  const { data, loading, onRefresh, onPickSource } = props
+  const { data, loading, onRefresh, onPickSource, hideToolbarTitle } = props
+  const tbClass = `kg-toolbar${hideToolbarTitle ? ' kg-toolbar--embedded' : ''}`
   const wrapRef = useRef<HTMLDivElement>(null)
   const [w, setW] = useState(640)
   const [hoverId, setHoverId] = useState<string | null>(null)
@@ -154,11 +157,13 @@ export function KnowledgeGraphView(props: {
   if (loading && !data) {
     return (
       <div className="kg-panel">
-        <div className="kg-toolbar">
-          <span className="kg-toolbar-title">Knowledge graph</span>
-          <button type="button" className="btn-secondary btn-sm" onClick={onRefresh} disabled>
-            Refresh
-          </button>
+        <div className={tbClass}>
+          {!hideToolbarTitle ? <span className="kg-toolbar-title">Knowledge graph</span> : null}
+          <div className="kg-toolbar-meta">
+            <button type="button" className="btn-secondary btn-sm" onClick={onRefresh} disabled>
+              Refresh
+            </button>
+          </div>
         </div>
         <p className="muted kg-empty">Loading graph…</p>
       </div>
@@ -168,11 +173,13 @@ export function KnowledgeGraphView(props: {
   if (!data || data.nodes.length === 0) {
     return (
       <div className="kg-panel">
-        <div className="kg-toolbar">
-          <span className="kg-toolbar-title">Knowledge graph</span>
-          <button type="button" className="btn-secondary btn-sm" onClick={onRefresh}>
-            Refresh
-          </button>
+        <div className={tbClass}>
+          {!hideToolbarTitle ? <span className="kg-toolbar-title">Knowledge graph</span> : null}
+          <div className="kg-toolbar-meta">
+            <button type="button" className="btn-secondary btn-sm" onClick={onRefresh}>
+              Refresh
+            </button>
+          </div>
         </div>
         <p className="muted kg-empty">
           No sources yet. Use <strong>+ Add document</strong> in the library to ingest text; then open this view again.
@@ -187,8 +194,8 @@ export function KnowledgeGraphView(props: {
 
   return (
     <div className="kg-panel">
-      <div className="kg-toolbar">
-        <span className="kg-toolbar-title">Knowledge graph</span>
+      <div className={tbClass}>
+        {!hideToolbarTitle ? <span className="kg-toolbar-title">Knowledge graph</span> : null}
         <div className="kg-toolbar-meta">
           {data.truncated && <span className="kg-truncation-note">Sampled for display</span>}
           <button type="button" className="btn-secondary btn-sm" onClick={onRefresh} disabled={loading}>
