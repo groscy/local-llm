@@ -54,6 +54,34 @@ export async function probeOllamaReachable(baseUrl: string): Promise<boolean> {
   }
 }
 
+/** Lists installed Ollama model tags from `/api/tags` (same source as `ollama list`). */
+export async function fetchOllamaModelTags(baseUrl: string): Promise<{ names: string[]; error?: string }> {
+  const base = baseUrl.replace(/\/$/, '')
+  try {
+    const res = await httpRequestRaw({
+      url: `${base}/api/tags`,
+      method: 'GET',
+      timeoutMs: 8000
+    })
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      return { names: [], error: `Ollama returned HTTP ${res.statusCode}.` }
+    }
+    let j: { models?: { name: string }[] }
+    try {
+      j = JSON.parse(res.body) as { models?: { name: string }[] }
+    } catch {
+      return { names: [], error: 'Could not read the model list from Ollama.' }
+    }
+    const names = (j.models ?? [])
+      .map((m) => m.name)
+      .filter((n) => typeof n === 'string' && n.trim().length > 0)
+    return { names }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { names: [], error: msg }
+  }
+}
+
 /** Talks to an existing Ollama daemon (no spawn). */
 export class OllamaAdapter implements RuntimeAdapter {
   readonly kind = 'ollama' as const

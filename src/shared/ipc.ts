@@ -36,6 +36,8 @@ export const IPC = {
   RUNTIME_START: 'runtime:start',
   RUNTIME_STOP: 'runtime:stop',
   RUNTIME_STATUS: 'runtime:status',
+  /** Renderer → main: list local Ollama tags from configured base URL. */
+  RUNTIME_OLLAMA_TAGS: 'runtime:ollamaTags',
   RUNTIME_CHAT: 'runtime:chat',
   /** Main → renderer: streamed assistant tokens; correlate with `requestId` from `RUNTIME_CHAT`. */
   RUNTIME_CHAT_PROGRESS: 'runtime:chatProgress',
@@ -72,7 +74,12 @@ export const IPC = {
   TRAIN_STATUS: 'train:status',
   TRAIN_LIST_JOBS: 'train:listJobs',
 
-  SECRETS_SET_HF_TOKEN: 'secrets:setHfToken'
+  SECRETS_SET_HF_TOKEN: 'secrets:setHfToken',
+
+  /** Main → renderer: IDE plugin posted activity to the HTTP bridge. */
+  INTEGRATION_PLUGIN_REPORT: 'integration:pluginReport',
+  /** Renderer → main: last N reports (for initial load). */
+  INTEGRATION_PLUGIN_REPORTS_LIST: 'integration:pluginReportsList'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

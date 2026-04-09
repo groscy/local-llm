@@ -220,3 +220,22 @@ export interface RuntimeChatProgress {
   promptTokens?: number
   completionTokens?: number
 }
+
+/** Event kinds POSTed by IDE plugins to `/v1/plugin/report`. */
+export type PluginIntegrationReportKind =
+  | 'chat_completed'
+  | 'chat_failed'
+  | 'apply_completed'
+  | 'apply_failed'
+  | 'apply_cancelled'
+  | 'send_cancelled'
+
+/** Normalized report after the desktop app accepts a plugin POST (includes server receipt time). */
+export interface PluginIntegrationReport {
+  receivedAt: number
+  source: string
+  kind: PluginIntegrationReportKind
+  message?: string
+  /** Small structured fields (token counts, file counts, project name, etc.). */
+  meta?: Record<string, string | number | boolean | null>
+}

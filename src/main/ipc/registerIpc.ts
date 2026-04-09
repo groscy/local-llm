@@ -18,7 +18,7 @@ import {
 } from '../services/downloadManager'
 import { createRuntime, type RuntimeAdapter } from '../services/runtime'
 import { installOllamaForPlatform } from '../services/ollamaInstaller'
-import { probeOllamaReachable } from '../services/runtime/ollamaAdapter'
+import { fetchOllamaModelTags, probeOllamaReachable } from '../services/runtime/ollamaAdapter'
 import * as chatService from '../services/chatService'
 import { recordChatRoundtripMs } from '../services/chatLatencyStats'
 import * as kbService from '../services/kbService'
@@ -35,6 +35,7 @@ import { collectHardwareSummary } from '../services/hardwareSummary'
 import { clearAllAppCaches, deleteAllChildrenInDirectory } from '../services/dataMaintenance'
 import { resetElectronStoreToFactory } from '../storeDefaults'
 import { configureIntegrationServer } from '../services/integrationServer'
+import { getPluginReportHistory } from '../services/pluginIntegrationHub'
 import { listGgufModelsInDir } from '../services/localModelsScan'
 
 const configSchema = z.object({
@@ -255,6 +256,12 @@ export function registerIpc(ctx: IpcContext): void {
     const dir = modelsDir()
     const paths = listGgufModelsInDir(dir)
     return { modelsDir: dir, paths }
+  })
+
+  ipcMain.handle(IPC.RUNTIME_OLLAMA_TAGS, async () => {
+    const raw = (store.get('ollamaBaseUrl') as string | undefined)?.trim()
+    const ollamaBase = raw || 'http://127.0.0.1:11434'
+    return fetchOllamaModelTags(ollamaBase)
   })
 
   ipcMain.handle(IPC.RUNTIME_INSTALL_PATH, async () => {
@@ -526,6 +533,8 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(IPC.TRAIN_LIST_JOBS, () => trainOrchestrator.listTrainJobs(db))
 
   /** Persist HF token with safeStorage */
+  ipcMain.handle(IPC.INTEGRATION_PLUGIN_REPORTS_LIST, () => getPluginReportHistory())
+
   ipcMain.handle(IPC.SECRETS_SET_HF_TOKEN, (_e, token: string | null) => {
     if (!token) {
       store.delete('hfTokenEncrypted')

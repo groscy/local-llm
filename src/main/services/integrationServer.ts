@@ -3,6 +3,7 @@ import type Store from 'electron-store'
 import { z } from 'zod'
 import type { ChatMessage, RuntimeAdapter } from './runtime/types'
 import { recordChatRoundtripMs } from './chatLatencyStats'
+import { appendPluginReport } from './pluginIntegrationHub'
 import { logLine } from '../logger'
 
 const DEFAULT_PORT = 17373
@@ -64,6 +65,22 @@ const chatBodySchema = z.object({
       })
     )
     .min(1)
+})
+
+const pluginReportMetaValue = z.union([z.string(), z.number(), z.boolean(), z.null()])
+
+const pluginReportBodySchema = z.object({
+  source: z.string().max(64).default('intellij'),
+  kind: z.enum([
+    'chat_completed',
+    'chat_failed',
+    'apply_completed',
+    'apply_failed',
+    'apply_cancelled',
+    'send_cancelled'
+  ]),
+  message: z.string().max(4000).optional(),
+  meta: z.record(z.string(), pluginReportMetaValue).optional()
 })
 
 export function stopIntegrationServer(): void {
@@ -174,6 +191,34 @@ export function configureIntegrationServer(ctx: {
           logLine('warn', 'integration_chat_error', { message: msg })
           sendJson(res, 502, { error: msg })
         }
+        return
+      }
+
+      if (method === 'POST' && url === '/v1/plugin/report') {
+        if (!authOkForProtectedRoutes(store, req)) {
+          sendJson(res, 401, { error: 'Unauthorized' })
+          return
+        }
+        let body: unknown
+        try {
+          body = await readJsonBody(req)
+        } catch {
+          sendJson(res, 400, { error: 'Invalid JSON body' })
+          return
+        }
+        const parsed = pluginReportBodySchema.safeParse(body)
+        if (!parsed.success) {
+          sendJson(res, 400, { error: 'Invalid body: expected { source?, kind, message?, meta? }' })
+          return
+        }
+        const d = parsed.data
+        appendPluginReport({
+          source: d.source,
+          kind: d.kind,
+          message: d.message,
+          meta: d.meta
+        })
+        sendJson(res, 200, { ok: true })
         return
       }
 

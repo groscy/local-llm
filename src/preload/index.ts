@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { IPC } from '@shared/ipc'
-import type { RuntimeChatProgress, RuntimeLoadProgress } from '@shared/types'
+import type { PluginIntegrationReport, RuntimeChatProgress, RuntimeLoadProgress } from '@shared/types'
 
 function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   return ipcRenderer.invoke(channel, ...args)
@@ -55,10 +55,18 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on(channel, listener)
     return () => ipcRenderer.removeListener(channel, listener)
   },
+  integrationPluginReportsList: () => invoke<PluginIntegrationReport[]>(IPC.INTEGRATION_PLUGIN_REPORTS_LIST),
+  onIntegrationPluginReport: (callback: (payload: PluginIntegrationReport) => void) => {
+    const channel = IPC.INTEGRATION_PLUGIN_REPORT
+    const listener = (_e: IpcRendererEvent, payload: PluginIntegrationReport) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
   openExternalUrl: (url: string) => invoke(IPC.OPEN_EXTERNAL_URL, url),
   runtimeStart: (p: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => invoke(IPC.RUNTIME_START, p),
   runtimeStop: () => invoke(IPC.RUNTIME_STOP),
   runtimeStatus: () => invoke(IPC.RUNTIME_STATUS),
+  ollamaListTags: () => invoke<{ names: string[]; error?: string }>(IPC.RUNTIME_OLLAMA_TAGS),
   runtimeChat: (messages: { role: string; content: string }[], requestId: string) =>
     invoke(IPC.RUNTIME_CHAT, { messages, requestId }),
   conversationsList: () => invoke(IPC.CONVERSATIONS_LIST),
