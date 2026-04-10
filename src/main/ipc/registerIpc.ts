@@ -320,6 +320,15 @@ export function registerIpc(ctx: IpcContext): void {
       }
     }
     unlinkSync(abs)
+    try {
+      const removed = db.prepare('DELETE FROM downloads WHERE local_path = ?').run(abs).changes
+      if (removed > 0) logLine('info', 'download_registry_row_removed', { path: abs })
+    } catch (e) {
+      logLine('warn', 'download_registry_delete_failed', {
+        path: abs,
+        error: e instanceof Error ? e.message : String(e)
+      })
+    }
     logLine('info', 'deleted_local_gguf', { path: abs })
     return { ok: true as const }
   })
