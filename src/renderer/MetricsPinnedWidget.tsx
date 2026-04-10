@@ -35,7 +35,7 @@ export function MetricsPinnedWidget(props: {
           <span className="metrics-pinned-label">Resident memory</span>
           <span className="metrics-pinned-value">{snapshot?.processRssMb != null ? `${snapshot.processRssMb.toFixed(0)} MB` : '—'}</span>
         </div>
-        <div className="metrics-pinned-stat">
+        <div className="metrics-pinned-stat metrics-pinned-stat--min-hide">
           <span className="metrics-pinned-label">CPU</span>
           <span className="metrics-pinned-value">
             {snapshot?.processCpuPercent != null ? `${snapshot.processCpuPercent.toFixed(0)}%` : '—'}
@@ -47,7 +47,7 @@ export function MetricsPinnedWidget(props: {
             {snapshot?.runtimeTokensPerSec != null ? snapshot.runtimeTokensPerSec.toFixed(1) : '—'}
           </span>
         </div>
-        <div className="metrics-pinned-stat">
+        <div className="metrics-pinned-stat metrics-pinned-stat--min-hide">
           <span className="metrics-pinned-label">Avg prompt→reply</span>
           <span className="metrics-pinned-value">
             {snapshot?.avgPromptToResponseMs != null && Number.isFinite(snapshot.avgPromptToResponseMs)
@@ -55,7 +55,7 @@ export function MetricsPinnedWidget(props: {
               : '—'}
           </span>
         </div>
-        <div className="metrics-pinned-stat">
+        <div className="metrics-pinned-stat metrics-pinned-stat--min-hide">
           <span className="metrics-pinned-label">GPU</span>
           <span className="metrics-pinned-value">
             {snapshot?.gpuMemUsedMb != null && snapshot?.gpuMemTotalMb != null
@@ -63,7 +63,7 @@ export function MetricsPinnedWidget(props: {
               : '—'}
           </span>
         </div>
-        <div className="metrics-pinned-stat">
+        <div className="metrics-pinned-stat metrics-pinned-stat--min-hide">
           <span className="metrics-pinned-label">Model</span>
           <span className="metrics-pinned-value">
             {snapshot?.modelMemoryMb != null ? `${snapshot.modelMemoryMb.toFixed(0)} MB` : '—'}
