@@ -24,6 +24,7 @@ function textNodeOkForHighlight(node: Text): boolean {
   let el: HTMLElement | null = node.parentElement
   while (el) {
     if (el.classList.contains(CHAT_WIKI_KW_CLASS)) return false
+    if (el.closest('.katex')) return false
     const tag = el.tagName
     if (tag === 'CODE' || tag === 'PRE' || tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEXTAREA') {
       return false

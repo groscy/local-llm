@@ -1,5 +1,6 @@
 import asciidoctorFactory from '@asciidoctor/core'
 import DOMPurify from 'dompurify'
+import 'katex/dist/katex.min.css'
 import { marked } from 'marked'
 import {
   Fragment,
@@ -13,6 +14,7 @@ import {
   type Ref
 } from 'react'
 import type { WikiChatHighlightTerm } from '@shared/types'
+import { enhanceRichRootMath, injectMarkdownMathSlots, type MathSlot } from './markdownMathKatex'
 import {
   applyWikiHighlightsToElement,
   CHAT_WIKI_KW_CLASS,
@@ -56,37 +58,54 @@ function looksLikeAsciiDoc(s: string): boolean {
   if (/image::[^\s\[]+/m.test(head)) return true
   if (/include::[^\s\[]+/m.test(head)) return true
   if (/^:[-a-z0-9]+:\s+/im.test(head)) return true
+  if (/\b(?:stem|latexmath|asciimath):\[/m.test(head)) return true
+  if (/^\[(?:stem|latexmath)\]/m.test(head)) return true
   return false
 }
 
 function toSafeHtml(raw: string): string {
   return DOMPurify.sanitize(raw, {
     USE_PROFILES: { html: true },
-    ADD_ATTR: ['target', 'rel'],
+    ADD_ATTR: ['target', 'rel', 'data-katex-id', 'data-katex-display'],
     ALLOWED_URI_REGEXP:
       /^(?:(?:https?|mailto|ftp|data):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
   })
 }
 
-function renderRichString(content: string): string {
+type RichRender = { html: string; mathSlots: MathSlot[] }
+
+function renderRichString(content: string): RichRender {
   const trimmed = content.trim()
-  if (!trimmed) return ''
+  if (!trimmed) return { html: '', mathSlots: [] }
 
   try {
     if (looksLikeHtmlFragment(content)) {
-      return toSafeHtml(content.trim())
+      return { html: toSafeHtml(content.trim()), mathSlots: [] }
     }
     if (looksLikeAsciiDoc(content)) {
       const adoc = getAsciidoctor()
-      const out = adoc.convert(content, { safe: 'secure' })
-      if (typeof out !== 'string') return toSafeHtml(`<pre>${escapeHtml(content)}</pre>`)
-      return toSafeHtml(out)
+      const headSnippet = content.slice(0, Math.min(content.length, 6000))
+      const hasStemAttr = /^:stem:\s*\S/m.test(headSnippet)
+      const out = adoc.convert(content, {
+        safe: 'secure',
+        ...(hasStemAttr ? {} : { attributes: { stem: 'latexmath' } })
+      })
+      if (typeof out !== 'string') {
+        return { html: toSafeHtml(`<pre>${escapeHtml(content)}</pre>`), mathSlots: [] }
+      }
+      return { html: toSafeHtml(out), mathSlots: [] }
     }
-    const mdOut = marked.parse(content, { async: false })
-    if (typeof mdOut !== 'string') return toSafeHtml(`<pre>${escapeHtml(content)}</pre>`)
-    return toSafeHtml(mdOut)
+    const { text, slots } = injectMarkdownMathSlots(content)
+    const mdOut = marked.parse(text, { async: false })
+    if (typeof mdOut !== 'string') {
+      return { html: toSafeHtml(`<pre>${escapeHtml(content)}</pre>`), mathSlots: [] }
+    }
+    return { html: toSafeHtml(mdOut), mathSlots: slots }
   } catch {
-    return toSafeHtml(`<pre class="msg-rich-fallback">${escapeHtml(content)}</pre>`)
+    return {
+      html: toSafeHtml(`<pre class="msg-rich-fallback">${escapeHtml(content)}</pre>`),
+      mathSlots: []
+    }
   }
 }
 
@@ -183,7 +202,7 @@ export function ChatRichContent(props: {
     onWikiKeywordNavigate
   } = props
 
-  const html = useMemo(() => {
+  const rich = useMemo(() => {
     if (plainStreaming) return null
     return renderRichString(content)
   }, [content, plainStreaming])
@@ -194,12 +213,13 @@ export function ChatRichContent(props: {
   useLayoutEffect(() => {
     const el = richRef.current
     if (!el || plainStreaming) return
-    el.innerHTML = html ?? ''
+    el.innerHTML = rich?.html ?? ''
+    enhanceRichRootMath(el, rich?.mathSlots ?? [])
     if (wikiHighlightTerms?.length) {
       applyWikiHighlightsToElement(el, wikiHighlightTerms)
     }
     onRichDomReady?.(el)
-  }, [html, plainStreaming, wikiHighlightTerms, onRichDomReady])
+  }, [rich, plainStreaming, wikiHighlightTerms, onRichDomReady])
 
   const rootClass = ['msg-rich', className].filter(Boolean).join(' ')
 
