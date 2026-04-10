@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Documentation — Local LLM Desktop</title>
+    <meta name="description" content="Documentation for Local LLM Desktop: setup, runtimes, models, RAG wiki, and training." />
+    <link rel="stylesheet" href="css/site.css" />
+  </head>
+  <body class="content-page">
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="bg-orb" aria-hidden="true"></div>
+    <div class="wrap">
+      <header class="site-nav">
+        <a class="brand" href="index.html">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Local LLM Desktop</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="documentation.html" aria-current="page">Documentation</a>
+          <a href="download.html">Download</a>
+          <a href="license.html">License</a>
+          <a class="nav-cta" href="download.html">Get the app</a>
+        </nav>
+      </header>
+
+      <main class="prose">
+        <section class="hero">
+          <p class="section-label">Docs</p>
+          <h1>Documentation</h1>
+          <p class="hero-lead" style="margin: 0; text-align: left; max-width: none">
+            Quick reference for installing, choosing a runtime, loading models, and using knowledge features. For
+            engine-specific details, follow links to Ollama and llama.cpp upstream docs.
+          </p>
+        </section>
+
+        <nav aria-label="On this page">
+          <ul class="doc-toc">
+            <li><a href="#start">Getting started</a></li>
+            <li><a href="#runtime">Inference runtime</a></li>
+            <li><a href="#models">Models &amp; Hub</a></li>
+            <li><a href="#rag">Knowledge &amp; wiki</a></li>
+            <li><a href="#train">Training</a></li>
+            <li><a href="#privacy">Privacy &amp; data</a></li>
+          </ul>
+        </nav>
+
+        <h2 id="start">Getting started</h2>
+        <p>
+          Install the app for your platform from the <a href="download.html">Download</a> page. On first launch, open
+          <strong>Run</strong> (inference runtime drawer) to confirm either Ollama is reachable or llama.cpp binary is
+          detected, then pick a model and press <strong>Start</strong>.
+        </p>
+
+        <h2 id="runtime">Inference runtime</h2>
+        <h3>Ollama</h3>
+        <p>
+          Select <strong>Ollama</strong> in the top bar, choose a tag from the list, and start. If a model is missing,
+          the app can pull it into your local Ollama library (see Model library when Ollama is the active backend).
+        </p>
+        <h3>llama.cpp</h3>
+        <p>
+          Select <strong>llama.cpp</strong>, point to a <code>.gguf</code> file under your models directory (or download
+          from the Hub into that folder), configure the <code>llama-server</code> binary if needed, then start.
+        </p>
+
+        <h2 id="models">Models &amp; Hub</h2>
+        <p>
+          The <strong>Models</strong> drawer searches Hugging Face, shows curated recommendations, and splits
+          <em>installed</em> vs <em>available</em> based on your active backend. With llama.cpp, installs are file
+          downloads; with Ollama, matching entries use <code>ollama pull</code> against your configured API URL.
+        </p>
+
+        <h2 id="rag">Knowledge &amp; wiki</h2>
+        <p>
+          Ingest text, files, or conversations into the knowledge base. Compiled wiki pages support glossary blocks,
+          cross-links, and a knowledge graph view. Chat can highlight wiki-derived phrases and link back to sources.
+        </p>
+
+        <h2 id="train">Training</h2>
+        <p>
+          The training panel launches a local Python LoRA workflow when configured. Keep model weights and datasets on
+          disk paths the app can read; refer to project <code>training/</code> scripts for CLI options and dependencies.
+        </p>
+
+        <h2 id="privacy">Privacy &amp; data</h2>
+        <p>
+          Inference runs locally. No cloud API is required for core chat. Third-party services (e.g. Hugging Face
+          downloads) are only used when you initiate them. Review the <a href="license.html">license</a> for
+          redistribution terms.
+        </p>
+      </main>
+
+      <footer class="site-footer">
+        <span><a href="index.html">← Home</a></span>
+        <span>
+          <a href="download.html">Download</a>
+          ·
+          <a href="license.html">License</a>
+        </span>
+      </footer>
+    </div>
+  </body>
+</html>

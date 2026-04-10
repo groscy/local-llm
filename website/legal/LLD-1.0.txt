@@ -1,0 +1,86 @@
+LOCAL LLM DESKTOP — LICENSE AGREEMENT (VERSION 1.0)
+
+Copyright (c) Local LLM Desktop contributors. All rights reserved.
+
+IMPORTANT: This is a license template for distribution policy. It is not legal
+advice. Consult qualified counsel before relying on it for your organization.
+
+────────────────────────────────────────────────────────────────────────────
+1. GRANT OF RIGHTS
+
+1.1 Personal use (non-commercial)
+You may use, copy, and run the Software free of charge for personal,
+non-commercial purposes, including evaluation and hobby projects, subject to
+the terms of this Agreement.
+
+1.2 Academic use
+Accredited educational institutions, their faculty, staff, and students may
+use the Software free of charge for teaching, coursework, and non-sponsored
+academic research, provided such use is not primarily for the benefit of a
+for-profit third party.
+
+1.3 Enterprise / commercial use
+Any use of the Software within a for-profit organization, or any use that
+supports commercial services, products, or revenue-generating operations
+(including internal tools used primarily for business purposes), requires a
+valid commercial license purchased from the licensor. Without such a license,
+enterprise and commercial use is not permitted.
+
+1.4 Source and modifications
+Unless otherwise stated in a separate written agreement, you may study the
+source code where provided. Redistribution of modified or unmodified copies
+outside the scope of your licensed use may require explicit permission.
+
+────────────────────────────────────────────────────────────────────────────
+2. RESTRICTIONS
+
+You may not: (a) use the Software in violation of applicable law; (b) remove
+or alter proprietary notices; (c) use the Software to build a competing
+product that substantially replicates the Software’s primary user-facing
+functionality for commercial distribution, except as allowed by applicable
+open-source components under their own licenses; (d) imply endorsement by the
+licensor without permission.
+
+────────────────────────────────────────────────────────────────────────────
+3. THIRD-PARTY COMPONENTS
+
+The Software may include third-party libraries under separate licenses. Those
+licenses govern the respective components. Conflicts are resolved in favor of
+the third-party license only for the specific component.
+
+────────────────────────────────────────────────────────────────────────────
+4. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+────────────────────────────────────────────────────────────────────────────
+5. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO EVENT SHALL THE LICENSOR BE
+LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE
+DAMAGES, OR ANY LOSS OF PROFITS OR DATA, ARISING FROM THE USE OF THE SOFTWARE.
+
+────────────────────────────────────────────────────────────────────────────
+6. ENTERPRISE LICENSING
+
+For commercial and enterprise licenses, volume terms, and support, contact
+the licensor through the official product website or sales channel designated
+by the project maintainers.
+
+────────────────────────────────────────────────────────────────────────────
+7. TERMINATION
+
+Your rights under this Agreement terminate automatically if you breach it.
+Sections intended to survive termination shall survive.
+
+────────────────────────────────────────────────────────────────────────────
+8. GOVERNING LAW
+
+Unless otherwise agreed in writing, this Agreement shall be interpreted in
+accordance with the laws of the jurisdiction designated by the licensor, 
+without regard to conflict-of-law principles.
+
+────────────────────────────────────────────────────────────────────────────
+END OF LICENSE

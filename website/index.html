@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local LLM Desktop — Run models locally with RAG, wiki &amp; training</title>
+    <meta
+      name="description"
+      content="Desktop app for local inference with Hugging Face hub, Ollama and llama.cpp, knowledge wiki, and optional LoRA training."
+    />
+    <link rel="stylesheet" href="css/site.css" />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="bg-orb" aria-hidden="true"></div>
+    <div class="wrap">
+      <header class="site-nav">
+        <a class="brand" href="index.html">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Local LLM Desktop</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="documentation.html">Documentation</a>
+          <a href="download.html">Download</a>
+          <a href="license.html">License</a>
+          <a class="nav-cta" href="download.html">Get the app</a>
+        </nav>
+      </header>
+
+      <main>
+        <section class="hero">
+          <p class="hero-badge">Local-first · Private · Extensible</p>
+          <h1>Inference, knowledge, and tooling—on your machine.</h1>
+          <p class="hero-lead">
+            A focused desktop shell for chatting with local models, browsing a compiled wiki from your
+            documents, pulling weights from Hugging Face or Ollama, and experimenting with LoRA training—without
+            sending prompts to the cloud.
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="download.html">Download</a>
+            <a class="btn btn-ghost" href="documentation.html">Read the docs</a>
+          </div>
+        </section>
+
+        <section class="showcase" aria-labelledby="showcase-heading">
+          <h2 id="showcase-heading" class="visually-hidden">Product preview</h2>
+          <div class="showcase-frame">
+            <img
+              src="assets/screenshot-chat.svg"
+              width="1200"
+              height="720"
+              alt="Concept preview: chat layout with conversation list, message thread, composer, and knowledge sidebar in a dark glass UI."
+            />
+          </div>
+          <div class="showcase-caption">
+            <strong>Chat workspace</strong>
+            <span>Concept art · replace with real captures for production</span>
+          </div>
+
+          <div class="shots">
+            <figure class="shot-card">
+              <img
+                src="assets/screenshot-models.svg"
+                width="1200"
+                height="720"
+                alt="Concept preview: model library drawer with search and model cards."
+              />
+              <figcaption>Model library — Hub, filters, and install flows.</figcaption>
+            </figure>
+            <figure class="shot-card">
+              <img
+                src="assets/screenshot-wiki.svg"
+                width="1200"
+                height="720"
+                alt="Concept preview: wiki article view with topic list and knowledge graph panel."
+              />
+              <figcaption>Wiki &amp; graph — RAG-backed pages and topic links.</figcaption>
+            </figure>
+            <figure class="shot-card">
+              <img
+                src="assets/screenshot-chat.svg"
+                width="1200"
+                height="720"
+                alt="Concept preview: same chat workspace emphasizing layout."
+              />
+              <figcaption>Unified shell — nav, runtime controls, and side tools.</figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section aria-labelledby="features-heading">
+          <p class="section-label">Capabilities</p>
+          <h2 id="features-heading">Built for serious local workflows</h2>
+          <p class="section-lead">
+            Everything runs on your hardware. Swap backends, attach knowledge, and keep telemetry optional.
+          </p>
+          <div class="bento">
+            <article class="bento-card">
+              <div class="bento-icon" aria-hidden="true">◇</div>
+              <h3>Dual runtime</h3>
+              <p>
+                Use <strong>Ollama</strong> for fast registry pulls or <strong>llama.cpp</strong> with your own
+                <code>.gguf</code> files—selected from the same top bar.
+              </p>
+            </article>
+            <article class="bento-card">
+              <div class="bento-icon" aria-hidden="true">◎</div>
+              <h3>Hugging Face hub</h3>
+              <p>
+                Search and download models from the Hub into your configured folder, with progress and resume-friendly
+                transfers.
+              </p>
+            </article>
+            <article class="bento-card">
+              <div class="bento-icon" aria-hidden="true">✦</div>
+              <h3>RAG &amp; wiki</h3>
+              <p>
+                Ingest sources, compile markdown wiki pages, search chunks, and highlight terms inline in chat replies.
+              </p>
+            </article>
+            <article class="bento-card wide">
+              <div class="bento-icon" aria-hidden="true">⌁</div>
+              <h3>Training hook</h3>
+              <p>
+                Optional local LoRA training pipeline for experimentation—wired as a separate step so inference stays
+                snappy. Metrics and pinned widgets keep GPU and token stats visible when you want them.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section aria-labelledby="license-teaser-heading">
+          <p class="section-label">Licensing</p>
+          <h2 id="license-teaser-heading">Free for you. Fair for teams.</h2>
+          <p class="section-lead">
+            Personal and academic use is free. Organizations using the product for commercial work should purchase an
+            enterprise license.
+          </p>
+          <a class="btn btn-ghost" href="license.html">View license terms</a>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <span>Local LLM Desktop</span>
+        <span>
+          <a href="documentation.html">Docs</a>
+          ·
+          <a href="download.html">Download</a>
+          ·
+          <a href="license.html">License</a>
+        </span>
+      </footer>
+    </div>
+    <style>
+      .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+    </style>
+  </body>
+</html>

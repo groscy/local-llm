@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Download — Local LLM Desktop</title>
+    <meta name="description" content="Download Local LLM Desktop for Windows, macOS, or Linux; or build from source." />
+    <link rel="stylesheet" href="css/site.css" />
+  </head>
+  <body class="content-page">
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="bg-orb" aria-hidden="true"></div>
+    <div class="wrap">
+      <header class="site-nav">
+        <a class="brand" href="index.html">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Local LLM Desktop</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="documentation.html">Documentation</a>
+          <a href="download.html" aria-current="page">Download</a>
+          <a href="license.html">License</a>
+          <a class="nav-cta" href="#build">Build</a>
+        </nav>
+      </header>
+
+      <main>
+        <section class="hero">
+          <p class="section-label">Install</p>
+          <h1>Download</h1>
+          <p class="hero-lead" style="margin: 0; text-align: left; max-width: none">
+            Pick a build for your OS, or compile from the repository. Replace placeholder links with your release
+            URLs when you publish artifacts.
+          </p>
+        </section>
+
+        <div class="download-grid">
+          <article class="download-card">
+            <h3>Windows</h3>
+            <p>Installer or portable zip (x64). Requires a recent Windows 10/11 build.</p>
+            <a class="btn btn-primary" href="https://github.com/localllm/local-llm-desktop/releases">GitHub Releases</a>
+          </article>
+          <article class="download-card">
+            <h3>macOS</h3>
+            <p>Universal or arch-specific .dmg / .zip when available from maintainers.</p>
+            <a class="btn btn-primary" href="https://github.com/localllm/local-llm-desktop/releases">GitHub Releases</a>
+          </article>
+          <article class="download-card">
+            <h3>Linux</h3>
+            <p>AppImage, deb, or tarball depending on packaging scripts in the repo.</p>
+            <a class="btn btn-primary" href="https://github.com/localllm/local-llm-desktop/releases">GitHub Releases</a>
+          </article>
+        </div>
+
+        <section class="prose" style="margin-top: 48px" id="build">
+          <h2>Build from source</h2>
+          <p>Clone the repository, install Node.js and native build prerequisites for Electron and <code>better-sqlite3</code>, then:</p>
+          <pre style="background: rgba(0,0,0,0.35); padding: 16px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); overflow-x: auto"><code>npm install
+npm run build
+npm run dev   # development
+# or package via scripts in package.json (dist:*)</code></pre>
+          <p>
+            See repository <code>README</code> for platform-specific notes. Ollama and llama.cpp are external runtimes
+            you install separately.
+          </p>
+        </section>
+
+        <section class="license-callout" style="margin-top: 40px">
+          <h3>Enterprise distribution</h3>
+          <p style="margin: 0; color: var(--muted)">
+            Deploying inside a company or offering the product as part of a paid service requires an enterprise
+            license. <a href="license.html">Read the terms</a> and contact the maintainers for pricing.
+          </p>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <span><a href="index.html">← Home</a></span>
+        <span>
+          <a href="documentation.html">Documentation</a>
+          ·
+          <a href="license.html">License</a>
+        </span>
+      </footer>
+    </div>
+  </body>
+</html>

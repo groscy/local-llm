@@ -18,6 +18,7 @@
     "dist:linux": "node scripts/package-linux.mjs",
     "dist:linux:podman": "node scripts/package-linux-podman.mjs",
     "icons": "node scripts/generate-icons.mjs",
+    "website:preview": "npx --yes serve website -l 4174",
     "postinstall": "electron-rebuild -f -w better-sqlite3"
   },
   "dependencies": {
