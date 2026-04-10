@@ -29,12 +29,26 @@ import type {
 import { evaluateModelForHardware } from '@shared/modelHardwareFit'
 import type { ColorSchemeId } from '@shared/colorScheme'
 import { COLOR_SCHEME_IDS, COLOR_SCHEME_LABELS, DEFAULT_COLOR_SCHEME, parseColorScheme } from '@shared/colorScheme'
+import {
+  appendJournalTexts,
+  defaultModelProfile,
+  loadModelProfile,
+  mergePersonalityPatches,
+  MODEL_PROFILE_SYSTEM_PROMPT,
+  profileStorageKey,
+  saveModelProfile,
+  stripModelProfileMarkers,
+  stripPartialProfileStreamTail,
+  type ModelProfile,
+  type ModelPersonalityVibe
+} from '@shared/modelPersonality'
 import { DownloadProgressBar, downloadRowProgressPct, fileNameFromPath, formatBytes } from './downloadProgressUi'
 import { ActivityPinnedWidget, type ActivityChatTokens } from './ActivityPinnedWidget'
 import type { ActivityTokenHistoryPoint } from './ActivityTokenSessionChart'
 import { ChatRichContent } from './ChatRichContent'
 import { DownloadsPinnedWidget } from './DownloadsPinnedWidget'
 import { FloatingDots } from './FloatingDots'
+import { ModelPresenceBackdrop } from './ModelPresenceBackdrop'
 import { MetricsTimeSeries } from './MetricsTimeSeries'
 import { MetricsPinnedWidget } from './MetricsPinnedWidget'
 import { KnowledgeGraphView } from './KnowledgeGraphView'
@@ -78,6 +92,9 @@ function groupWikiTopicsByKind(topics: WikiTopic[]): Map<WikiSourceKind, WikiTop
 const METRICS_REFRESH_PRESETS_MS = [
   1000, 2000, 3000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000, 3_600_000
 ] as const
+
+/** Poll interval for the ambient model-presence backdrop (tokens / CPU / context). */
+const BACKDROP_METRICS_MS = 1200
 
 function clampMetricsRefreshMs(ms: number): number {
   return Math.min(3_600_000, Math.max(500, Math.floor(ms)))
@@ -264,6 +281,15 @@ function runtimeKindLabel(kind: RuntimeStatus['kind']): string {
   return 'None'
 }
 
+const MODEL_PROFILE_VIBE_LABELS: { key: keyof ModelPersonalityVibe; label: string }[] = [
+  { key: 'warmth', label: 'Warmth' },
+  { key: 'energy', label: 'Energy' },
+  { key: 'playfulness', label: 'Playfulness' },
+  { key: 'calm', label: 'Calm' },
+  { key: 'expressiveness', label: 'Expressiveness' },
+  { key: 'hueShift', label: 'Hue shift' }
+]
+
 /** Chat row in the viewport (may omit DB-only fields while a user message is optimistic). */
 type ChatMessageVm = {
   id?: string
@@ -342,6 +368,16 @@ function localModelPathsEqual(a: string, b: string, winPlatform: boolean): boole
   const na = a.trim().replace(/\\/g, '/')
   const nb = b.trim().replace(/\\/g, '/')
   return winPlatform ? na.toLowerCase() === nb.toLowerCase() : na === nb
+}
+
+/** True if `want` matches an Ollama tags list entry (exact tag, same base name, or `want:` prefix). */
+function ollamaRegistryTagInstalled(tags: readonly string[], want: string): boolean {
+  const w = want.trim()
+  if (!w) return false
+  return tags.some((name) => {
+    const base = name.split(':')[0] ?? ''
+    return name === w || name.startsWith(`${w}:`) || base === w
+  })
 }
 
 /** Hugging Face model id (or custom label) saved on download; shown as chat author when that file is loaded. */
@@ -523,6 +559,7 @@ export default function App(): React.ReactElement {
   const [drawer, setDrawer] = useState<ToolDrawer>(null)
 
   const [paths, setPaths] = useState<Awaited<ReturnType<typeof window.api.getPaths>> | null>(null)
+  const winPlatform = paths?.platform === 'win32'
   const [hfQuery, setHfQuery] = useState('llama gguf')
   const [hfResults, setHfResults] = useState<HfModelSummary[]>([])
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
@@ -548,25 +585,90 @@ export default function App(): React.ReactElement {
   const [ollamaChatTags, setOllamaChatTags] = useState<string[]>([])
   const [ollamaChatTagsLoading, setOllamaChatTagsLoading] = useState(false)
   const [ollamaChatTagsErr, setOllamaChatTagsErr] = useState<string | null>(null)
+  const [localGgufDeleteMarks, setLocalGgufDeleteMarks] = useState<string[]>([])
+  const [ollamaDeleteMarks, setOllamaDeleteMarks] = useState<string[]>([])
+  const [modelPurgeBusy, setModelPurgeBusy] = useState(false)
   const matchedLocalModelPath = useMemo(() => {
     const cur = modelPath.trim()
     if (!cur || localModelFilePaths.length === 0) return ''
-    const win = paths?.platform === 'win32'
     return (
-      localModelFilePaths.find((p) => (win ? p.toLowerCase() === cur.toLowerCase() : p === cur)) ?? ''
+      localModelFilePaths.find((p) => (winPlatform ? p.toLowerCase() === cur.toLowerCase() : p === cur)) ?? ''
     )
-  }, [localModelFilePaths, modelPath, paths?.platform])
+  }, [localModelFilePaths, modelPath, winPlatform])
+
+  /** Include the runtime’s model when it isn’t in the scanned folder list yet. */
+  const topBarLlamaModelPathOptions = useMemo(() => {
+    const base = localModelFilePaths
+    const loaded =
+      runtimeStatus?.running &&
+      runtimeKind === 'llamacpp' &&
+      runtimeStatus?.kind === 'llamacpp' &&
+      runtimeStatus.modelPath?.trim()
+        ? runtimeStatus.modelPath.trim()
+        : ''
+    if (!loaded) return base
+    if (base.some((p) => localModelPathsEqual(p, loaded, winPlatform))) return base
+    return [loaded, ...base]
+  }, [
+    localModelFilePaths,
+    runtimeStatus?.running,
+    runtimeStatus?.kind,
+    runtimeStatus?.modelPath,
+    runtimeKind,
+    winPlatform
+  ])
+
+  /** Include the loaded Ollama tag when it isn’t returned by list yet. */
+  const topBarOllamaModelOptions = useMemo(() => {
+    const base = ollamaChatTags
+    const loaded =
+      runtimeStatus?.running &&
+      runtimeKind === 'ollama' &&
+      runtimeStatus?.kind === 'ollama' &&
+      runtimeStatus.modelPath?.trim()
+        ? runtimeStatus.modelPath.trim()
+        : ''
+    if (!loaded) return base
+    if (base.includes(loaded)) return base
+    return [loaded, ...base]
+  }, [ollamaChatTags, runtimeStatus?.running, runtimeStatus?.kind, runtimeStatus?.modelPath, runtimeKind])
+
+  const runtimeOn = Boolean(runtimeStatus?.running)
 
   const topBarModelSelectValue = useMemo(() => {
     const cur = modelPath.trim()
     if (runtimeKind === 'llamacpp') {
+      if (runtimeOn && runtimeStatus?.modelPath?.trim()) {
+        const loaded = runtimeStatus.modelPath.trim()
+        for (const p of topBarLlamaModelPathOptions) {
+          if (localModelPathsEqual(p, loaded, winPlatform)) return p
+        }
+        return loaded
+      }
       return matchedLocalModelPath || ''
     }
     if (runtimeKind === 'ollama') {
+      if (runtimeOn && runtimeStatus?.modelPath?.trim()) {
+        return runtimeStatus.modelPath.trim()
+      }
       return cur && ollamaChatTags.includes(cur) ? cur : ''
     }
     return ''
-  }, [runtimeKind, matchedLocalModelPath, modelPath, ollamaChatTags])
+  }, [
+    runtimeKind,
+    matchedLocalModelPath,
+    modelPath,
+    ollamaChatTags,
+    runtimeOn,
+    runtimeStatus?.modelPath,
+    topBarLlamaModelPathOptions,
+    winPlatform
+  ])
+
+  useEffect(() => {
+    setLocalGgufDeleteMarks([])
+    setOllamaDeleteMarks([])
+  }, [runtimeKind])
 
   const localModelDefaultSyncRef = useRef<{ kind: typeof runtimeKind; localLen: number }>({
     kind: runtimeKind,
@@ -583,6 +685,7 @@ export default function App(): React.ReactElement {
     }
 
     if (runtimeKind !== 'llamacpp') return
+    if (runtimeStatus?.running) return
     const files = localModelFilePaths
     if (files.length === 0) return
 
@@ -597,7 +700,7 @@ export default function App(): React.ReactElement {
     if (cur) {
       setModelPath(files[0])
     }
-  }, [runtimeKind, localModelFilePaths, paths?.platform, modelPath])
+  }, [runtimeKind, localModelFilePaths, paths?.platform, modelPath, runtimeStatus?.running])
 
   useEffect(() => {
     if (runtimeKind !== 'ollama') return
@@ -605,16 +708,41 @@ export default function App(): React.ReactElement {
 
     const tags = ollamaChatTags
     const cur = modelPath.trim()
+    const loaded = runtimeStatus?.running ? runtimeStatus.modelPath?.trim() ?? '' : ''
 
     if (tags.length === 0) {
-      if (cur) setModelPath('')
+      if (!runtimeStatus?.running && cur) setModelPath('')
       return
     }
 
     if (!cur) return
     if (tags.includes(cur)) return
+    if (loaded && cur === loaded) return
+    if (runtimeStatus?.running) return
     setModelPath(tags[0])
-  }, [runtimeKind, ollamaChatTags, ollamaChatTagsLoading, modelPath])
+  }, [runtimeKind, ollamaChatTags, ollamaChatTagsLoading, modelPath, runtimeStatus?.running, runtimeStatus?.modelPath])
+
+  /** Keep the model field aligned with the running server so the top-bar list shows the loaded model. */
+  useEffect(() => {
+    if (!runtimeStatus?.running || !runtimeStatus.modelPath?.trim()) return
+    if (runtimeStatus.kind !== 'ollama' && runtimeStatus.kind !== 'llamacpp') return
+    if (runtimeStatus.kind !== runtimeKind) return
+    const mp = runtimeStatus.modelPath.trim()
+    const cur = modelPath.trim()
+    if (runtimeKind === 'llamacpp') {
+      if (localModelPathsEqual(cur, mp, winPlatform)) return
+    } else if (cur === mp) {
+      return
+    }
+    setModelPath(mp)
+  }, [
+    runtimeStatus?.running,
+    runtimeStatus?.modelPath,
+    runtimeStatus?.kind,
+    runtimeKind,
+    modelPath,
+    winPlatform
+  ])
 
   const [conversations, setConversations] = useState<{ id: string; title: string }[]>([])
   const [convId, setConvId] = useState<string | null>(null)
@@ -664,6 +792,10 @@ export default function App(): React.ReactElement {
   const [hfFilterMinDownloads, setHfFilterMinDownloads] = useState('')
   const [hfFilterMaxSizeGb, setHfFilterMaxSizeGb] = useState('')
   const [quickDownloadRepo, setQuickDownloadRepo] = useState<string | null>(null)
+  const [hfOllamaPullRepoId, setHfOllamaPullRepoId] = useState<string | null>(null)
+  const [hfOllamaPullBusy, setHfOllamaPullBusy] = useState(false)
+  const [hfOllamaPullProgress, setHfOllamaPullProgress] = useState<RuntimeLoadProgress | null>(null)
+  const [ollamaHubPullNameDraft, setOllamaHubPullNameDraft] = useState('')
   const [trainJobs, setTrainJobs] = useState<unknown[]>([])
   const [trainBase, setTrainBase] = useState('')
   const [trainDataset, setTrainDataset] = useState('')
@@ -885,6 +1017,8 @@ export default function App(): React.ReactElement {
   const [metricsCustomSec, setMetricsCustomSec] = useState('')
   const [widgetSnap, setWidgetSnap] = useState<MetricsSnapshot | null>(null)
   const [widgetSeries, setWidgetSeries] = useState<MetricsSnapshot[]>([])
+  const [backdropSnap, setBackdropSnap] = useState<MetricsSnapshot | null>(null)
+  const [modelProfile, setModelProfile] = useState<ModelProfile>(() => defaultModelProfile())
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
@@ -1118,6 +1252,84 @@ export default function App(): React.ReactElement {
     }
   }, [])
 
+  const toggleLocalGgufDeleteMark = useCallback((p: string) => {
+    setLocalGgufDeleteMarks((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]))
+  }, [])
+
+  const toggleOllamaDeleteMark = useCallback((tag: string) => {
+    setOllamaDeleteMarks((prev) => (prev.includes(tag) ? prev.filter((x) => x !== tag) : [...prev, tag]))
+  }, [])
+
+  const deleteMarkedLocalGgufs = useCallback(async () => {
+    if (localGgufDeleteMarks.length === 0) return
+    const toDelete = [...localGgufDeleteMarks]
+    const lines = toDelete.map((p) => fileNameFromPath(p)).join('\n')
+    if (
+      !window.confirm(
+        `Permanently delete ${toDelete.length} file(s)?\n\n${lines}\n\nThis cannot be undone.`
+      )
+    )
+      return
+    setModelPurgeBusy(true)
+    setErr(null)
+    try {
+      for (const p of toDelete) {
+        await window.api.deleteLocalGgufModel(p)
+        try {
+          localStorage.removeItem(profileStorageKey(p))
+        } catch {
+          /* ignore */
+        }
+      }
+      setLocalGgufDeleteMarks([])
+      const curTrim = modelPath.trim()
+      if (toDelete.some((p) => localModelPathsEqual(p, curTrim, winPlatform))) {
+        setModelPath('')
+      }
+      await refreshLocalModelFiles()
+      void refreshRunDrawerQuick()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setModelPurgeBusy(false)
+    }
+  }, [localGgufDeleteMarks, modelPath, winPlatform, refreshLocalModelFiles, refreshRunDrawerQuick])
+
+  const deleteMarkedOllamaModels = useCallback(async () => {
+    if (ollamaDeleteMarks.length === 0) return
+    const toRemove = [...ollamaDeleteMarks]
+    const lines = toRemove.join('\n')
+    if (
+      !window.confirm(
+        `Remove ${toRemove.length} model(s) from Ollama?\n\n${lines}\n\nThis frees disk space in Ollama's store.`
+      )
+    )
+      return
+    setModelPurgeBusy(true)
+    setErr(null)
+    try {
+      for (const tag of toRemove) {
+        await window.api.deleteOllamaModel(tag)
+        try {
+          localStorage.removeItem(profileStorageKey(tag))
+        } catch {
+          /* ignore */
+        }
+      }
+      setOllamaDeleteMarks([])
+      const curTrim = modelPath.trim()
+      if (toRemove.includes(curTrim)) {
+        setModelPath('')
+      }
+      await refreshOllamaChatTags()
+      void refreshRunDrawerQuick()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setModelPurgeBusy(false)
+    }
+  }, [ollamaDeleteMarks, modelPath, refreshOllamaChatTags, refreshRunDrawerQuick])
+
   const refreshDownloadsList = useCallback(async () => {
     try {
       const rows = await window.api.downloadsList()
@@ -1179,6 +1391,12 @@ export default function App(): React.ReactElement {
   useEffect(() => {
     return window.api.onRuntimeLoadProgress((p) => {
       setRuntimeLoadProgress(p)
+    })
+  }, [])
+
+  useEffect(() => {
+    return window.api.onOllamaPullProgress((p) => {
+      setHfOllamaPullProgress(p)
     })
   }, [])
 
@@ -1533,6 +1751,49 @@ export default function App(): React.ReactElement {
   }, [metricsPinned, metricsRefreshMs])
 
   useEffect(() => {
+    const active = Boolean(runtimeStatus?.running) || runtimeStarting || chatSending
+    if (!active) {
+      setBackdropSnap(null)
+      return
+    }
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const s = (await window.api.metricsSnapshot({ persist: false })) as MetricsSnapshot
+        if (!cancelled) setBackdropSnap(s)
+      } catch {
+        /* ignore */
+      }
+    }
+    void tick()
+    const id = window.setInterval(tick, BACKDROP_METRICS_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [runtimeStatus?.running, runtimeStarting, chatSending])
+
+  const personalityModelKey = useMemo(() => {
+    if (runtimeStatus?.running && runtimeStatus.modelPath?.trim()) return runtimeStatus.modelPath.trim()
+    return modelPath.trim()
+  }, [runtimeStatus?.running, runtimeStatus?.modelPath, modelPath])
+
+  useEffect(() => {
+    if (!personalityModelKey) {
+      setModelProfile(defaultModelProfile())
+      return
+    }
+    setModelProfile(loadModelProfile(personalityModelKey))
+  }, [personalityModelKey])
+
+  const clearModelProfileStorage = useCallback(() => {
+    if (!personalityModelKey) return
+    const fresh = defaultModelProfile()
+    setModelProfile(fresh)
+    saveModelProfile(personalityModelKey, fresh)
+  }, [personalityModelKey])
+
+  useEffect(() => {
     const running = Boolean(runtimeStatus?.running)
     const was = runtimeWasRunningRef.current
     runtimeWasRunningRef.current = running
@@ -1736,14 +1997,18 @@ export default function App(): React.ReactElement {
       setHfSearchLoading(false)
       setSelectedModel(null)
       setDetail(null)
+      setOllamaHubPullNameDraft('')
       setRecommendedLoading(true)
+      void refreshDownloadsList()
+      void refreshLocalModelFiles()
+      void refreshOllamaChatTags()
       void window.api
         .hfRecommended(HF_RECOMMENDED_FETCH_LIMIT)
         .then((r) => setRecommendedModels(r as HfModelSummary[]))
         .catch(() => setRecommendedModels([]))
         .finally(() => setRecommendedLoading(false))
     }
-  }, [drawer])
+  }, [drawer, refreshDownloadsList, refreshLocalModelFiles, refreshOllamaChatTags])
 
   useEffect(() => {
     if (drawer !== 'hf') return
@@ -1814,6 +2079,22 @@ export default function App(): React.ReactElement {
     return rows
   }, [hfListModels, hfSortBy, hfSortDir, hfFilterMinLikes, hfFilterMinDownloads, hfFilterMaxSizeGb])
 
+  const hfHubInstalledModels = useMemo(() => {
+    return hfDisplayModels.filter((m) =>
+      runtimeKind === 'ollama'
+        ? ollamaRegistryTagInstalled(ollamaChatTags, m.ollamaLibraryName ?? '')
+        : localDownloads.some((r) => r.repo_id === m.id && r.status === 'complete')
+    )
+  }, [hfDisplayModels, runtimeKind, ollamaChatTags, localDownloads])
+
+  const hfHubAvailableModels = useMemo(() => {
+    return hfDisplayModels.filter((m) =>
+      runtimeKind === 'ollama'
+        ? !ollamaRegistryTagInstalled(ollamaChatTags, m.ollamaLibraryName ?? '')
+        : !localDownloads.some((r) => r.repo_id === m.id && r.status === 'complete')
+    )
+  }, [hfDisplayModels, runtimeKind, ollamaChatTags, localDownloads])
+
   const hfFiltersActive =
     hfFilterMinLikes.trim() !== '' || hfFilterMinDownloads.trim() !== '' || hfFilterMaxSizeGb.trim() !== ''
 
@@ -1829,6 +2110,7 @@ export default function App(): React.ReactElement {
     setHfSearchLoading(false)
     setSelectedModel(null)
     setDetail(null)
+    setOllamaHubPullNameDraft('')
   }
 
   async function runHfSearch(): Promise<void> {
@@ -1837,6 +2119,7 @@ export default function App(): React.ReactElement {
     setHfSearchLoading(true)
     setSelectedModel(null)
     setDetail(null)
+    setOllamaHubPullNameDraft('')
     try {
       const r = await window.api.hfSearch(hfQuery, 40)
       setHfResults(r as HfModelSummary[])
@@ -1891,17 +2174,76 @@ export default function App(): React.ReactElement {
     setErr(null)
     try {
       const d = await window.api.hfModelInfo(id)
-      setDetail(d as HfModelDetail)
-      const gguf = (d as HfModelDetail).siblings?.find((s) => s.path.endsWith('.gguf'))
+      const detailRow = d as HfModelDetail
+      setDetail(detailRow)
+      const tag = detailRow.ollamaLibraryName?.trim()
+      setOllamaHubPullNameDraft(tag ?? '')
+      const gguf = detailRow.siblings?.find((s) => s.path.endsWith('.gguf'))
       if (gguf) setDownloadFile(gguf.path)
     } catch (e) {
       setErr(String(e))
     }
   }
 
-  async function startDownload(): Promise<void> {
-    if (!selectedModel || !downloadFile || !destDir) return
+  async function runOllamaPullForHub(repoId: string, tag: string): Promise<void> {
+    const trimmed = tag.trim()
+    if (!trimmed) {
+      setErr('Enter an Ollama model name to pull.')
+      return
+    }
     setErr(null)
+    setHfOllamaPullRepoId(repoId)
+    setHfOllamaPullProgress(null)
+    setHfOllamaPullBusy(true)
+    try {
+      const pull = window.api.ollamaPullModel
+      if (typeof pull !== 'function') {
+        throw new Error('Preload is out of date (ollamaPullModel missing). Rebuild the app.')
+      }
+      await pull(trimmed)
+      void refreshOllamaChatTags()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setHfOllamaPullBusy(false)
+      setHfOllamaPullRepoId(null)
+      setHfOllamaPullProgress(null)
+    }
+  }
+
+  async function hubQuickInstall(repoId: string): Promise<void> {
+    const summary = hfListModels.find((x) => x.id === repoId)
+    if (!summary) {
+      setErr('Model not found in the current list.')
+      return
+    }
+    if (runtimeKind === 'llamacpp') {
+      await quickDownloadFromRepo(repoId)
+      return
+    }
+    const tag = summary.ollamaLibraryName?.trim()
+    if (!tag) {
+      setErr(
+        'No preset Ollama tag for this Hub entry. Select the card and type a model name under “Selected model”, or switch the top bar to llama.cpp to download the .gguf file.'
+      )
+      return
+    }
+    await runOllamaPullForHub(repoId, tag)
+  }
+
+  async function startDownload(): Promise<void> {
+    setErr(null)
+    if (runtimeKind === 'ollama') {
+      if (!selectedModel) return
+      const tag = ollamaHubPullNameDraft.trim()
+      if (!tag) {
+        setErr('Enter an Ollama model name to pull (for example: llama3.2).')
+        return
+      }
+      await runOllamaPullForHub(selectedModel, tag)
+      return
+    }
+    if (!selectedModel || !downloadFile || !destDir) return
     try {
       const j = (await window.api.hfDownload({
         repoId: selectedModel,
@@ -1925,6 +2267,99 @@ export default function App(): React.ReactElement {
     } catch (e) {
       setErr(String(e))
     }
+  }
+
+  const renderHfHubCard = (m: HfModelSummary): ReactElement => {
+    const hfJob = hfDownloadJobs[m.id]
+    const hfPct = hfJob ? hfCardProgressPct(hfJob) : null
+    const hfMeta = hfJob
+      ? hfPct != null
+        ? hfJob.bytesTotal > 0
+          ? `${hfJob.progress}% · ${formatBytes(hfJob.bytesReceived)} / ${formatBytes(hfJob.bytesTotal)}`
+          : `${hfJob.progress}%`
+        : 'Starting…'
+      : undefined
+    const ollamaPullHere = runtimeKind === 'ollama' && hfOllamaPullRepoId === m.id
+    const oPullPct =
+      ollamaPullHere && hfOllamaPullProgress?.percent != null ? hfOllamaPullProgress.percent : null
+    const oPullMeta =
+      ollamaPullHere && hfOllamaPullProgress?.message
+        ? hfOllamaPullProgress.percent != null
+          ? `${hfOllamaPullProgress.percent}% · ${hfOllamaPullProgress.message}`
+          : hfOllamaPullProgress.message
+        : ollamaPullHere
+          ? 'Pulling…'
+          : undefined
+    const installBusy =
+      !!hfJob || quickDownloadRepo === m.id || (runtimeKind === 'ollama' && hfOllamaPullBusy)
+    const quickOllamaBlocked = runtimeKind === 'ollama' && !m.ollamaLibraryName?.trim()
+
+    return (
+      <div key={m.id} className={`hf-model-card ${selectedModel === m.id ? 'selected' : ''}`}>
+        <button type="button" className="hf-model-card-main" onClick={() => void loadDetail(m.id)}>
+          <div className="hf-model-card-title">{m.id}</div>
+          {m.description ? <p className="hf-model-card-desc">{m.description}</p> : null}
+          {m.ollamaLibraryName ? (
+            <p className="muted hf-model-card-ollama-hint" style={{ marginTop: 8, fontSize: 12 }}>
+              Ollama tag: <code className="inline-code">{m.ollamaLibraryName}</code>
+            </p>
+          ) : null}
+        </button>
+        {ollamaPullHere ? (
+          <div className="hf-model-card-progress">
+            <DownloadProgressBar compact pct={oPullPct} meta={oPullMeta} />
+          </div>
+        ) : hfJob ? (
+          <div className="hf-model-card-progress">
+            <DownloadProgressBar compact pct={hfPct} meta={hfMeta} />
+            <div className="hf-model-card-progress-actions">
+              <button type="button" className="btn-ghost-sm" onClick={() => void cancelDownloadJob(hfJob.jobId)}>
+                Cancel download
+              </button>
+            </div>
+          </div>
+        ) : null}
+        <div className="hf-model-card-footer">
+          <div className="hf-model-card-footer-info">
+            <span className="hf-model-card-meta">
+              {(m.downloads ?? 0).toLocaleString()} downloads · {m.likes ?? 0} likes
+              {typeof m.totalSizeBytes === 'number' && m.totalSizeBytes > 0
+                ? ` · ~${formatBytes(m.totalSizeBytes)}`
+                : ''}
+            </span>
+            <a
+              href={huggingFaceModelUrl(m.id)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hf-model-card-hub-link"
+            >
+              View on Hugging Face
+            </a>
+          </div>
+          <button
+            type="button"
+            className="btn-card-download"
+            disabled={installBusy || quickOllamaBlocked}
+            title={
+              quickOllamaBlocked
+                ? 'Open this card and enter an Ollama model name, or use llama.cpp to download the file.'
+                : undefined
+            }
+            onClick={() => void hubQuickInstall(m.id)}
+          >
+            {hfJob
+              ? 'Downloading…'
+              : ollamaPullHere
+                ? 'Pulling…'
+                : quickDownloadRepo === m.id
+                  ? 'Preparing…'
+                  : runtimeKind === 'ollama'
+                    ? 'Pull'
+                    : 'Download'}
+          </button>
+        </div>
+      </div>
+    )
   }
 
   async function startRuntime(): Promise<void> {
@@ -2006,7 +2441,11 @@ export default function App(): React.ReactElement {
         userText
     }
     const historyForApi = messages.map((m) => ({ role: m.role, content: m.content }))
-    const msgs = [...historyForApi, { role: 'user' as const, content: context }]
+    const msgs = [
+      { role: 'system' as const, content: MODEL_PROFILE_SYSTEM_PROMPT },
+      ...historyForApi,
+      { role: 'user' as const, content: context }
+    ]
     const requestId =
       typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
         ? crypto.randomUUID()
@@ -2063,11 +2502,12 @@ export default function App(): React.ReactElement {
     })
     try {
       const reply = await window.api.runtimeChat(msgs, requestId)
+      const { visible: replyVisible, patches: ambiancePatches, journalTexts } = stripModelProfileMarkers(reply)
       const snap = activityChatTokensRef.current
       await window.api.messageAppend(
         convId,
         'assistant',
-        reply,
+        replyVisible,
         undefined,
         snap
           ? {
@@ -2078,6 +2518,22 @@ export default function App(): React.ReactElement {
             }
           : undefined
       )
+      const st = await window.api.runtimeStatus()
+      const persistKey = st?.modelPath?.trim() || modelPath.trim()
+      if (persistKey && (ambiancePatches.length > 0 || journalTexts.length > 0)) {
+        setModelProfile((prev) => {
+          let vibe = prev.vibe
+          for (const patch of ambiancePatches) {
+            vibe = mergePersonalityPatches(vibe, patch)
+          }
+          let next: ModelProfile = { ...prev, vibe }
+          if (journalTexts.length > 0) {
+            next = appendJournalTexts(next, journalTexts)
+          }
+          saveModelProfile(persistKey, next)
+          return next
+        })
+      }
       const m = await window.api.conversationMessages(convId)
       setMessages(m as ChatMessageVm[])
       const convTitle = conversations.find((c) => c.id === convId)?.title
@@ -2086,7 +2542,7 @@ export default function App(): React.ReactElement {
           conversationId: convId,
           conversationTitle: convTitle,
           userMessage: userText,
-          assistantMessage: reply
+          assistantMessage: replyVisible
         })
         .then((r) => {
           if (r.ok && r.skipped === false && r.sourceId) void loadWiki()
@@ -2274,7 +2730,6 @@ export default function App(): React.ReactElement {
     }
   }
 
-  const runtimeOn = Boolean(runtimeStatus?.running)
   const loadedModelTitle = useMemo(() => {
     if (!runtimeStatus?.modelPath?.trim()) return 'Model ready'
     const raw = runtimeStatus.modelPath.trim()
@@ -2355,8 +2810,28 @@ export default function App(): React.ReactElement {
     return t ? WIKI_KIND_LABELS[t.kind] : null
   }, [wikiSelectedId, wikiTopics])
 
+  const backdropCtxPercent = useMemo(() => {
+    const used = backdropSnap?.runtimeCtxUsed
+    if (used == null || !Number.isFinite(used)) return undefined
+    const n = parseInt(chatMaxTokensDraft.trim(), 10)
+    const cap = clampChatMaxTokens(Number.isFinite(n) ? n : CHAT_MAX_TOKENS_DEFAULT)
+    if (cap <= 0) return undefined
+    return Math.min(100, Math.max(0, (used / cap) * 100))
+  }, [backdropSnap?.runtimeCtxUsed, chatMaxTokensDraft])
+
   return (
     <div className="shell">
+      <ModelPresenceBackdrop
+        running={Boolean(runtimeStatus?.running)}
+        starting={runtimeStarting}
+        loadPercent={runtimeLoadProgress?.percent ?? null}
+        chatBusy={chatSending}
+        modelPath={runtimeStatus?.modelPath}
+        tokensPerSec={backdropSnap?.runtimeTokensPerSec}
+        cpuPercent={backdropSnap?.processCpuPercent}
+        ctxPercent={backdropCtxPercent}
+        personality={modelProfile.vibe}
+      />
       <aside className="nav-rail" aria-label="Primary navigation">
         <div className="nav-brand" title="Local LLM Desktop">
           <img src="/app-icon.png" alt="" width={44} height={44} decoding="async" />
@@ -2571,16 +3046,30 @@ export default function App(): React.ReactElement {
                       : 'Choose model file…'}
                 </option>
                 {runtimeKind === 'llamacpp'
-                  ? localModelFilePaths.map((p) => (
-                      <option key={p} value={p} title={p}>
-                        {fileNameFromPath(p)}
-                      </option>
-                    ))
-                  : ollamaChatTags.map((tag) => (
-                      <option key={tag} value={tag} title={tag}>
-                        {tag}
-                      </option>
-                    ))}
+                  ? topBarLlamaModelPathOptions.map((p) => {
+                      const loadedMp = (runtimeOn ? runtimeStatus?.modelPath?.trim() : '') ?? ''
+                      const loadedOnly =
+                        Boolean(loadedMp) &&
+                        localModelPathsEqual(p, loadedMp, winPlatform) &&
+                        !localModelFilePaths.some((q) => localModelPathsEqual(q, loadedMp, winPlatform))
+                      return (
+                        <option key={p} value={p} title={p}>
+                          {fileNameFromPath(p)}
+                          {loadedOnly ? ' · loaded' : ''}
+                        </option>
+                      )
+                    })
+                  : topBarOllamaModelOptions.map((tag) => {
+                      const ollamaLoaded = runtimeStatus?.modelPath?.trim() ?? ''
+                      const loadedOnly =
+                        runtimeOn && ollamaLoaded !== '' && tag === ollamaLoaded && !ollamaChatTags.includes(tag)
+                      return (
+                        <option key={tag} value={tag} title={tag}>
+                          {tag}
+                          {loadedOnly ? ' · loaded' : ''}
+                        </option>
+                      )
+                    })}
               </select>
               {runtimeOn ? (
                 <button
@@ -3077,7 +3566,7 @@ export default function App(): React.ReactElement {
                         </div>
                         {chatStreamBuffer ? (
                           <ChatRichContent
-                            content={chatStreamBuffer}
+                            content={stripPartialProfileStreamTail(chatStreamBuffer)}
                             plainStreaming
                             wikiHighlightTerms={wikiHighlightTerms}
                             onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
@@ -3607,16 +4096,72 @@ export default function App(): React.ReactElement {
                         </button>
                       )}
                     </div>
+                    <p className="hf-library-runtime-hint muted" style={{ margin: '0 0 12px' }}>
+                      <strong>Top bar backend:</strong>{' '}
+                      {runtimeKind === 'ollama' ? (
+                        <>
+                          <span>Ollama</span> — installing pulls into the Ollama library at your configured API URL. Hub
+                          cards with a preset tag can <strong>Pull</strong> in one click; others need a name under
+                          “Selected model”.
+                        </>
+                      ) : (
+                        <>
+                          <span>llama.cpp</span> — installing downloads <code>.gguf</code> files into your models folder
+                          (same as the Run panel).
+                        </>
+                      )}
+                    </p>
                     {hfLibraryMode === 'recommended' && (
                       <p className="muted" style={{ margin: '0 0 12px' }}>
-                        Curated GGUF-friendly picks. Sort and filter by likes, downloads, or total repo size. Click a card for files, or Download to grab the first GGUF (or first file). Search replaces this list until you go back.
+                        Curated GGUF-friendly picks. Sort and filter by likes, downloads, or total repo size. Lists below
+                        split what is already installed versus what you can add. Search replaces this list until you go
+                        back.
                       </p>
                     )}
                     {hfLibraryMode === 'search' && (
                       <p className="muted" style={{ margin: '0 0 12px' }}>
-                        Same layout as recommendations. Sort and filter apply to this result set. Download uses the first <code>.gguf</code> when available.
+                        Sort and filter apply to this result set. Install uses the active backend (Ollama pull vs. Hub file
+                        download for llama.cpp).
                       </p>
                     )}
+                    {runtimeKind === 'llamacpp' && localModelFilePaths.length > 0 ? (
+                      <div className="hf-library-disk-block" role="region" aria-label="Weights on disk">
+                        <h4 className="hf-library-subheading">.gguf files in your models folder</h4>
+                        <ul className="hf-library-disk-list muted">
+                          {localModelFilePaths.map((p) => (
+                            <li key={p}>
+                              <code className="inline-code">{fileNameFromPath(p)}</code>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {runtimeKind === 'ollama' ? (
+                      <div className="hf-library-disk-block" role="region" aria-label="Ollama library">
+                        <h4 className="hf-library-subheading">Models in your Ollama library</h4>
+                        {ollamaChatTagsLoading ? (
+                          <p className="muted" style={{ margin: 0 }}>
+                            Loading…
+                          </p>
+                        ) : ollamaChatTagsErr ? (
+                          <p className="muted" style={{ margin: 0 }}>
+                            {ollamaChatTagsErr}
+                          </p>
+                        ) : ollamaChatTags.length === 0 ? (
+                          <p className="muted" style={{ margin: 0 }}>
+                            None reported yet. Pull a model below or from the Run panel.
+                          </p>
+                        ) : (
+                          <ul className="hf-library-disk-list hf-library-disk-list--tags">
+                            {ollamaChatTags.map((tag) => (
+                              <li key={tag}>
+                                <code className="inline-code">{tag}</code>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    ) : null}
                     <div className="hf-library-filters" aria-label="Sort and filter models">
                       <div className="hf-library-filters-grid">
                         <label className="hf-library-filter-field">
@@ -3704,124 +4249,158 @@ export default function App(): React.ReactElement {
                     {!hfListLoading && hfListModels.length > 0 && hfDisplayModels.length === 0 && (
                       <p className="muted">No models match the current filters. Clear filters or relax thresholds.</p>
                     )}
-                    <div className="hf-model-cards-list">
-                      {hfDisplayModels.map((m) => {
-                        const hfJob = hfDownloadJobs[m.id]
-                        const hfPct = hfJob ? hfCardProgressPct(hfJob) : null
-                        const hfMeta = hfJob
-                          ? hfPct != null
-                            ? hfJob.bytesTotal > 0
-                              ? `${hfJob.progress}% · ${formatBytes(hfJob.bytesReceived)} / ${formatBytes(hfJob.bytesTotal)}`
-                              : `${hfJob.progress}%`
-                            : 'Starting…'
-                          : undefined
-                        return (
-                          <div key={m.id} className={`hf-model-card ${selectedModel === m.id ? 'selected' : ''}`}>
-                            <button type="button" className="hf-model-card-main" onClick={() => void loadDetail(m.id)}>
-                              <div className="hf-model-card-title">{m.id}</div>
-                              {m.description ? <p className="hf-model-card-desc">{m.description}</p> : null}
+                    {!hfListLoading && hfDisplayModels.length > 0 ? (
+                      <>
+                        <h4 className="hf-library-subheading hf-library-subheading--list">In this list — installed</h4>
+                        {hfHubInstalledModels.length === 0 ? (
+                          <p className="muted hf-library-column-empty">Nothing from this list yet for the current backend.</p>
+                        ) : (
+                          <div className="hf-model-cards-list hf-model-cards-list--installed">
+                            {hfHubInstalledModels.map((m) => renderHfHubCard(m))}
+                          </div>
+                        )}
+                        <h4 className="hf-library-subheading hf-library-subheading--list">Available to install</h4>
+                        {hfHubAvailableModels.length === 0 ? (
+                          <p className="muted hf-library-column-empty">All filtered models are already installed.</p>
+                        ) : (
+                          <div className="hf-model-cards-list">
+                            {hfHubAvailableModels.map((m) => renderHfHubCard(m))}
+                          </div>
+                        )}
+                      </>
+                    ) : null}
+                  </div>
+                  <div className="drawer-section">
+                    <h3>
+                      Selected model —{' '}
+                      {runtimeKind === 'ollama' ? 'Ollama pull' : 'files & folder'}
+                    </h3>
+                    {!detail && (
+                      <p className="muted">
+                        {runtimeKind === 'ollama'
+                          ? 'Select a Hub model above. You can pull any Ollama library name, or use a preset tag when the card lists one.'
+                          : 'Select a model above to choose a specific file and download folder.'}
+                      </p>
+                    )}
+                    {detail && (
+                      <>
+                        <p className="muted">{detail.description?.slice(0, 320) ?? '—'}</p>
+                        <p className="muted">Total ~{(detail.totalSizeBytes / 1e9).toFixed(2)} GB (file sum)</p>
+                        {runtimeKind === 'llamacpp' ? (
+                          hfHardwareEval ? (
+                            <div
+                              className={`hf-model-fit hf-model-fit--${hfHardwareEval.verdict}`}
+                              role="status"
+                            >
+                              <p className="hf-model-fit-title">This machine vs selected file</p>
+                              <p className="hf-model-fit-headline">{hfHardwareEval.headline}</p>
+                              <ul className="hf-model-fit-notes">
+                                {hfHardwareEval.notes.map((n, i) => (
+                                  <li key={i}>{n}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          ) : (
+                            <p className="muted hf-model-fit-loading">Checking this machine…</p>
+                          )
+                        ) : null}
+                        {runtimeKind === 'ollama' ? (
+                          <>
+                            <label className="runtime-field-label" htmlFor="hf-ollama-pull-name">
+                              Ollama model name
+                            </label>
+                            <input
+                              id="hf-ollama-pull-name"
+                              className="input"
+                              style={{ marginBottom: 8 }}
+                              value={ollamaHubPullNameDraft}
+                              onChange={(e) => setOllamaHubPullNameDraft(e.target.value)}
+                              placeholder="e.g. llama3.2, qwen2.5:3b"
+                              disabled={hfOllamaPullBusy}
+                            />
+                            <p className="muted" style={{ margin: '0 0 10px', fontSize: 12 }}>
+                              Pulled models appear in the Ollama library list above and in the top bar model menu.
+                            </p>
+                            <button
+                              type="button"
+                              className="btn-primary"
+                              disabled={hfOllamaPullBusy || !ollamaHubPullNameDraft.trim()}
+                              onClick={() => void startDownload()}
+                            >
+                              {hfOllamaPullBusy ? 'Pulling…' : 'Pull model'}
                             </button>
-                            {hfJob ? (
-                              <div className="hf-model-card-progress">
-                                <DownloadProgressBar compact pct={hfPct} meta={hfMeta} />
-                                <div className="hf-model-card-progress-actions">
-                                  <button type="button" className="btn-ghost-sm" onClick={() => void cancelDownloadJob(hfJob.jobId)}>
+                            {selectedModel &&
+                            hfOllamaPullRepoId === selectedModel &&
+                            hfOllamaPullProgress?.message ? (
+                              <div className="hf-detail-download-progress" style={{ marginTop: 12 }}>
+                                <DownloadProgressBar
+                                  compact
+                                  pct={
+                                    hfOllamaPullProgress.percent != null
+                                      ? hfOllamaPullProgress.percent
+                                      : null
+                                  }
+                                  meta={
+                                    hfOllamaPullProgress.percent != null
+                                      ? `${hfOllamaPullProgress.percent}% · ${hfOllamaPullProgress.message}`
+                                      : hfOllamaPullProgress.message
+                                  }
+                                />
+                              </div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <>
+                            <select
+                              className="select"
+                              value={downloadFile}
+                              onChange={(e) => setDownloadFile(e.target.value)}
+                              style={{ marginBottom: 8 }}
+                            >
+                              <option value="">Choose file</option>
+                              {detail.siblings?.map((s) => (
+                                <option key={s.path} value={s.path}>
+                                  {s.path}
+                                </option>
+                              ))}
+                            </select>
+                            <input
+                              className="input"
+                              placeholder="Download folder"
+                              value={destDir}
+                              onChange={(e) => setDestDir(e.target.value)}
+                              style={{ marginBottom: 8 }}
+                            />
+                            <button type="button" className="btn-primary" onClick={() => void startDownload()}>
+                              Download selected file
+                            </button>
+                            {lastJobId && <p className="muted">Last job: {lastJobId}</p>}
+                            {selectedModel && hfDownloadJobs[selectedModel] ? (
+                              <div className="hf-detail-download-progress" style={{ marginTop: 12 }}>
+                                <DownloadProgressBar
+                                  compact
+                                  pct={hfCardProgressPct(hfDownloadJobs[selectedModel])}
+                                  meta={
+                                    hfCardProgressPct(hfDownloadJobs[selectedModel]) != null
+                                      ? hfDownloadJobs[selectedModel].bytesTotal > 0
+                                        ? `${hfDownloadJobs[selectedModel].progress}% · ${formatBytes(hfDownloadJobs[selectedModel].bytesReceived)} / ${formatBytes(hfDownloadJobs[selectedModel].bytesTotal)}`
+                                        : `${hfDownloadJobs[selectedModel].progress}%`
+                                      : 'Starting…'
+                                  }
+                                />
+                                <div className="download-progress-cancel-row">
+                                  <button
+                                    type="button"
+                                    className="btn-ghost-sm"
+                                    onClick={() => void cancelDownloadJob(hfDownloadJobs[selectedModel].jobId)}
+                                  >
                                     Cancel download
                                   </button>
                                 </div>
                               </div>
                             ) : null}
-                            <div className="hf-model-card-footer">
-                              <div className="hf-model-card-footer-info">
-                                <span className="hf-model-card-meta">
-                                  {(m.downloads ?? 0).toLocaleString()} downloads · {m.likes ?? 0} likes
-                                  {typeof m.totalSizeBytes === 'number' && m.totalSizeBytes > 0
-                                    ? ` · ~${formatBytes(m.totalSizeBytes)}`
-                                    : ''}
-                                </span>
-                                <a
-                                  href={huggingFaceModelUrl(m.id)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="hf-model-card-hub-link"
-                                >
-                                  View on Hugging Face
-                                </a>
-                              </div>
-                              <button
-                                type="button"
-                                className="btn-card-download"
-                                disabled={!!hfJob || quickDownloadRepo === m.id}
-                                onClick={() => void quickDownloadFromRepo(m.id)}
-                              >
-                                {hfJob ? 'Downloading…' : quickDownloadRepo === m.id ? 'Preparing…' : 'Download'}
-                              </button>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-                  <div className="drawer-section">
-                    <h3>Selected model — files &amp; folder</h3>
-                    {!detail && <p className="muted">Select a model above to choose a specific file and download folder.</p>}
-                    {detail && (
-                      <>
-                        <p className="muted">{detail.description?.slice(0, 320) ?? '—'}</p>
-                        <p className="muted">Total ~{(detail.totalSizeBytes / 1e9).toFixed(2)} GB (file sum)</p>
-                        {hfHardwareEval ? (
-                          <div
-                            className={`hf-model-fit hf-model-fit--${hfHardwareEval.verdict}`}
-                            role="status"
-                          >
-                            <p className="hf-model-fit-title">This machine vs selected file</p>
-                            <p className="hf-model-fit-headline">{hfHardwareEval.headline}</p>
-                            <ul className="hf-model-fit-notes">
-                              {hfHardwareEval.notes.map((n, i) => (
-                                <li key={i}>{n}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        ) : (
-                          <p className="muted hf-model-fit-loading">Checking this machine…</p>
+                          </>
                         )}
-                        <select className="select" value={downloadFile} onChange={(e) => setDownloadFile(e.target.value)} style={{ marginBottom: 8 }}>
-                          <option value="">Choose file</option>
-                          {detail.siblings?.map((s) => (
-                            <option key={s.path} value={s.path}>
-                              {s.path}
-                            </option>
-                          ))}
-                        </select>
-                        <input className="input" placeholder="Download folder" value={destDir} onChange={(e) => setDestDir(e.target.value)} style={{ marginBottom: 8 }} />
-                        <button type="button" className="btn-primary" onClick={() => void startDownload()}>
-                          Download selected file
-                        </button>
-                        {lastJobId && <p className="muted">Last job: {lastJobId}</p>}
-                        {selectedModel && hfDownloadJobs[selectedModel] ? (
-                          <div className="hf-detail-download-progress" style={{ marginTop: 12 }}>
-                            <DownloadProgressBar
-                              compact
-                              pct={hfCardProgressPct(hfDownloadJobs[selectedModel])}
-                              meta={
-                                hfCardProgressPct(hfDownloadJobs[selectedModel]) != null
-                                  ? hfDownloadJobs[selectedModel].bytesTotal > 0
-                                    ? `${hfDownloadJobs[selectedModel].progress}% · ${formatBytes(hfDownloadJobs[selectedModel].bytesReceived)} / ${formatBytes(hfDownloadJobs[selectedModel].bytesTotal)}`
-                                    : `${hfDownloadJobs[selectedModel].progress}%`
-                                  : 'Starting…'
-                              }
-                            />
-                            <div className="download-progress-cancel-row">
-                              <button
-                                type="button"
-                                className="btn-ghost-sm"
-                                onClick={() => void cancelDownloadJob(hfDownloadJobs[selectedModel].jobId)}
-                              >
-                                Cancel download
-                              </button>
-                            </div>
-                          </div>
-                        ) : null}
                       </>
                     )}
                   </div>
@@ -3830,6 +4409,75 @@ export default function App(): React.ReactElement {
 
               {drawer === 'runtime' && (
                 <>
+                  {personalityModelKey ? (
+                    <div className="drawer-section model-profile-panel" aria-label="Model profile">
+                      <h3 className="settings-section-title">
+                        <i className="fa-solid fa-address-card" aria-hidden />
+                        Model profile
+                      </h3>
+                      <p className="muted model-profile-panel-model" title={personalityModelKey}>
+                        {looksLikeLocalModelFilePath(personalityModelKey)
+                          ? fileNameFromPath(personalityModelKey)
+                          : personalityModelKey}
+                      </p>
+                      <p className="muted model-profile-panel-lead">
+                        Mood shapes the background glow. The journal collects optional first-person notes the model adds
+                        via hidden markers at the end of its replies.
+                      </p>
+                      <div className="model-profile-traits" aria-label="Mood traits">
+                        {MODEL_PROFILE_VIBE_LABELS.map(({ key, label }) => {
+                          const v = modelProfile.vibe[key]
+                          const widthPct = Math.min(
+                            100,
+                            Math.max(0, key === 'hueShift' ? ((v + 1) / 2) * 100 : v * 100)
+                          )
+                          return (
+                            <div key={key} className="model-profile-trait">
+                              <span className="model-profile-trait-label">{label}</span>
+                              <div className="model-profile-trait-track">
+                                <div className="model-profile-trait-fill" style={{ width: `${widthPct}%` }} />
+                              </div>
+                              <span className="model-profile-trait-value">
+                                {key === 'hueShift' ? v.toFixed(2) : `${Math.round(v * 100)}%`}
+                              </span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                      <div className="model-profile-journal-toolbar">
+                        <h4 className="model-profile-journal-title">Journal</h4>
+                        <button
+                          type="button"
+                          className="btn-ghost-sm"
+                          onClick={() => clearModelProfileStorage()}
+                        >
+                          Reset profile
+                        </button>
+                      </div>
+                      {modelProfile.journal.length === 0 ? (
+                        <p className="muted model-profile-journal-empty">No entries yet.</p>
+                      ) : (
+                        <ul className="model-profile-journal-list">
+                          {[...modelProfile.journal]
+                            .slice()
+                            .reverse()
+                            .map((e) => (
+                              <li key={e.id} className="model-profile-journal-item">
+                                <time
+                                  className="model-profile-journal-time"
+                                  dateTime={new Date(e.createdAt).toISOString()}
+                                  title={chatTimeTitle(e.createdAt)}
+                                >
+                                  {formatChatTimestamp(e.createdAt)}
+                                </time>
+                                <p className="model-profile-journal-text">{e.text}</p>
+                              </li>
+                            ))}
+                        </ul>
+                      )}
+                    </div>
+                  ) : null}
+
                   {runtimeOn ? (
                     <div className="runtime-loaded-hero" role="region" aria-label="Loaded model">
                       <div className="runtime-loaded-hero-header">
@@ -3959,6 +4607,46 @@ export default function App(): React.ReactElement {
                         </div>
                       )}
                     </div>
+                    {runtimeKind === 'ollama' &&
+                    ollamaChatTags.length > 0 &&
+                    !ollamaChatTagsLoading &&
+                    !ollamaChatTagsErr ? (
+                      <div className="runtime-model-purge" role="group" aria-label="Remove Ollama models">
+                        <div className="runtime-model-purge-title">Remove models from Ollama</div>
+                        <p className="muted" style={{ margin: '0 0 10px', fontSize: 12 }}>
+                          Checked tags are removed from the Ollama library on disk. Stop the runtime first if a model is
+                          loaded.
+                        </p>
+                        <ul className="runtime-model-purge-list">
+                          {ollamaChatTags.map((tag, i) => (
+                            <li key={tag} className="runtime-model-purge-row">
+                              <input
+                                type="checkbox"
+                                id={`ollama-purge-${i}`}
+                                checked={ollamaDeleteMarks.includes(tag)}
+                                disabled={runtimeStarting || modelPurgeBusy}
+                                onChange={() => toggleOllamaDeleteMark(tag)}
+                              />
+                              <label htmlFor={`ollama-purge-${i}`}>
+                                <code className="inline-code">{tag}</code>
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                        <div className="runtime-model-purge-actions">
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={
+                              runtimeStarting || modelPurgeBusy || ollamaDeleteMarks.length === 0
+                            }
+                            onClick={() => void deleteMarkedOllamaModels()}
+                          >
+                            {modelPurgeBusy ? 'Removing…' : 'Delete selected from Ollama'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                   {runtimeKind === 'llamacpp' && llamaEnv && !llamaEnv.detected && (
                     <div className="runtime-llama-setup-banner" role="status">
                       <p className="runtime-llama-setup-banner-title">llama-server not detected</p>
@@ -4013,6 +4701,46 @@ export default function App(): React.ReactElement {
                           placeholder="Path to llama-server"
                         />
                       </>
+                    ) : null}
+                    {runtimeKind === 'llamacpp' && localModelFilePaths.length > 0 ? (
+                      <div className="runtime-model-purge" role="group" aria-label="Delete local GGUF files">
+                        <div className="runtime-model-purge-title">Delete local .gguf files</div>
+                        <p className="muted" style={{ margin: '0 0 10px', fontSize: 12 }}>
+                          Permanently removes files from the configured models folder. Stop the runtime first if one of
+                          these is loaded.
+                        </p>
+                        <ul className="runtime-model-purge-list">
+                          {localModelFilePaths.map((p, i) => (
+                            <li key={p} className="runtime-model-purge-row">
+                              <input
+                                type="checkbox"
+                                id={`gguf-purge-${i}`}
+                                checked={localGgufDeleteMarks.includes(p)}
+                                disabled={runtimeStarting || modelPurgeBusy}
+                                onChange={() => toggleLocalGgufDeleteMark(p)}
+                              />
+                              <label htmlFor={`gguf-purge-${i}`}>
+                                <code className="inline-code">{fileNameFromPath(p)}</code>
+                                <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
+                                  {p}
+                                </span>
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                        <div className="runtime-model-purge-actions">
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={
+                              runtimeStarting || modelPurgeBusy || localGgufDeleteMarks.length === 0
+                            }
+                            onClick={() => void deleteMarkedLocalGgufs()}
+                          >
+                            {modelPurgeBusy ? 'Deleting…' : 'Delete selected files'}
+                          </button>
+                        </div>
+                      </div>
                     ) : null}
                     <div className="row runtime-load-primary-actions">
                       <button type="button" className="btn-secondary" onClick={() => void refreshRunDrawer()}>
