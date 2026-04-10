@@ -29,12 +29,84 @@ function isGgufFilePath(absPath: string): boolean {
   return /\.gguf$/i.test(absPath)
 }
 
-function modelTagMatchesList(want: string, models: { name: string }[]): boolean {
+export function modelTagMatchesList(want: string, models: { name: string }[]): boolean {
   return models.some((m) => {
     const name = m.name
     const base = name.split(':')[0] ?? ''
     return name === want || name.startsWith(`${want}:`) || base === want
   })
+}
+
+/** Pulls a model into the Ollama library (`POST /api/pull` stream). Does not start the chat runtime. */
+export async function pullOllamaModelStream(
+  baseUrl: string,
+  name: string,
+  report?: (e: RuntimeLoadProgress) => void
+): Promise<void> {
+  const trimmed = name.trim()
+  const url = `${baseUrl.replace(/\/$/, '')}/api/pull`
+  let streamError: string | undefined
+  const { statusCode, errorText } = await httpPostNdjsonStream({
+    url,
+    jsonBody: { model: trimmed, stream: true },
+    timeoutMs: PULL_TIMEOUT_MS,
+    onObject: (obj) => {
+      if (typeof obj.error === 'string' && obj.error.trim()) streamError = obj.error
+      const status = typeof obj.status === 'string' ? obj.status : ''
+      const total = typeof obj.total === 'number' ? obj.total : 0
+      const completed = typeof obj.completed === 'number' ? obj.completed : 0
+      const pct =
+        total > 0 && completed >= 0 ? Math.min(100, Math.round((100 * completed) / total)) : undefined
+      if (status || pct != null) {
+        report?.({
+          phase: 'pull',
+          message: status || `Pulling “${trimmed}”…`,
+          percent: pct
+        })
+      }
+    }
+  })
+  if (statusCode < 200 || statusCode >= 300) {
+    throw new Error(
+      `Ollama could not pull "${trimmed}" (HTTP ${statusCode}). ${errorText?.slice(0, 400) ?? ''}`
+    )
+  }
+  if (streamError) throw new Error(`Ollama pull failed: ${streamError}`)
+}
+
+/** Ensures `modelName` exists in the daemon’s library (no-op if already present). */
+export async function ensureOllamaModelInLibrary(
+  baseUrl: string,
+  modelName: string,
+  report?: (e: RuntimeLoadProgress) => void
+): Promise<void> {
+  const trimmed = modelName.trim()
+  if (!trimmed) throw new Error('Ollama model name is required (for example: llama3.2).')
+
+  const first = await fetchOllamaModelTags(baseUrl)
+  if (first.error) throw new Error(first.error)
+  const models = first.names.map((n) => ({ name: n }))
+  if (modelTagMatchesList(trimmed, models)) {
+    report?.({
+      phase: 'check',
+      message: `Model “${trimmed}” is already in the Ollama library.`,
+      percent: 100
+    })
+    return
+  }
+
+  logLine('info', 'ollama_pull_start', { model: trimmed, hadModels: models.length })
+  await pullOllamaModelStream(baseUrl, trimmed, report)
+
+  const afterProbe = await fetchOllamaModelTags(baseUrl)
+  if (afterProbe.error) throw new Error(afterProbe.error)
+  const after = afterProbe.names.map((n) => ({ name: n }))
+  if (!modelTagMatchesList(trimmed, after)) {
+    throw new Error(
+      `Model "${trimmed}" is still not available after pull (Ollama reports ${after.length} model(s)). Check the model name and disk space, or run: ollama pull ${trimmed}`
+    )
+  }
+  logLine('info', 'ollama_pull_ready', { model: trimmed })
 }
 
 /** True if an Ollama daemon responds at `baseUrl` with HTTP 2xx and JSON including a `models` array. */
@@ -79,6 +151,36 @@ export async function fetchOllamaModelTags(baseUrl: string): Promise<{ names: st
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return { names: [], error: msg }
+  }
+}
+
+/** Remove a model from the Ollama library (`DELETE /api/delete`). */
+export async function deleteOllamaModel(
+  baseUrl: string,
+  model: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const base = baseUrl.replace(/\/$/, '')
+  const trimmed = model.trim()
+  if (!trimmed) return { ok: false, error: 'Model name is required.' }
+  const body = JSON.stringify({ model: trimmed })
+  try {
+    const res = await httpRequestRaw({
+      url: `${base}/api/delete`,
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body,
+      timeoutMs: 300_000
+    })
+    if (res.statusCode >= 200 && res.statusCode < 300) return { ok: true }
+    try {
+      const j = JSON.parse(res.body) as { error?: string }
+      return { ok: false, error: j.error ?? `Ollama returned HTTP ${res.statusCode}.` }
+    } catch {
+      return { ok: false, error: res.body?.trim()?.slice(0, 400) || `HTTP ${res.statusCode}` }
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: msg }
   }
 }
 
@@ -243,61 +345,7 @@ export class OllamaAdapter implements RuntimeAdapter {
 
   /** Confirms the daemon is up and the requested model exists locally (same check as `ollama list`). */
   private async ensureOllamaReady(report?: (e: RuntimeLoadProgress) => void): Promise<void> {
-    try {
-      await this.assertTagsEndpointOk()
-    } catch (e) {
-      throw e
-    }
-
-    const want = this.modelName
-    const models = await this.getModelList()
-    if (modelTagMatchesList(want, models)) {
-      report?.({ phase: 'check', message: `Model “${want}” is already on disk.`, percent: 100 })
-      return
-    }
-
-    logLine('info', 'ollama_pull_start', { model: want, hadModels: models.length })
-    await this.pullModel(want, report)
-
-    const after = await this.getModelList()
-    if (!modelTagMatchesList(want, after)) {
-      throw new Error(
-        `Model "${want}" is still not available after pull (Ollama reports ${after.length} model(s)). Check the model name and disk space, or run: ollama pull ${want}`
-      )
-    }
-    logLine('info', 'ollama_pull_ready', { model: want })
-  }
-
-  /** `POST /api/pull` with `stream: true` so layer download progress can be reported. */
-  private async pullModel(name: string, report?: (e: RuntimeLoadProgress) => void): Promise<void> {
-    const url = `${this.baseUrl}/api/pull`
-    let streamError: string | undefined
-    const { statusCode, errorText } = await httpPostNdjsonStream({
-      url,
-      jsonBody: { model: name, stream: true },
-      timeoutMs: PULL_TIMEOUT_MS,
-      onObject: (obj) => {
-        if (typeof obj.error === 'string' && obj.error.trim()) streamError = obj.error
-        const status = typeof obj.status === 'string' ? obj.status : ''
-        const total = typeof obj.total === 'number' ? obj.total : 0
-        const completed = typeof obj.completed === 'number' ? obj.completed : 0
-        const pct =
-          total > 0 && completed >= 0 ? Math.min(100, Math.round((100 * completed) / total)) : undefined
-        if (status || pct != null) {
-          report?.({
-            phase: 'pull',
-            message: status || `Pulling “${name}”…`,
-            percent: pct
-          })
-        }
-      }
-    })
-    if (statusCode < 200 || statusCode >= 300) {
-      throw new Error(
-        `Ollama could not pull "${name}" (HTTP ${statusCode}). ${errorText?.slice(0, 400) ?? ''}`
-      )
-    }
-    if (streamError) throw new Error(`Ollama pull failed: ${streamError}`)
+    await ensureOllamaModelInLibrary(this.baseUrl, this.modelName, report)
   }
 
   async stop(): Promise<void> {

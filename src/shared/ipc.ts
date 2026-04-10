@@ -38,6 +38,14 @@ export const IPC = {
   RUNTIME_STATUS: 'runtime:status',
   /** Renderer → main: list local Ollama tags from configured base URL. */
   RUNTIME_OLLAMA_TAGS: 'runtime:ollamaTags',
+  /** Pull a model into the Ollama library (does not start the chat runtime). */
+  RUNTIME_OLLAMA_PULL: 'runtime:ollamaPull',
+  /** Main → renderer: progress during `RUNTIME_OLLAMA_PULL`. */
+  OLLAMA_PULL_PROGRESS: 'runtime:ollamaPullProgress',
+  /** Delete one `.gguf` under the configured models directory (must unload if active). */
+  RUNTIME_DELETE_LOCAL_GGUF: 'runtime:deleteLocalGguf',
+  /** Remove one model from the Ollama daemon (`/api/delete`). */
+  RUNTIME_DELETE_OLLAMA_MODEL: 'runtime:deleteOllamaModel',
   RUNTIME_CHAT: 'runtime:chat',
   /** Main → renderer: streamed assistant tokens; correlate with `requestId` from `RUNTIME_CHAT`. */
   RUNTIME_CHAT_PROGRESS: 'runtime:chatProgress',

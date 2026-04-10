@@ -76,6 +76,15 @@ contextBridge.exposeInMainWorld('api', {
   runtimeStop: () => invoke(IPC.RUNTIME_STOP),
   runtimeStatus: () => invoke(IPC.RUNTIME_STATUS),
   ollamaListTags: () => invoke<{ names: string[]; error?: string }>(IPC.RUNTIME_OLLAMA_TAGS),
+  ollamaPullModel: (modelName: string) => invoke<{ ok: true }>(IPC.RUNTIME_OLLAMA_PULL, modelName),
+  onOllamaPullProgress: (callback: (payload: RuntimeLoadProgress) => void) => {
+    const channel = IPC.OLLAMA_PULL_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: RuntimeLoadProgress) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
+  deleteLocalGgufModel: (absolutePath: string) => invoke<{ ok: true }>(IPC.RUNTIME_DELETE_LOCAL_GGUF, absolutePath),
+  deleteOllamaModel: (modelName: string) => invoke<{ ok: true }>(IPC.RUNTIME_DELETE_OLLAMA_MODEL, modelName),
   runtimeChat: (messages: { role: string; content: string }[], requestId: string) =>
     invoke(IPC.RUNTIME_CHAT, { messages, requestId }),
   conversationsList: () => invoke(IPC.CONVERSATIONS_LIST),

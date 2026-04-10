@@ -18,6 +18,11 @@ export interface HfModelSummary {
   description?: string
   /** Sum of file sizes from the Hub file tree when listing succeeds (~download footprint). */
   totalSizeBytes?: number
+  /**
+   * When set, installing from the library in Ollama mode runs `ollama pull` for this tag
+   * (see curated Hub ↔ registry map in the main process).
+   */
+  ollamaLibraryName?: string
 }
 
 export interface HfModelDetail extends HfModelSummary {

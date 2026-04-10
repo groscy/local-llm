@@ -5,6 +5,17 @@ import { logLine } from '../logger'
 
 const CACHE_TTL_MS = 1000 * 60 * 30
 
+/** Ollama registry tags for known Hub GGUF repos (library install when backend is Ollama). */
+const HF_REPO_OLLAMA_LIBRARY: Record<string, string> = {
+  'meta-llama/Meta-Llama-3.1-8B-Instruct-GGUF': 'llama3.1:8b',
+  'bartowski/Llama-3.2-3B-Instruct-GGUF': 'llama3.2:3b',
+  'google/gemma-2-2b-it-GGUF': 'gemma2:2b',
+  'Qwen/Qwen2.5-1.5B-Instruct-GGUF': 'qwen2.5:1.5b',
+  'Qwen/Qwen2.5-3B-Instruct-GGUF': 'qwen2.5:3b',
+  'microsoft/Phi-3-mini-4k-instruct-gguf': 'phi3:mini',
+  'TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF': 'tinyllama'
+}
+
 function entryToSummary(e: ModelEntry): HfModelSummary {
   return {
     id: e.name,
@@ -160,10 +171,12 @@ async function enrichSummariesForHubCards(
           fetchSummaryDescription(s.id, cred),
           fetchRepoTotalSizeBytes(s.id, cred)
         ])
+        const ollamaLibraryName = HF_REPO_OLLAMA_LIBRARY[s.id]
         return {
           ...s,
           ...(description ? { description } : {}),
-          ...(totalSizeBytes > 0 ? { totalSizeBytes } : {})
+          ...(totalSizeBytes > 0 ? { totalSizeBytes } : {}),
+          ...(ollamaLibraryName ? { ollamaLibraryName } : {})
         }
       })
     )
@@ -182,7 +195,9 @@ export async function hfModelDetail(
     | { payload: string; fetched_at: number }
     | undefined
   if (cached && now - cached.fetched_at < CACHE_TTL_MS) {
-    return JSON.parse(cached.payload) as HfModelDetail
+    const parsed = JSON.parse(cached.payload) as HfModelDetail
+    const mapped = HF_REPO_OLLAMA_LIBRARY[repoId]
+    return { ...parsed, ...(mapped ? { ollamaLibraryName: mapped } : {}) }
   }
 
   const info = await modelInfo({
@@ -211,6 +226,8 @@ export async function hfModelDetail(
   const card = 'cardData' in info ? (info as { cardData?: { license?: string; description?: string } }).cardData : undefined
   const totalSizeBytes = siblings.reduce((a, s) => a + (s.size ?? 0), 0)
 
+  const ollamaLibraryName = HF_REPO_OLLAMA_LIBRARY[repoId]
+
   const detail: HfModelDetail = {
     id: info.name,
     author: 'author' in info ? (info as { author?: string }).author : undefined,
@@ -224,7 +241,8 @@ export async function hfModelDetail(
     siblings,
     totalSizeBytes,
     license: card?.license,
-    sha: 'sha' in info ? (info as { sha?: string }).sha : undefined
+    sha: 'sha' in info ? (info as { sha?: string }).sha : undefined,
+    ...(ollamaLibraryName ? { ollamaLibraryName } : {})
   }
 
   db.prepare(

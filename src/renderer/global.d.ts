@@ -92,6 +92,14 @@ type Api = {
   runtimeStop: () => Promise<RuntimeStatus>
   runtimeStatus: () => Promise<RuntimeStatus>
   ollamaListTags: () => Promise<{ names: string[]; error?: string }>
+  /** Pull a model into the Ollama library at the configured base URL (does not start the runtime). */
+  ollamaPullModel: (modelName: string) => Promise<{ ok: true }>
+  /** Progress events during `ollamaPullModel`; returns unsubscribe. */
+  onOllamaPullProgress: (callback: (payload: RuntimeLoadProgress) => void) => () => void
+  /** Permanently delete one `.gguf` under the configured models directory (unload first if it is loaded). */
+  deleteLocalGgufModel: (absolutePath: string) => Promise<{ ok: true }>
+  /** Remove one model from the Ollama library. Unload first if it is the active model. */
+  deleteOllamaModel: (modelName: string) => Promise<{ ok: true }>
   runtimeChat: (messages: { role: string; content: string }[], requestId: string) => Promise<string>
   conversationsList: () => Promise<unknown[]>
   conversationCreate: (title?: string) => Promise<unknown>

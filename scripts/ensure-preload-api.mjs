@@ -14,13 +14,18 @@ function needsRebuild() {
   if (!existsSync(preloadCjs)) return true
   try {
     const s = readFileSync(preloadCjs, 'utf8')
-    return !s.includes('ollamaListTags') || !s.includes('runtime:ollamaTags')
+    return (
+      !s.includes('ollamaListTags') ||
+      !s.includes('runtime:ollamaTags') ||
+      !s.includes('ollamaPullModel') ||
+      !s.includes('runtime:ollamaPull')
+    )
   } catch {
     return true
   }
 }
 
 if (needsRebuild()) {
-  console.warn('[ensure-preload-api] Preload is missing ollamaListTags; running electron-vite build…')
+  console.warn('[ensure-preload-api] Preload is missing expected runtime/HF APIs; running electron-vite build…')
   execSync('npx electron-vite build', { cwd: root, stdio: 'inherit', shell: true })
 }

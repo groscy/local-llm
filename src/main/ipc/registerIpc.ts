@@ -1,10 +1,11 @@
 import { ipcMain, dialog, safeStorage, BrowserWindow, shell } from 'electron'
 import { randomUUID } from 'crypto'
-import { basename, join } from 'path'
-import { existsSync, mkdirSync } from 'fs'
+import { basename, join, resolve } from 'path'
+import { existsSync, mkdirSync, unlinkSync } from 'fs'
 import type Store from 'electron-store'
 import { z } from 'zod'
 import type Database from 'better-sqlite3'
+import type { RuntimeLoadProgress } from '@shared/types'
 import { is } from '@electron-toolkit/utils'
 import { IPC } from '@shared/ipc'
 import { hfSearch, hfModelDetail, hfRecommended } from '../services/hfService'
@@ -18,7 +19,12 @@ import {
 } from '../services/downloadManager'
 import { createRuntime, type RuntimeAdapter } from '../services/runtime'
 import { installOllamaForPlatform } from '../services/ollamaInstaller'
-import { fetchOllamaModelTags, probeOllamaReachable } from '../services/runtime/ollamaAdapter'
+import {
+  deleteOllamaModel,
+  ensureOllamaModelInLibrary,
+  fetchOllamaModelTags,
+  probeOllamaReachable
+} from '../services/runtime/ollamaAdapter'
 import * as chatService from '../services/chatService'
 import { recordChatRoundtripMs } from '../services/chatLatencyStats'
 import * as kbService from '../services/kbService'
@@ -75,6 +81,18 @@ export interface IpcContext {
   setHfToken: (t: string | undefined) => void
   getRuntime: () => RuntimeAdapter | null
   setRuntime: (r: RuntimeAdapter | null) => void
+}
+
+function ollamaTagConflictsWithLoaded(loaded: string, toDelete: string): boolean {
+  const a = loaded.trim()
+  const b = toDelete.trim()
+  if (!a || !b) return false
+  if (a === b) return true
+  const baseA = a.split(':')[0] ?? ''
+  const baseB = b.split(':')[0] ?? ''
+  if (baseA !== '' && baseA === baseB) return true
+  if (a.startsWith(`${b}:`) || b.startsWith(`${a}:`)) return true
+  return false
 }
 
 export function registerIpc(ctx: IpcContext): void {
@@ -267,6 +285,63 @@ export function registerIpc(ctx: IpcContext): void {
     const raw = (store.get('ollamaBaseUrl') as string | undefined)?.trim()
     const ollamaBase = raw || 'http://127.0.0.1:11434'
     return fetchOllamaModelTags(ollamaBase)
+  })
+
+  ipcMain.handle(IPC.RUNTIME_OLLAMA_PULL, async (event, raw: unknown) => {
+    const name = typeof raw === 'string' ? raw.trim() : ''
+    if (!name || name.length > 256) throw new Error('Model name must be 1–256 characters.')
+    const ollamaBase = (store.get('ollamaBaseUrl') as string | undefined)?.trim() || 'http://127.0.0.1:11434'
+    const send = (p: RuntimeLoadProgress): void => {
+      event.sender.send(IPC.OLLAMA_PULL_PROGRESS, p)
+    }
+    await ensureOllamaModelInLibrary(ollamaBase, name, send)
+    return { ok: true as const }
+  })
+
+  ipcMain.handle(IPC.RUNTIME_DELETE_LOCAL_GGUF, async (_e, raw: unknown) => {
+    const parsed = z.string().min(1).safeParse(raw)
+    if (!parsed.success) throw new Error('File path required.')
+    const abs = resolve(parsed.data.replace(/^file:\/\//i, ''))
+    const root = resolve(modelsDir())
+    const norm = (s: string): string => s.replace(/\\/g, '/').toLowerCase()
+    const absN = norm(abs)
+    const rootN = norm(root)
+    if (absN !== rootN && !absN.startsWith(`${rootN}/`)) {
+      throw new Error('That file is outside your configured models folder.')
+    }
+    if (!/\.gguf$/i.test(abs)) throw new Error('Only .gguf files can be deleted here.')
+    if (!existsSync(abs)) throw new Error('File not found (it may already be deleted).')
+    const rt = getRuntime()
+    const st = rt?.getStatus()
+    if (st?.running && st.kind === 'llamacpp' && st.modelPath?.trim()) {
+      const loadedRes = resolve(st.modelPath.trim().replace(/^file:\/\//i, ''))
+      if (norm(loadedRes) === absN) {
+        throw new Error('Unload this model before deleting its file.')
+      }
+    }
+    unlinkSync(abs)
+    logLine('info', 'deleted_local_gguf', { path: abs })
+    return { ok: true as const }
+  })
+
+  ipcMain.handle(IPC.RUNTIME_DELETE_OLLAMA_MODEL, async (_e, raw: unknown) => {
+    const parsed = z.string().min(1).max(512).safeParse(raw)
+    if (!parsed.success) throw new Error('Model name required.')
+    const name = parsed.data.trim()
+    const rawBase = (store.get('ollamaBaseUrl') as string | undefined)?.trim()
+    const ollamaBase = rawBase || 'http://127.0.0.1:11434'
+    const rt = getRuntime()
+    const st = rt?.getStatus()
+    if (st?.running && st.kind === 'ollama' && st.modelPath?.trim()) {
+      const loaded = st.modelPath.trim()
+      if (ollamaTagConflictsWithLoaded(loaded, name)) {
+        throw new Error('Unload this model before deleting it from Ollama.')
+      }
+    }
+    const r = await deleteOllamaModel(ollamaBase, name)
+    if (!r.ok) throw new Error(r.error)
+    logLine('info', 'deleted_ollama_model', { model: name })
+    return { ok: true as const }
   })
 
   ipcMain.handle(IPC.RUNTIME_INSTALL_PATH, async () => {
