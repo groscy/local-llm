@@ -5,12 +5,13 @@
  * - build/icon.ico, build/icon.icns, build/icon.png (512, Linux)
  * - build/icons/icon-{16..1024}.png
  * - src/renderer/public/app-icon.png (256, window icon)
+ * - website/assets/app-icon.png (copy for static site favicon / brand)
  *
  * Source: src/renderer/public/app-icon.source.png if present, else app-icon.png.
  * On first run from app-icon.png only, copies original to app-icon.source.png.
  */
 import { createRequire } from 'node:module'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
@@ -138,6 +139,10 @@ async function main() {
   writeFileSync(join(buildDir, 'icon.png'), bySize[512])
   writeFileSync(sourceFallback, bySize[256])
 
+  const websiteIconPath = join(root, 'website', 'assets', 'app-icon.png')
+  mkdirSync(dirname(websiteIconPath), { recursive: true })
+  copyFileSync(sourceFallback, websiteIconPath)
+
   png2icons.clearCache()
   const icns = png2icons.createICNS(bySize[1024], png2icons.BICUBIC, 0)
   if (!icns) {
@@ -156,6 +161,7 @@ async function main() {
   console.log('Wrote build/icon.ico, build/icon.icns, build/icon.png (512)')
   console.log(`Wrote build/icons/icon-<size>.png for sizes: ${SIZES.join(', ')}`)
   console.log('Wrote src/renderer/public/app-icon.png (256, transparent, contained)')
+  console.log('Wrote website/assets/app-icon.png (favicon / nav brand)')
 }
 
 main().catch((e) => {

@@ -8,6 +8,8 @@
       name="description"
       content="Desktop app for local inference with Hugging Face hub, Ollama and llama.cpp, knowledge wiki, and optional LoRA training."
     />
+    <link rel="icon" type="image/png" href="assets/app-icon.png" />
+    <link rel="apple-touch-icon" href="assets/app-icon.png" />
     <link rel="stylesheet" href="css/site.css" />
   </head>
   <body>
@@ -16,12 +18,13 @@
     <div class="wrap">
       <header class="site-nav">
         <a class="brand" href="index.html">
-          <span class="brand-mark" aria-hidden="true"></span>
+          <img class="brand-mark" src="assets/app-icon.png" width="36" height="36" alt="" />
           <span>Local LLM Desktop</span>
         </a>
         <nav class="nav-links" aria-label="Primary">
           <a href="documentation.html">Documentation</a>
           <a href="download.html">Download</a>
+          <a href="download.html#tooling">Tooling</a>
           <a href="license.html">License</a>
           <a class="nav-cta" href="download.html">Get the app</a>
         </nav>
@@ -40,6 +43,11 @@
             <a class="btn btn-primary" href="download.html">Download</a>
             <a class="btn btn-ghost" href="documentation.html">Read the docs</a>
           </div>
+          <ul class="hero-platforms" aria-label="Supported desktop platforms">
+            <li><span class="platform-pill"><strong>Windows</strong> 10/11 · x64</span></li>
+            <li><span class="platform-pill"><strong>macOS</strong> Intel &amp; Apple silicon</span></li>
+            <li><span class="platform-pill"><strong>Linux</strong> x64</span></li>
+          </ul>
         </section>
 
         <section class="showcase" aria-labelledby="showcase-heading">
@@ -59,30 +67,36 @@
 
           <div class="shots">
             <figure class="shot-card">
-              <img
-                src="assets/screenshot-models.svg"
-                width="1200"
-                height="720"
-                alt="Concept preview: model library drawer with search and model cards."
-              />
+              <div class="showcase-frame">
+                <img
+                  src="assets/screenshot-models.svg"
+                  width="1200"
+                  height="720"
+                  alt="Concept preview: model library drawer with search and model cards."
+                />
+              </div>
               <figcaption>Model library — Hub, filters, and install flows.</figcaption>
             </figure>
             <figure class="shot-card">
-              <img
-                src="assets/screenshot-wiki.svg"
-                width="1200"
-                height="720"
-                alt="Concept preview: wiki article view with topic list and knowledge graph panel."
-              />
+              <div class="showcase-frame">
+                <img
+                  src="assets/screenshot-wiki.svg"
+                  width="1200"
+                  height="720"
+                  alt="Concept preview: wiki article view with topic list and knowledge graph panel."
+                />
+              </div>
               <figcaption>Wiki &amp; graph — RAG-backed pages and topic links.</figcaption>
             </figure>
             <figure class="shot-card">
-              <img
-                src="assets/screenshot-chat.svg"
-                width="1200"
-                height="720"
-                alt="Concept preview: same chat workspace emphasizing layout."
-              />
+              <div class="showcase-frame">
+                <img
+                  src="assets/screenshot-chat.svg"
+                  width="1200"
+                  height="720"
+                  alt="Concept preview: same chat workspace emphasizing layout."
+                />
+              </div>
               <figcaption>Unified shell — nav, runtime controls, and side tools.</figcaption>
             </figure>
           </div>
