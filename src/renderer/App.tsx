@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -116,6 +117,16 @@ function applyColorSchemeToDocument(id: ColorSchemeId): void {
 
 type MainView = 'chat' | 'wiki'
 type ToolDrawer = 'hf' | 'runtime' | 'train' | 'metrics' | 'settings' | null
+
+type SettingsNavId =
+  | 'general'
+  | 'appearance'
+  | 'chat'
+  | 'runtime'
+  | 'integrations'
+  | 'widgets'
+  | 'data'
+  | 'maintenance'
 type HfLibraryMode = 'recommended' | 'search'
 type HfModelSortKey = 'downloads' | 'likes' | 'size'
 type PinnedWidgetsSide = 'left' | 'right' | 'top' | 'bottom'
@@ -126,6 +137,7 @@ const LS_SLIDE_CONV_W = 'slideConvWidthPx'
 const LS_SLIDE_KB_W = 'slideKbWidthPx'
 const LS_SLIDE_CONV_EDGE = 'slideConvEdge'
 const LS_SLIDE_KB_EDGE = 'slideKbEdge'
+const LS_KB_CHAT_COLLAPSED = 'kbChatPanelCollapsed'
 const SLIDE_CONV_MIN = 220
 const SLIDE_CONV_DEFAULT = 300
 const SLIDE_KB_MIN = 240
@@ -140,6 +152,15 @@ function readSlideWidthPx(key: string, fallback: number): number {
     return Number.isFinite(n) ? n : fallback
   } catch {
     return fallback
+  }
+}
+
+function readKbChatCollapsed(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    return localStorage.getItem(LS_KB_CHAT_COLLAPSED) === '1'
+  } catch {
+    return false
   }
 }
 
@@ -201,6 +222,44 @@ const INTEGRATION_PORT_DEFAULT = 17373
 function clampIntegrationPort(n: number): number {
   if (!Number.isFinite(n)) return INTEGRATION_PORT_DEFAULT
   return Math.min(65535, Math.max(1024, Math.floor(n)))
+}
+
+const OLLAMA_BASE_DEFAULT = 'http://127.0.0.1:11434'
+const LLAMA_PORT_DEFAULT = 8080
+
+function clampLlamaPort(n: number): number {
+  if (!Number.isFinite(n)) return LLAMA_PORT_DEFAULT
+  return Math.min(65535, Math.max(1024, Math.floor(n)))
+}
+
+const SETTINGS_NAV_ITEMS: { id: SettingsNavId; label: string; icon: string }[] = [
+  { id: 'general', label: 'General', icon: 'fa-sliders' },
+  { id: 'appearance', label: 'Appearance', icon: 'fa-palette' },
+  { id: 'chat', label: 'Chat & knowledge', icon: 'fa-comments' },
+  { id: 'runtime', label: 'Runtime & backends', icon: 'fa-microchip' },
+  { id: 'integrations', label: 'Integrations', icon: 'fa-plug' },
+  { id: 'widgets', label: 'Widgets & metrics', icon: 'fa-gauge-high' },
+  { id: 'data', label: 'Files & paths', icon: 'fa-hard-drive' },
+  { id: 'maintenance', label: 'Maintenance', icon: 'fa-triangle-exclamation' }
+]
+
+function settingsPluginKindLabel(kind: PluginIntegrationReport['kind']): string {
+  switch (kind) {
+    case 'chat_completed':
+      return 'IDE chat'
+    case 'chat_failed':
+      return 'IDE chat failed'
+    case 'apply_completed':
+      return 'IDE apply'
+    case 'apply_failed':
+      return 'IDE apply failed'
+    case 'apply_cancelled':
+      return 'IDE apply cancelled'
+    case 'send_cancelled':
+      return 'IDE send cancelled'
+    default:
+      return kind
+  }
 }
 
 function pinnedWidgetsAsideStyle(
@@ -378,6 +437,61 @@ function ollamaRegistryTagInstalled(tags: readonly string[], want: string): bool
     const base = name.split(':')[0] ?? ''
     return name === w || name.startsWith(`${w}:`) || base === w
   })
+}
+
+/** Ollama library entry that matches a Hub preset tag (for delete / display). */
+function ollamaInstalledTagMatch(tags: readonly string[], preset: string): string | undefined {
+  const w = preset.trim()
+  if (!w) return undefined
+  return tags.find((name) => {
+    const base = name.split(':')[0] ?? ''
+    return name === w || name.startsWith(`${w}:`) || base === w
+  })
+}
+
+const HF_HUB_PAGE_SIZE = 12
+
+function hfSummaryFormatLabel(m: HfModelSummary): string {
+  const tags = m.tags ?? []
+  if (tags.some((t) => t.toLowerCase() === 'gguf')) return 'GGUF'
+  if (/gguf/i.test(m.id)) return 'GGUF'
+  if (tags.length > 0) return tags.slice(0, 4).join(', ')
+  if (m.pipeline_tag?.trim()) return m.pipeline_tag.trim()
+  return '—'
+}
+
+function hfSummarySizeDisplay(m: HfModelSummary): string {
+  const b = m.totalSizeBytes
+  return b != null && b > 0 ? `~${formatBytes(b)}` : '—'
+}
+
+function hfInstalledSizeDisplay(
+  m: HfModelSummary,
+  runtimeKind: 'ollama' | 'llamacpp',
+  localDownloads: readonly DownloadRow[]
+): string {
+  if (runtimeKind === 'llamacpp') {
+    const rows = localDownloads.filter((r) => r.repo_id === m.id && r.status === 'complete')
+    const sum = rows.reduce((acc, r) => acc + (Number(r.bytes_total) || 0), 0)
+    if (sum > 0) return formatBytes(sum)
+  }
+  return hfSummarySizeDisplay(m)
+}
+
+/** Bytes for column sort: installed + llama.cpp uses summed completed download sizes when present. */
+function hfSizeBytesForTableSort(
+  m: HfModelSummary,
+  runtimeKind: 'ollama' | 'llamacpp',
+  localDownloads: readonly DownloadRow[],
+  installedList: boolean
+): number {
+  if (installedList && runtimeKind === 'llamacpp') {
+    const rows = localDownloads.filter((r) => r.repo_id === m.id && r.status === 'complete')
+    const sum = rows.reduce((acc, r) => acc + (Number(r.bytes_total) || 0), 0)
+    if (sum > 0) return sum
+  }
+  const b = m.totalSizeBytes
+  return b != null && b > 0 ? b : -1
 }
 
 /** Hugging Face model id (or custom label) saved on download; shown as chat author when that file is loaded. */
@@ -792,6 +906,17 @@ export default function App(): React.ReactElement {
   const [hfFilterMinDownloads, setHfFilterMinDownloads] = useState('')
   const [hfFilterMaxSizeGb, setHfFilterMaxSizeGb] = useState('')
   const [quickDownloadRepo, setQuickDownloadRepo] = useState<string | null>(null)
+  const [hfInstalledListPage, setHfInstalledListPage] = useState(1)
+  const [hfAvailableListPage, setHfAvailableListPage] = useState(1)
+  const [hfInstalledColSort, setHfInstalledColSort] = useState<{
+    col: 'name' | 'size'
+    dir: 'asc' | 'desc'
+  }>({ col: 'name', dir: 'asc' })
+  const [hfAvailableColSort, setHfAvailableColSort] = useState<{
+    col: 'name' | 'size' | 'format' | 'likes'
+    dir: 'asc' | 'desc'
+  }>({ col: 'likes', dir: 'desc' })
+  const [hfHubDeleteRepoBusy, setHfHubDeleteRepoBusy] = useState<string | null>(null)
   const [hfOllamaPullRepoId, setHfOllamaPullRepoId] = useState<string | null>(null)
   const [hfOllamaPullBusy, setHfOllamaPullBusy] = useState(false)
   const [hfOllamaPullProgress, setHfOllamaPullProgress] = useState<RuntimeLoadProgress | null>(null)
@@ -815,6 +940,9 @@ export default function App(): React.ReactElement {
   const [settingsConfirmKind, setSettingsConfirmKind] = useState<null | 'caches' | 'models' | 'factory'>(
     null
   )
+  const [settingsNav, setSettingsNav] = useState<SettingsNavId>('general')
+  const [ollamaBaseUrlDraft, setOllamaBaseUrlDraft] = useState(OLLAMA_BASE_DEFAULT)
+  const [llamaPortDraft, setLlamaPortDraft] = useState(String(LLAMA_PORT_DEFAULT))
   const [hfDownloadJobs, setHfDownloadJobs] = useState<Record<string, HfCardDownloadState>>({})
   const hfDownloadJobsRef = useRef(hfDownloadJobs)
   hfDownloadJobsRef.current = hfDownloadJobs
@@ -836,6 +964,7 @@ export default function App(): React.ReactElement {
     readSlideEdge(LS_SLIDE_CONV_EDGE, 'left')
   )
   const [slideKbEdge, setSlideKbEdge] = useState<SlidePanelEdge>(() => readSlideEdge(LS_SLIDE_KB_EDGE, 'right'))
+  const [kbChatPanelCollapsed, setKbChatPanelCollapsed] = useState(readKbChatCollapsed)
   const [slidePanelResizing, setSlidePanelResizing] = useState<null | 'conv' | 'kb'>(null)
   const [pinnedBarResizing, setPinnedBarResizing] = useState(false)
   const convWRef = useRef(slideConvWidthPx)
@@ -1229,6 +1358,25 @@ export default function App(): React.ReactElement {
     await refreshLocalModelFiles()
   }, [refreshRunDrawerQuick, refreshLocalModelFiles])
 
+  const openSettings = useCallback((section: SettingsNavId = 'general') => {
+    setSettingsNav(section)
+    setDrawer('settings')
+  }, [])
+
+  const applyRuntimeKindSetting = useCallback(
+    async (kind: 'ollama' | 'llamacpp') => {
+      setRuntimeKind(kind)
+      await window.api.setConfig({ runtimeKind: kind })
+      void refreshRunDrawerQuick()
+    },
+    [refreshRunDrawerQuick]
+  )
+
+  const saveLlamaBinaryFromSettings = useCallback(async () => {
+    await window.api.setConfig({ llamaBinaryPath: llamaBin.trim() })
+    void refreshRunDrawerQuick()
+  }, [llamaBin, refreshRunDrawerQuick])
+
   const refreshOllamaChatTags = useCallback(async () => {
     setOllamaChatTagsLoading(true)
     setOllamaChatTagsErr(null)
@@ -1566,6 +1714,17 @@ export default function App(): React.ReactElement {
         setIntegrationPortDraft(String(clampIntegrationPort(c.integrationPort)))
       }
       if (typeof c.integrationToken === 'string') setIntegrationTokenDraft(c.integrationToken)
+      if (c.runtimeKind === 'ollama' || c.runtimeKind === 'llamacpp') setRuntimeKind(c.runtimeKind)
+      if (typeof c.ollamaBaseUrl === 'string' && c.ollamaBaseUrl.trim()) {
+        setOllamaBaseUrlDraft(c.ollamaBaseUrl.trim())
+      } else {
+        setOllamaBaseUrlDraft(OLLAMA_BASE_DEFAULT)
+      }
+      if (typeof c.llamaPort === 'number') {
+        setLlamaPortDraft(String(clampLlamaPort(c.llamaPort)))
+      } else {
+        setLlamaPortDraft(String(LLAMA_PORT_DEFAULT))
+      }
     })
   }, [refreshPaths, loadConversations, loadWiki, refreshRuntimeStatus, applyRuntimeInstallPaths])
 
@@ -2095,6 +2254,85 @@ export default function App(): React.ReactElement {
     )
   }, [hfDisplayModels, runtimeKind, ollamaChatTags, localDownloads])
 
+  const hfHubInstalledModelsSorted = useMemo(() => {
+    const rows = hfHubInstalledModels.slice()
+    const { col, dir } = hfInstalledColSort
+    const sign = dir === 'asc' ? 1 : -1
+    rows.sort((a, b) => {
+      const tie = a.id.localeCompare(b.id)
+      if (col === 'name') {
+        const c = a.id.localeCompare(b.id)
+        if (c !== 0) return sign * c
+        return tie
+      }
+      const sa = hfSizeBytesForTableSort(a, runtimeKind, localDownloads, true)
+      const sb = hfSizeBytesForTableSort(b, runtimeKind, localDownloads, true)
+      if (sa !== sb) return sign * (sa - sb)
+      return tie
+    })
+    return rows
+  }, [hfHubInstalledModels, hfInstalledColSort, runtimeKind, localDownloads])
+
+  const hfHubAvailableModelsSorted = useMemo(() => {
+    const rows = hfHubAvailableModels.slice()
+    const { col, dir } = hfAvailableColSort
+    const sign = dir === 'asc' ? 1 : -1
+    rows.sort((a, b) => {
+      const tie = a.id.localeCompare(b.id)
+      if (col === 'name') {
+        const c = a.id.localeCompare(b.id)
+        if (c !== 0) return sign * c
+        return tie
+      }
+      if (col === 'size') {
+        const sa = hfSizeBytesForTableSort(a, runtimeKind, localDownloads, false)
+        const sb = hfSizeBytesForTableSort(b, runtimeKind, localDownloads, false)
+        if (sa !== sb) return sign * (sa - sb)
+        return tie
+      }
+      if (col === 'format') {
+        const c = hfSummaryFormatLabel(a).localeCompare(hfSummaryFormatLabel(b))
+        if (c !== 0) return sign * c
+        return tie
+      }
+      const la = a.likes ?? 0
+      const lb = b.likes ?? 0
+      if (la !== lb) return sign * (la - lb)
+      return tie
+    })
+    return rows
+  }, [hfHubAvailableModels, hfAvailableColSort, runtimeKind, localDownloads])
+
+  const toggleHfInstalledColSort = useCallback((col: 'name' | 'size') => {
+    setHfInstalledColSort((prev) =>
+      prev.col === col ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: 'asc' }
+    )
+    setHfInstalledListPage(1)
+  }, [])
+
+  const toggleHfAvailableColSort = useCallback((col: 'name' | 'size' | 'format' | 'likes') => {
+    const defaultDir = col === 'likes' ? 'desc' : 'asc'
+    setHfAvailableColSort((prev) =>
+      prev.col === col ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { col, dir: defaultDir }
+    )
+    setHfAvailableListPage(1)
+  }, [])
+
+  useEffect(() => {
+    setHfInstalledListPage(1)
+    setHfAvailableListPage(1)
+  }, [runtimeKind, hfLibraryMode])
+
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(hfHubInstalledModels.length / HF_HUB_PAGE_SIZE))
+    setHfInstalledListPage((p) => (p > tp ? tp : p))
+  }, [hfHubInstalledModels.length])
+
+  useEffect(() => {
+    const tp = Math.max(1, Math.ceil(hfHubAvailableModels.length / HF_HUB_PAGE_SIZE))
+    setHfAvailableListPage((p) => (p > tp ? tp : p))
+  }, [hfHubAvailableModels.length])
+
   const hfFiltersActive =
     hfFilterMinLikes.trim() !== '' || hfFilterMinDownloads.trim() !== '' || hfFilterMaxSizeGb.trim() !== ''
 
@@ -2102,6 +2340,8 @@ export default function App(): React.ReactElement {
     setHfFilterMinLikes('')
     setHfFilterMinDownloads('')
     setHfFilterMaxSizeGb('')
+    setHfInstalledListPage(1)
+    setHfAvailableListPage(1)
   }
 
   function backToRecommendations(): void {
@@ -2111,6 +2351,10 @@ export default function App(): React.ReactElement {
     setSelectedModel(null)
     setDetail(null)
     setOllamaHubPullNameDraft('')
+    setHfInstalledListPage(1)
+    setHfAvailableListPage(1)
+    setHfInstalledColSort({ col: 'name', dir: 'asc' })
+    setHfAvailableColSort({ col: 'likes', dir: 'desc' })
   }
 
   async function runHfSearch(): Promise<void> {
@@ -2120,6 +2364,8 @@ export default function App(): React.ReactElement {
     setSelectedModel(null)
     setDetail(null)
     setOllamaHubPullNameDraft('')
+    setHfInstalledColSort({ col: 'name', dir: 'asc' })
+    setHfAvailableColSort({ col: 'likes', dir: 'desc' })
     try {
       const r = await window.api.hfSearch(hfQuery, 40)
       setHfResults(r as HfModelSummary[])
@@ -2128,6 +2374,8 @@ export default function App(): React.ReactElement {
       setHfResults([])
     } finally {
       setHfSearchLoading(false)
+      setHfInstalledListPage(1)
+      setHfAvailableListPage(1)
     }
   }
 
@@ -2182,6 +2430,7 @@ export default function App(): React.ReactElement {
       if (gguf) setDownloadFile(gguf.path)
     } catch (e) {
       setErr(String(e))
+      setDetail(null)
     }
   }
 
@@ -2224,7 +2473,7 @@ export default function App(): React.ReactElement {
     const tag = summary.ollamaLibraryName?.trim()
     if (!tag) {
       setErr(
-        'No preset Ollama tag for this Hub entry. Select the card and type a model name under “Selected model”, or switch the top bar to llama.cpp to download the .gguf file.'
+        'No preset Ollama tag for this Hub entry. Select the row and type a model name under “Selected model”, or switch the top bar to llama.cpp to download the .gguf file.'
       )
       return
     }
@@ -2269,7 +2518,129 @@ export default function App(): React.ReactElement {
     }
   }
 
-  const renderHfHubCard = (m: HfModelSummary): ReactElement => {
+  async function deleteInstalledHubModel(m: HfModelSummary): Promise<void> {
+    if (hfHubDeleteRepoBusy) return
+    setErr(null)
+    if (runtimeKind === 'ollama') {
+      const preset = m.ollamaLibraryName?.trim() ?? ''
+      const tag = ollamaInstalledTagMatch(ollamaChatTags, preset) ?? preset
+      if (!tag) {
+        setErr('Could not resolve an Ollama model name to remove.')
+        return
+      }
+      if (
+        !window.confirm(
+          `Remove “${tag}” from your Ollama library?\n\nThis frees disk space in Ollama’s store.`
+        )
+      )
+        return
+      setHfHubDeleteRepoBusy(m.id)
+      try {
+        await window.api.deleteOllamaModel(tag)
+        try {
+          localStorage.removeItem(profileStorageKey(tag))
+        } catch {
+          /* ignore */
+        }
+        const curTrim = modelPath.trim()
+        if (curTrim === tag) setModelPath('')
+        if (selectedModel === m.id) {
+          setSelectedModel(null)
+          setDetail(null)
+        }
+        await refreshOllamaChatTags()
+        void refreshRunDrawerQuick()
+      } catch (e) {
+        setErr(String(e))
+      } finally {
+        setHfHubDeleteRepoBusy(null)
+      }
+      return
+    }
+    const rows = localDownloads.filter((r) => r.repo_id === m.id && r.status === 'complete')
+    if (rows.length === 0) {
+      setErr('No finished download found for this model.')
+      return
+    }
+    const lines = rows.map((r) => fileNameFromPath(r.local_path)).join('\n')
+    if (
+      !window.confirm(
+        `Permanently delete ${rows.length === 1 ? 'this file' : 'these files'}?\n\n${lines}\n\nThis cannot be undone.`
+      )
+    )
+      return
+    setHfHubDeleteRepoBusy(m.id)
+    try {
+      for (const r of rows) {
+        await window.api.deleteLocalGgufModel(r.local_path)
+        try {
+          localStorage.removeItem(profileStorageKey(r.local_path))
+        } catch {
+          /* ignore */
+        }
+      }
+      const curTrim = modelPath.trim()
+      if (rows.some((r) => localModelPathsEqual(r.local_path, curTrim, winPlatform))) {
+        setModelPath('')
+      }
+      if (selectedModel === m.id) {
+        setSelectedModel(null)
+        setDetail(null)
+      }
+      await refreshLocalModelFiles()
+      void refreshDownloadsList()
+      void refreshRunDrawerQuick()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setHfHubDeleteRepoBusy(null)
+    }
+  }
+
+  function onHubLibraryRowActivate(m: HfModelSummary): void {
+    if (selectedModel === m.id) {
+      setSelectedModel(null)
+      setDetail(null)
+      return
+    }
+    void loadDetail(m.id)
+  }
+
+  const renderHfHubExpandedDetailRow = (m: HfModelSummary, colSpan: number): ReactElement | null => {
+    if (selectedModel !== m.id) return null
+    const detailReady = detail?.id === m.id
+    let descBlock: ReactElement
+    if (!detailReady) {
+      descBlock = m.description?.trim() ? (
+        <p className="hf-model-table-expand-desc">{m.description.trim()}</p>
+      ) : (
+        <p className="muted">Loading description…</p>
+      )
+    } else if (detail.description?.trim()) {
+      descBlock = <p className="hf-model-table-expand-desc">{detail.description.trim()}</p>
+    } else {
+      descBlock = <p className="muted">No description on the model card.</p>
+    }
+    return (
+      <tr className="hf-model-table-row hf-model-table-row--expanded">
+        <td colSpan={colSpan}>
+          <div className="hf-model-table-expand-inner">
+            {descBlock}
+            <a
+              href={huggingFaceModelUrl(m.id)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hf-model-table-expand-hub"
+            >
+              View on Hugging Face
+            </a>
+          </div>
+        </td>
+      </tr>
+    )
+  }
+
+  const renderHfHubRowBlocks = (m: HfModelSummary): ReactElement => {
     const hfJob = hfDownloadJobs[m.id]
     const hfPct = hfJob ? hfCardProgressPct(hfJob) : null
     const hfMeta = hfJob
@@ -2293,71 +2664,358 @@ export default function App(): React.ReactElement {
     const installBusy =
       !!hfJob || quickDownloadRepo === m.id || (runtimeKind === 'ollama' && hfOllamaPullBusy)
     const quickOllamaBlocked = runtimeKind === 'ollama' && !m.ollamaLibraryName?.trim()
+    const showProgress = ollamaPullHere || !!hfJob
 
     return (
-      <div key={m.id} className={`hf-model-card ${selectedModel === m.id ? 'selected' : ''}`}>
-        <button type="button" className="hf-model-card-main" onClick={() => void loadDetail(m.id)}>
-          <div className="hf-model-card-title">{m.id}</div>
-          {m.description ? <p className="hf-model-card-desc">{m.description}</p> : null}
-          {m.ollamaLibraryName ? (
-            <p className="muted hf-model-card-ollama-hint" style={{ marginTop: 8, fontSize: 12 }}>
-              Ollama tag: <code className="inline-code">{m.ollamaLibraryName}</code>
-            </p>
-          ) : null}
-        </button>
-        {ollamaPullHere ? (
-          <div className="hf-model-card-progress">
-            <DownloadProgressBar compact pct={oPullPct} meta={oPullMeta} />
-          </div>
-        ) : hfJob ? (
-          <div className="hf-model-card-progress">
-            <DownloadProgressBar compact pct={hfPct} meta={hfMeta} />
-            <div className="hf-model-card-progress-actions">
-              <button type="button" className="btn-ghost-sm" onClick={() => void cancelDownloadJob(hfJob.jobId)}>
-                Cancel download
-              </button>
-            </div>
-          </div>
-        ) : null}
-        <div className="hf-model-card-footer">
-          <div className="hf-model-card-footer-info">
-            <span className="hf-model-card-meta">
-              {(m.downloads ?? 0).toLocaleString()} downloads · {m.likes ?? 0} likes
-              {typeof m.totalSizeBytes === 'number' && m.totalSizeBytes > 0
-                ? ` · ~${formatBytes(m.totalSizeBytes)}`
-                : ''}
-            </span>
+      <Fragment key={m.id}>
+        <tr
+          className={
+            selectedModel === m.id
+              ? 'hf-model-table-row hf-model-table-row--selected hf-model-table-row--activable'
+              : 'hf-model-table-row hf-model-table-row--activable'
+          }
+          aria-expanded={selectedModel === m.id}
+          onClick={() => onHubLibraryRowActivate(m)}
+        >
+          <td>
+            <button
+              type="button"
+              className="hf-model-table-name-btn"
+              onClick={(e) => {
+                e.stopPropagation()
+                onHubLibraryRowActivate(m)
+              }}
+              title={m.description?.trim() || m.id}
+            >
+              <span className="hf-model-table-name">{m.id}</span>
+            </button>
+            {m.ollamaLibraryName ? (
+              <div className="muted hf-model-table-ollama-tag">
+                <code className="inline-code">{m.ollamaLibraryName}</code>
+              </div>
+            ) : null}
+          </td>
+          <td className="hf-model-table-mono">{hfSummarySizeDisplay(m)}</td>
+          <td className="hf-model-table-format">{hfSummaryFormatLabel(m)}</td>
+          <td className="hf-model-table-num">{(m.likes ?? 0).toLocaleString()}</td>
+          <td className="hf-model-table-actions">
             <a
               href={huggingFaceModelUrl(m.id)}
               target="_blank"
               rel="noopener noreferrer"
-              className="hf-model-card-hub-link"
+              className="hf-model-table-hub-link"
+              onClick={(e) => e.stopPropagation()}
             >
-              View on Hugging Face
+              Hub
             </a>
-          </div>
-          <button
-            type="button"
-            className="btn-card-download"
-            disabled={installBusy || quickOllamaBlocked}
-            title={
-              quickOllamaBlocked
-                ? 'Open this card and enter an Ollama model name, or use llama.cpp to download the file.'
-                : undefined
-            }
-            onClick={() => void hubQuickInstall(m.id)}
-          >
-            {hfJob
-              ? 'Downloading…'
-              : ollamaPullHere
-                ? 'Pulling…'
-                : quickDownloadRepo === m.id
-                  ? 'Preparing…'
-                  : runtimeKind === 'ollama'
-                    ? 'Pull'
-                    : 'Download'}
-          </button>
+            <button
+              type="button"
+              className="btn-card-download hf-model-table-install"
+              disabled={installBusy || quickOllamaBlocked}
+              title={
+                quickOllamaBlocked
+                  ? 'Select the row and enter an Ollama model name below, or use llama.cpp to download the file.'
+                  : undefined
+              }
+              onClick={(e) => {
+                e.stopPropagation()
+                void hubQuickInstall(m.id)
+              }}
+            >
+              {hfJob
+                ? 'Downloading…'
+                : ollamaPullHere
+                  ? 'Pulling…'
+                  : quickDownloadRepo === m.id
+                    ? 'Preparing…'
+                    : runtimeKind === 'ollama'
+                      ? 'Pull'
+                      : 'Download'}
+            </button>
+          </td>
+        </tr>
+        {renderHfHubExpandedDetailRow(m, 5)}
+        {showProgress ? (
+          <tr className="hf-model-table-row hf-model-table-row--progress">
+            <td colSpan={5}>
+              <div className="hf-model-table-progress-inner">
+                {ollamaPullHere ? (
+                  <DownloadProgressBar compact pct={oPullPct} meta={oPullMeta} />
+                ) : hfJob ? (
+                  <>
+                    <DownloadProgressBar compact pct={hfPct} meta={hfMeta} />
+                    <button
+                      type="button"
+                      className="btn-ghost-sm hf-model-table-cancel-dl"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void cancelDownloadJob(hfJob.jobId)
+                      }}
+                    >
+                      Cancel download
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            </td>
+          </tr>
+        ) : null}
+      </Fragment>
+    )
+  }
+
+  const renderHfHubPaginatedTable = (
+    models: HfModelSummary[],
+    page: number,
+    setPage: (n: number) => void,
+    caption: string,
+    colSort: {
+      col: 'name' | 'size' | 'format' | 'likes'
+      dir: 'asc' | 'desc'
+      onCol: (c: 'name' | 'size' | 'format' | 'likes') => void
+    }
+  ): ReactElement => {
+    const totalPages = Math.max(1, Math.ceil(models.length / HF_HUB_PAGE_SIZE))
+    const pageSafe = Math.min(Math.max(1, page), totalPages)
+    const start = (pageSafe - 1) * HF_HUB_PAGE_SIZE
+    const slice = models.slice(start, start + HF_HUB_PAGE_SIZE)
+    const from = models.length === 0 ? 0 : start + 1
+    const to = start + slice.length
+
+    const ariaFor = (c: 'name' | 'size' | 'format' | 'likes'): 'none' | 'ascending' | 'descending' =>
+      colSort.col === c ? (colSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'
+
+    return (
+      <div className="hf-model-table-block">
+        <div className="hf-model-table-scroll">
+          <table className="hf-model-table" aria-label={caption}>
+            <thead>
+              <tr>
+                <th scope="col" aria-sort={ariaFor('name')}>
+                  <button
+                    type="button"
+                    className="hf-model-table-th-btn"
+                    onClick={() => colSort.onCol('name')}
+                  >
+                    Model
+                    {colSort.col === 'name' ? (
+                      <span className="hf-model-table-sort-cue" aria-hidden>
+                        {colSort.dir === 'asc' ? ' ▲' : ' ▼'}
+                      </span>
+                    ) : null}
+                  </button>
+                </th>
+                <th scope="col" aria-sort={ariaFor('size')}>
+                  <button
+                    type="button"
+                    className="hf-model-table-th-btn"
+                    onClick={() => colSort.onCol('size')}
+                  >
+                    Size
+                    {colSort.col === 'size' ? (
+                      <span className="hf-model-table-sort-cue" aria-hidden>
+                        {colSort.dir === 'asc' ? ' ▲' : ' ▼'}
+                      </span>
+                    ) : null}
+                  </button>
+                </th>
+                <th scope="col" aria-sort={ariaFor('format')}>
+                  <button
+                    type="button"
+                    className="hf-model-table-th-btn"
+                    onClick={() => colSort.onCol('format')}
+                  >
+                    Format
+                    {colSort.col === 'format' ? (
+                      <span className="hf-model-table-sort-cue" aria-hidden>
+                        {colSort.dir === 'asc' ? ' ▲' : ' ▼'}
+                      </span>
+                    ) : null}
+                  </button>
+                </th>
+                <th scope="col" aria-sort={ariaFor('likes')}>
+                  <button
+                    type="button"
+                    className="hf-model-table-th-btn"
+                    onClick={() => colSort.onCol('likes')}
+                  >
+                    Likes
+                    {colSort.col === 'likes' ? (
+                      <span className="hf-model-table-sort-cue" aria-hidden>
+                        {colSort.dir === 'asc' ? ' ▲' : ' ▼'}
+                      </span>
+                    ) : null}
+                  </button>
+                </th>
+                <th scope="col">
+                  <span className="visually-hidden">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>{slice.map((m) => renderHfHubRowBlocks(m))}</tbody>
+          </table>
         </div>
+        {models.length > 0 ? (
+          <div className="hf-model-table-pagination" role="navigation" aria-label={`Pagination, ${caption}`}>
+            <button
+              type="button"
+              className="btn-secondary hf-model-table-page-btn"
+              disabled={pageSafe <= 1}
+              onClick={() => setPage(pageSafe - 1)}
+            >
+              Previous
+            </button>
+            <span className="hf-model-table-page-meta muted">
+              Page {pageSafe} of {totalPages} · {from}–{to} of {models.length}
+            </span>
+            <button
+              type="button"
+              className="btn-secondary hf-model-table-page-btn"
+              disabled={pageSafe >= totalPages}
+              onClick={() => setPage(pageSafe + 1)}
+            >
+              Next
+            </button>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  const renderHfHubInstalledPaginatedTable = (
+    models: HfModelSummary[],
+    page: number,
+    setPage: (n: number) => void,
+    caption: string,
+    colSort: {
+      col: 'name' | 'size'
+      dir: 'asc' | 'desc'
+      onCol: (c: 'name' | 'size') => void
+    }
+  ): ReactElement => {
+    const totalPages = Math.max(1, Math.ceil(models.length / HF_HUB_PAGE_SIZE))
+    const pageSafe = Math.min(Math.max(1, page), totalPages)
+    const start = (pageSafe - 1) * HF_HUB_PAGE_SIZE
+    const slice = models.slice(start, start + HF_HUB_PAGE_SIZE)
+    const from = models.length === 0 ? 0 : start + 1
+    const to = start + slice.length
+
+    const ariaFor = (c: 'name' | 'size'): 'none' | 'ascending' | 'descending' =>
+      colSort.col === c ? (colSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'
+
+    return (
+      <div className="hf-model-table-block">
+        <div className="hf-model-table-scroll hf-model-table-scroll--installed">
+          <table className="hf-model-table hf-model-table--installed" aria-label={caption}>
+            <thead>
+              <tr>
+                <th scope="col" aria-sort={ariaFor('name')}>
+                  <button
+                    type="button"
+                    className="hf-model-table-th-btn"
+                    onClick={() => colSort.onCol('name')}
+                  >
+                    Model
+                    {colSort.col === 'name' ? (
+                      <span className="hf-model-table-sort-cue" aria-hidden>
+                        {colSort.dir === 'asc' ? ' ▲' : ' ▼'}
+                      </span>
+                    ) : null}
+                  </button>
+                </th>
+                <th scope="col" aria-sort={ariaFor('size')}>
+                  <button
+                    type="button"
+                    className="hf-model-table-th-btn"
+                    onClick={() => colSort.onCol('size')}
+                  >
+                    Size
+                    {colSort.col === 'size' ? (
+                      <span className="hf-model-table-sort-cue" aria-hidden>
+                        {colSort.dir === 'asc' ? ' ▲' : ' ▼'}
+                      </span>
+                    ) : null}
+                  </button>
+                </th>
+                <th scope="col">Delete</th>
+              </tr>
+            </thead>
+            <tbody>
+              {slice.map((m) => (
+                <Fragment key={m.id}>
+                  <tr
+                    className={
+                      selectedModel === m.id
+                        ? 'hf-model-table-row hf-model-table-row--selected hf-model-table-row--activable'
+                        : 'hf-model-table-row hf-model-table-row--activable'
+                    }
+                    aria-expanded={selectedModel === m.id}
+                    onClick={() => onHubLibraryRowActivate(m)}
+                  >
+                    <td>
+                      <button
+                        type="button"
+                        className="hf-model-table-name-btn"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onHubLibraryRowActivate(m)
+                        }}
+                        title={m.description?.trim() || m.id}
+                      >
+                        <span className="hf-model-table-name">{m.id}</span>
+                      </button>
+                      {m.ollamaLibraryName ? (
+                        <div className="muted hf-model-table-ollama-tag">
+                          <code className="inline-code">{m.ollamaLibraryName}</code>
+                        </div>
+                      ) : null}
+                    </td>
+                    <td className="hf-model-table-mono">
+                      {hfInstalledSizeDisplay(m, runtimeKind, localDownloads)}
+                    </td>
+                    <td className="hf-model-table-actions hf-model-table-actions--delete">
+                      <button
+                        type="button"
+                        className="btn-danger hf-model-table-delete"
+                        disabled={hfHubDeleteRepoBusy !== null}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void deleteInstalledHubModel(m)
+                        }}
+                      >
+                        {hfHubDeleteRepoBusy === m.id ? 'Removing…' : 'Delete'}
+                      </button>
+                    </td>
+                  </tr>
+                  {renderHfHubExpandedDetailRow(m, 3)}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {models.length > 0 ? (
+          <div className="hf-model-table-pagination" role="navigation" aria-label={`Pagination, ${caption}`}>
+            <button
+              type="button"
+              className="btn-secondary hf-model-table-page-btn"
+              disabled={pageSafe <= 1}
+              onClick={() => setPage(pageSafe - 1)}
+            >
+              Previous
+            </button>
+            <span className="hf-model-table-page-meta muted">
+              Page {pageSafe} of {totalPages} · {from}–{to} of {models.length}
+            </span>
+            <button
+              type="button"
+              className="btn-secondary hf-model-table-page-btn"
+              disabled={pageSafe >= totalPages}
+              onClick={() => setPage(pageSafe + 1)}
+            >
+              Next
+            </button>
+          </div>
+        ) : null}
       </div>
     )
   }
@@ -2755,9 +3413,7 @@ export default function App(): React.ReactElement {
   }, [runtimeStatus, localDownloads, paths?.platform])
   const topTitle = mainView === 'chat' ? 'Chat' : 'Knowledge wiki'
   const topSub =
-    mainView === 'chat'
-      ? 'Ground replies with your wiki from the right panel.'
-      : 'Browse sources built from files you ingest. Link snippets in chat.'
+    mainView === 'chat' ? '' : 'Browse sources built from files you ingest. Link snippets in chat.'
 
   const wikiSearchTrimmed = wikiSearchQuery.trim()
   const wikiHasSearch = wikiSearchTrimmed.length > 0
@@ -2877,27 +3533,83 @@ export default function App(): React.ReactElement {
             <IconActivity />
             Stats
           </button>
-          <button type="button" className="nav-btn" onClick={() => setDrawer('settings')} title="Settings">
+          <button type="button" className="nav-btn" onClick={() => openSettings('general')} title="Settings">
             <IconGear />
-            More
+            Settings
           </button>
         </nav>
       </aside>
 
       <div className={`shell-content shell-content--pinned-${pinnedWidgetsSide}`}>
-        {(metricsPinned || downloadsPinned || activityPinned) && (
-          <aside
-            className={`pinned-widgets-aside ${pinnedBarResizing ? 'pinned-widgets-aside--resizing' : ''}`}
-            aria-label="Pinned widgets"
-            style={pinnedWidgetsAsideStyle(
-              narrowSlideConv,
-              pinnedWidgetsSide,
-              pinnedWidgetsWidthPx,
-              pinnedWidgetsHeightPx
-            )}
-          >
-            <div className="pinned-widgets-aside-header">
+        <aside
+          className={`pinned-widgets-aside ${pinnedBarResizing ? 'pinned-widgets-aside--resizing' : ''}`}
+          aria-label="Pinned widgets"
+          style={pinnedWidgetsAsideStyle(
+            narrowSlideConv,
+            pinnedWidgetsSide,
+            pinnedWidgetsWidthPx,
+            pinnedWidgetsHeightPx
+          )}
+        >
+          <div className="pinned-widgets-aside-header">
+            <div className="pinned-widgets-aside-header-row pinned-widgets-aside-header-row--title">
               <span className="pinned-widgets-aside-title">Pinned widgets</span>
+            </div>
+            <div className="pinned-widgets-aside-header-row pinned-widgets-aside-header-row--controls">
+              <div className="pinned-widgets-pin-group" role="group" aria-label="Pin widgets to this panel">
+                <button
+                  type="button"
+                  className={`pinned-widgets-pin ${metricsPinned ? 'active' : ''}`}
+                  title={metricsPinned ? 'Unpin metrics' : 'Pin live metrics here'}
+                  aria-label={metricsPinned ? 'Unpin metrics' : 'Pin live metrics to this panel'}
+                  aria-pressed={metricsPinned}
+                  onClick={() => {
+                    const next = !metricsPinned
+                    setMetricsPinned(next)
+                    void saveMetricsWidgetConfig({ metricsPinned: next })
+                  }}
+                >
+                  <span className="pinned-widgets-pin-icon" aria-hidden>
+                    <i className="fa-solid fa-chart-line" />
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`pinned-widgets-pin ${downloadsPinned ? 'active' : ''}`}
+                  title={downloadsPinned ? 'Unpin downloads' : 'Pin Hub download progress here'}
+                  aria-label={downloadsPinned ? 'Unpin downloads' : 'Pin download progress to this panel'}
+                  aria-pressed={downloadsPinned}
+                  onClick={() => {
+                    const next = !downloadsPinned
+                    setDownloadsPinned(next)
+                    void saveMetricsWidgetConfig({ downloadsPinned: next })
+                  }}
+                >
+                  <span className="pinned-widgets-pin-icon" aria-hidden>
+                    <i className="fa-solid fa-download" />
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`pinned-widgets-pin ${activityPinned ? 'active' : ''}`}
+                  title={
+                    activityPinned ? 'Unpin activity' : 'Pin model load and reply progress here'
+                  }
+                  aria-label={
+                    activityPinned ? 'Unpin activity' : 'Pin model load and reply progress to this panel'
+                  }
+                  aria-pressed={activityPinned}
+                  onClick={() => {
+                    const next = !activityPinned
+                    setActivityPinned(next)
+                    void saveMetricsWidgetConfig({ activityPinned: next })
+                  }}
+                >
+                  <span className="pinned-widgets-pin-icon" aria-hidden>
+                    <i className="fa-solid fa-bolt" />
+                  </span>
+                </button>
+              </div>
               <div className="pinned-widgets-dock-symbols" role="group" aria-label="Widget bar position">
                 {(
                   [
@@ -2924,54 +3636,60 @@ export default function App(): React.ReactElement {
                 ))}
               </div>
             </div>
-            <div className="pinned-widgets-aside-body">
-              {metricsPinned && (
-                <MetricsPinnedWidget
-                  snapshot={widgetSnap}
-                  series={widgetSeries}
-                  refreshMs={metricsRefreshMs}
-                  runtimeOn={runtimeOn}
-                  onUnpin={() => {
-                    setMetricsPinned(false)
-                    void saveMetricsWidgetConfig({ metricsPinned: false })
-                  }}
-                  onOpenStats={() => setDrawer('metrics')}
-                />
-              )}
-              {downloadsPinned && (
-                <DownloadsPinnedWidget
-                  downloads={pinnedDownloadsSnapshot}
-                  onUnpin={() => {
-                    setDownloadsPinned(false)
-                    void saveMetricsWidgetConfig({ downloadsPinned: false })
-                  }}
-                  onOpenRun={() => setDrawer('runtime')}
-                  onCancelJob={cancelDownloadJob}
-                />
-              )}
-              {activityPinned && (
-                <ActivityPinnedWidget
-                  modelLoad={
-                    runtimeStarting
-                      ? (runtimeLoadProgress ?? { phase: 'starting', message: 'Starting runtime…' })
-                      : null
-                  }
-                  chatSending={chatSending}
-                  chatTokens={activityChatTokens}
-                  tokenHistory={activityTokenHistory}
-                  runtimeOn={runtimeOn}
-                  pluginReports={integrationPluginReports}
-                  onUnpin={() => {
-                    setActivityPinned(false)
-                    void saveMetricsWidgetConfig({ activityPinned: false })
-                  }}
-                  onOpenChat={() => {
-                    setMainView('chat')
-                    setMobileConvOpen(false)
-                    setMobileKbOpen(false)
-                  }}
-                />
-              )}
+          </div>
+          <div
+            className={`pinned-widgets-aside-body ${!metricsPinned && !downloadsPinned && !activityPinned ? 'pinned-widgets-aside-body--empty' : ''}`}
+          >
+            {!metricsPinned && !downloadsPinned && !activityPinned ? (
+              <p className="pinned-widgets-aside-empty muted">Pin metrics, downloads, or activity using the buttons above.</p>
+            ) : null}
+            {metricsPinned && (
+              <MetricsPinnedWidget
+                snapshot={widgetSnap}
+                series={widgetSeries}
+                refreshMs={metricsRefreshMs}
+                runtimeOn={runtimeOn}
+                onUnpin={() => {
+                  setMetricsPinned(false)
+                  void saveMetricsWidgetConfig({ metricsPinned: false })
+                }}
+                onOpenStats={() => setDrawer('metrics')}
+              />
+            )}
+            {downloadsPinned && (
+              <DownloadsPinnedWidget
+                downloads={pinnedDownloadsSnapshot}
+                onUnpin={() => {
+                  setDownloadsPinned(false)
+                  void saveMetricsWidgetConfig({ downloadsPinned: false })
+                }}
+                onOpenRun={() => setDrawer('runtime')}
+                onCancelJob={cancelDownloadJob}
+              />
+            )}
+            {activityPinned && (
+              <ActivityPinnedWidget
+                modelLoad={
+                  runtimeStarting
+                    ? (runtimeLoadProgress ?? { phase: 'starting', message: 'Starting runtime…' })
+                    : null
+                }
+                chatSending={chatSending}
+                chatTokens={activityChatTokens}
+                tokenHistory={activityTokenHistory}
+                runtimeOn={runtimeOn}
+                pluginReports={integrationPluginReports}
+                onUnpin={() => {
+                  setActivityPinned(false)
+                  void saveMetricsWidgetConfig({ activityPinned: false })
+                }}
+                onOpenChat={() => {
+                  setMainView('chat')
+                  setMobileConvOpen(false)
+                  setMobileKbOpen(false)
+                }}
+              />
+            )}
             </div>
             <div
               role="separator"
@@ -3002,12 +3720,11 @@ export default function App(): React.ReactElement {
               }}
             />
           </aside>
-        )}
         <div className="main-column">
         <header className="top-bar">
           <div className="top-bar-leading">
             <div className="top-bar-title">{topTitle}</div>
-            <div className="top-bar-sub">{topSub}</div>
+            {topSub ? <div className="top-bar-sub">{topSub}</div> : null}
           </div>
           <div className="top-bar-runtime-wrap" aria-label="Model and runtime">
             <div className="top-bar-runtime-row">
@@ -3071,25 +3788,32 @@ export default function App(): React.ReactElement {
                       )
                     })}
               </select>
-              {runtimeOn ? (
-                <button
-                  type="button"
-                  className="btn-secondary top-bar-runtime-action"
-                  disabled={runtimeStarting}
-                  onClick={() => void stopRuntime()}
-                >
-                  Unload
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="btn-primary top-bar-runtime-action"
-                  disabled={runtimeStarting || !modelPath.trim()}
-                  onClick={() => void startRuntime()}
-                >
-                  {runtimeStarting ? 'Starting…' : 'Start'}
-                </button>
-              )}
+              <button
+                type="button"
+                className={`top-bar-runtime-playstop ${runtimeOn ? 'btn-secondary' : 'btn-primary'}`}
+                disabled={!runtimeOn && (runtimeStarting || !modelPath.trim())}
+                title={
+                  runtimeOn
+                    ? 'Stop runtime'
+                    : runtimeStarting
+                      ? 'Starting…'
+                      : !modelPath.trim()
+                        ? 'Choose a model first'
+                        : 'Start runtime'
+                }
+                aria-label={
+                  runtimeOn
+                    ? 'Stop runtime'
+                    : runtimeStarting
+                      ? 'Starting runtime'
+                      : !modelPath.trim()
+                        ? 'Start runtime (choose a model first)'
+                        : 'Start runtime'
+                }
+                onClick={() => (runtimeOn ? void stopRuntime() : void startRuntime())}
+              >
+                <i className={`fa-solid ${runtimeOn ? 'fa-stop' : 'fa-play'}`} aria-hidden />
+              </button>
             </div>
             {runtimeStarting ? (
               <div className="top-bar-runtime-progress-wrap" role="status" aria-live="polite">
@@ -3136,75 +3860,29 @@ export default function App(): React.ReactElement {
                 </button>
               </>
             )}
-            <div className="top-bar-pin-group" role="group" aria-label="Pin widgets to sidebar">
-              <button
-                type="button"
-                className={`top-bar-pin ${metricsPinned ? 'active' : ''}`}
-                title={metricsPinned ? 'Unpin metrics from sidebar' : 'Pin live metrics to Pinned widgets panel'}
-                aria-label={metricsPinned ? 'Unpin metrics from sidebar' : 'Pin live metrics to Pinned widgets panel'}
-                aria-pressed={metricsPinned}
-                onClick={() => {
-                  const next = !metricsPinned
-                  setMetricsPinned(next)
-                  void saveMetricsWidgetConfig({ metricsPinned: next })
-                }}
-              >
-                <span className="top-bar-pin-icon" aria-hidden>
-                  <i className="fa-solid fa-chart-line" />
-                </span>
-              </button>
-              <button
-                type="button"
-                className={`top-bar-pin ${downloadsPinned ? 'active' : ''}`}
-                title={downloadsPinned ? 'Unpin downloads from sidebar' : 'Pin download progress to Pinned widgets panel'}
-                aria-label={downloadsPinned ? 'Unpin downloads from sidebar' : 'Pin download progress to Pinned widgets panel'}
-                aria-pressed={downloadsPinned}
-                onClick={() => {
-                  const next = !downloadsPinned
-                  setDownloadsPinned(next)
-                  void saveMetricsWidgetConfig({ downloadsPinned: next })
-                }}
-              >
-                <span className="top-bar-pin-icon" aria-hidden>
-                  <i className="fa-solid fa-download" />
-                </span>
-              </button>
-              <button
-                type="button"
-                className={`top-bar-pin ${activityPinned ? 'active' : ''}`}
-                title={
-                  activityPinned
-                    ? 'Unpin activity from sidebar'
-                    : 'Pin model load & reply progress to Pinned widgets panel'
-                }
-                aria-label={
-                  activityPinned
-                    ? 'Unpin activity from sidebar'
-                    : 'Pin model load and reply progress to Pinned widgets panel'
-                }
-                aria-pressed={activityPinned}
-                onClick={() => {
-                  const next = !activityPinned
-                  setActivityPinned(next)
-                  void saveMetricsWidgetConfig({ activityPinned: next })
-                }}
-              >
-                <span className="top-bar-pin-icon" aria-hidden>
-                  <i className="fa-solid fa-bolt" />
-                </span>
-              </button>
-            </div>
             <div
               className="runtime-pill"
-              title={runtimeOn ? 'Runtime details (Run panel)' : 'Runtime setup: top bar to start, Run for more options'}
+              title={
+                runtimeOn
+                  ? 'Runtime running — open Run panel'
+                  : 'Runtime off — open Run panel to start'
+              }
+              aria-label={
+                runtimeOn
+                  ? 'Runtime running. Open Run panel for details.'
+                  : 'Runtime off. Open Run panel to start.'
+              }
               onClick={() => setDrawer('runtime')}
-              style={{ cursor: 'pointer' }}
               role="button"
               tabIndex={0}
-              onKeyDown={(e) => e.key === 'Enter' && setDrawer('runtime')}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  setDrawer('runtime')
+                }
+              }}
             >
-              <span className={`runtime-pill-dot ${runtimeOn ? 'on' : ''}`} />
-              {runtimeOn ? 'Runtime on' : 'Runtime off'}
+              <span className={`runtime-pill-dot ${runtimeOn ? 'on' : ''}`} aria-hidden />
             </div>
           </div>
         </header>
@@ -3334,6 +4012,7 @@ export default function App(): React.ReactElement {
               className="chat-layout"
               data-slide-conv-edge={slideConvEdge}
               data-slide-kb-edge={slideKbEdge}
+              data-kb-panel-collapsed={!narrowSlideKb && kbChatPanelCollapsed ? 'true' : undefined}
               style={
                 {
                   ['--slide-conv-width' as string]: `${slideConvWidthPx}px`,
@@ -3688,8 +4367,10 @@ export default function App(): React.ReactElement {
               </section>
 
               <aside
+                id="kb-sidebar-panel"
                 className={`kb-sidebar ${mobileKbOpen ? 'kb-sidebar--open' : ''} ${slidePanelResizing === 'kb' ? 'slide-panel--resizing' : ''}`}
                 aria-label="Knowledge snippets"
+                aria-hidden={!narrowSlideKb && kbChatPanelCollapsed ? true : undefined}
               >
                 {narrowSlideKb && mobileKbOpen && slideKbEdge === 'right' ? (
                   <div
@@ -3710,14 +4391,35 @@ export default function App(): React.ReactElement {
                 <div className="kb-sidebar-header">
                   <div className="kb-sidebar-header-row">
                     <h3>Knowledge</h3>
-                    <button
-                      type="button"
-                      className="kb-sidebar-close btn-ghost-sm"
-                      aria-label="Close knowledge panel"
-                      onClick={() => setMobileKbOpen(false)}
-                    >
-                      Done
-                    </button>
+                    {narrowSlideKb ? (
+                      <button
+                        type="button"
+                        className="kb-sidebar-close btn-ghost-sm"
+                        aria-label="Close knowledge panel"
+                        onClick={() => setMobileKbOpen(false)}
+                      >
+                        Done
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="kb-sidebar-collapse btn-ghost-sm"
+                        aria-expanded={!kbChatPanelCollapsed}
+                        aria-controls="kb-sidebar-panel"
+                        title="Collapse knowledge panel"
+                        onClick={() => {
+                          setKbChatPanelCollapsed(true)
+                          try {
+                            localStorage.setItem(LS_KB_CHAT_COLLAPSED, '1')
+                          } catch {
+                            /* ignore */
+                          }
+                        }}
+                      >
+                        <i className="fa-solid fa-chevron-right" aria-hidden />
+                        <span className="visually-hidden">Collapse knowledge panel</span>
+                      </button>
+                    )}
                   </div>
                   <p>Pull matches from your wiki into the next message. Open Wiki to add documents.</p>
                 </div>
@@ -3747,6 +4449,27 @@ export default function App(): React.ReactElement {
                   />
                 ) : null}
               </aside>
+              {!narrowSlideKb && kbChatPanelCollapsed ? (
+                <button
+                  type="button"
+                  className="kb-sidebar-reopen"
+                  aria-expanded={false}
+                  aria-controls="kb-sidebar-panel"
+                  aria-label="Show knowledge panel"
+                  title="Show knowledge panel"
+                  onClick={() => {
+                    setKbChatPanelCollapsed(false)
+                    try {
+                      localStorage.setItem(LS_KB_CHAT_COLLAPSED, '0')
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                >
+                  <i className="fa-solid fa-book" aria-hidden />
+                  <span className="kb-sidebar-reopen-text">Knowledge</span>
+                </button>
+              ) : null}
             </div>
           )}
 
@@ -4049,10 +4772,16 @@ export default function App(): React.ReactElement {
       {drawer && (
         <>
           <div className="drawer-backdrop" role="presentation" onClick={() => setDrawer(null)} />
-          <div className="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+          <div className="drawer-modal-root">
+            <div
+              className={`drawer${drawer === 'settings' ? ' drawer--settings' : ''}`}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="drawer-title"
+            >
             <div className="drawer-header">
               <h2 id="drawer-title">
-                {drawer === 'hf' && 'Model library'}
+                {drawer === 'hf' && 'Models'}
                 {drawer === 'runtime' && 'Inference runtime'}
                 {drawer === 'train' && 'Training'}
                 {drawer === 'metrics' && 'Metrics'}
@@ -4060,6 +4789,9 @@ export default function App(): React.ReactElement {
                   <>
                     <i className="fa-solid fa-gear" aria-hidden style={{ marginRight: 10, opacity: 0.88 }} />
                     Settings
+                    <span className="drawer-title-sub muted" style={{ marginLeft: 10, fontWeight: 500, fontSize: 13 }}>
+                      · {SETTINGS_NAV_ITEMS.find((x) => x.id === settingsNav)?.label ?? ''}
+                    </span>
                   </>
                 )}
               </h2>
@@ -4071,7 +4803,6 @@ export default function App(): React.ReactElement {
               {drawer === 'hf' && (
                 <>
                   <div className="drawer-section">
-                    <h3>Search Hugging Face</h3>
                     <div className="row">
                       <input
                         className="input"
@@ -4088,45 +4819,28 @@ export default function App(): React.ReactElement {
                   <div className="drawer-section hf-library-section">
                     <div className="hf-library-toolbar">
                       <h3 style={{ margin: 0, flex: 1 }}>
-                        {hfLibraryMode === 'search' ? 'Search results' : 'Recommended for local inference'}
+                        {hfLibraryMode === 'search' ? 'Results' : 'Recommended'}
                       </h3>
                       {hfLibraryMode === 'search' && (
                         <button type="button" className="btn-secondary" onClick={() => backToRecommendations()}>
-                          ← Recommendations
+                          ← Back
                         </button>
                       )}
                     </div>
-                    <p className="hf-library-runtime-hint muted" style={{ margin: '0 0 12px' }}>
-                      <strong>Top bar backend:</strong>{' '}
+                    <p className="hf-library-runtime-hint muted" style={{ margin: '0 0 10px' }}>
                       {runtimeKind === 'ollama' ? (
                         <>
-                          <span>Ollama</span> — installing pulls into the Ollama library at your configured API URL. Hub
-                          cards with a preset tag can <strong>Pull</strong> in one click; others need a name under
-                          “Selected model”.
+                          <strong>Ollama</strong>: preset = <strong>Pull</strong>; else name in Selected model.
                         </>
                       ) : (
                         <>
-                          <span>llama.cpp</span> — installing downloads <code>.gguf</code> files into your models folder
-                          (same as the Run panel).
+                          <strong>llama.cpp</strong>: <code>.gguf</code> → models folder.
                         </>
                       )}
                     </p>
-                    {hfLibraryMode === 'recommended' && (
-                      <p className="muted" style={{ margin: '0 0 12px' }}>
-                        Curated GGUF-friendly picks. Sort and filter by likes, downloads, or total repo size. Lists below
-                        split what is already installed versus what you can add. Search replaces this list until you go
-                        back.
-                      </p>
-                    )}
-                    {hfLibraryMode === 'search' && (
-                      <p className="muted" style={{ margin: '0 0 12px' }}>
-                        Sort and filter apply to this result set. Install uses the active backend (Ollama pull vs. Hub file
-                        download for llama.cpp).
-                      </p>
-                    )}
                     {runtimeKind === 'llamacpp' && localModelFilePaths.length > 0 ? (
                       <div className="hf-library-disk-block" role="region" aria-label="Weights on disk">
-                        <h4 className="hf-library-subheading">.gguf files in your models folder</h4>
+                        <h4 className="hf-library-subheading">Local .gguf</h4>
                         <ul className="hf-library-disk-list muted">
                           {localModelFilePaths.map((p) => (
                             <li key={p}>
@@ -4138,7 +4852,7 @@ export default function App(): React.ReactElement {
                     ) : null}
                     {runtimeKind === 'ollama' ? (
                       <div className="hf-library-disk-block" role="region" aria-label="Ollama library">
-                        <h4 className="hf-library-subheading">Models in your Ollama library</h4>
+                        <h4 className="hf-library-subheading">Ollama library</h4>
                         {ollamaChatTagsLoading ? (
                           <p className="muted" style={{ margin: 0 }}>
                             Loading…
@@ -4149,7 +4863,7 @@ export default function App(): React.ReactElement {
                           </p>
                         ) : ollamaChatTags.length === 0 ? (
                           <p className="muted" style={{ margin: 0 }}>
-                            None reported yet. Pull a model below or from the Run panel.
+                            None yet.
                           </p>
                         ) : (
                           <ul className="hf-library-disk-list hf-library-disk-list--tags">
@@ -4173,7 +4887,7 @@ export default function App(): React.ReactElement {
                           >
                             <option value="downloads">Downloads</option>
                             <option value="likes">Likes</option>
-                            <option value="size">Model size (repo total)</option>
+                            <option value="size">Size</option>
                           </select>
                         </label>
                         <label className="hf-library-filter-field">
@@ -4231,68 +4945,80 @@ export default function App(): React.ReactElement {
                           </div>
                         )}
                       </div>
-                      <p className="muted hf-library-filters-hint">
-                        Size uses the summed file sizes from the Hub listing when available; models without a size are omitted when a max size filter is set, and sort by size lists them last.
-                      </p>
                     </div>
                     {hfListLoading && (
                       <div className="hf-library-loading">
-                        {hfLibraryMode === 'search' ? 'Searching and loading descriptions…' : 'Loading recommendations and descriptions…'}
+                        {hfLibraryMode === 'search' ? 'Searching…' : 'Loading…'}
                       </div>
                     )}
                     {!hfListLoading && hfListModels.length === 0 && hfLibraryMode === 'recommended' && (
-                      <p className="muted">Could not load recommendations. Check your connection or run a search above.</p>
+                      <p className="muted">No recommendations. Try search.</p>
                     )}
                     {!hfListLoading && hfListModels.length === 0 && hfLibraryMode === 'search' && (
-                      <p className="muted">No models matched. Try different keywords or return to recommendations.</p>
+                      <p className="muted">No matches.</p>
                     )}
                     {!hfListLoading && hfListModels.length > 0 && hfDisplayModels.length === 0 && (
-                      <p className="muted">No models match the current filters. Clear filters or relax thresholds.</p>
+                      <p className="muted">No matches for filters.</p>
                     )}
                     {!hfListLoading && hfDisplayModels.length > 0 ? (
-                      <>
-                        <h4 className="hf-library-subheading hf-library-subheading--list">In this list — installed</h4>
-                        {hfHubInstalledModels.length === 0 ? (
-                          <p className="muted hf-library-column-empty">Nothing from this list yet for the current backend.</p>
-                        ) : (
-                          <div className="hf-model-cards-list hf-model-cards-list--installed">
-                            {hfHubInstalledModels.map((m) => renderHfHubCard(m))}
-                          </div>
-                        )}
-                        <h4 className="hf-library-subheading hf-library-subheading--list">Available to install</h4>
-                        {hfHubAvailableModels.length === 0 ? (
-                          <p className="muted hf-library-column-empty">All filtered models are already installed.</p>
-                        ) : (
-                          <div className="hf-model-cards-list">
-                            {hfHubAvailableModels.map((m) => renderHfHubCard(m))}
-                          </div>
-                        )}
-                      </>
+                      <div className="hf-hub-model-lists">
+                        <div className="hf-hub-model-list-col">
+                          <h4 className="hf-hub-model-list-col-heading">Installed</h4>
+                          {hfHubInstalledModels.length === 0 ? (
+                            <p className="muted hf-library-column-empty">None in this list.</p>
+                          ) : (
+                            renderHfHubInstalledPaginatedTable(
+                              hfHubInstalledModelsSorted,
+                              hfInstalledListPage,
+                              setHfInstalledListPage,
+                              'Installed models from this list',
+                              {
+                                col: hfInstalledColSort.col,
+                                dir: hfInstalledColSort.dir,
+                                onCol: toggleHfInstalledColSort
+                              }
+                            )
+                          )}
+                        </div>
+                        <div className="hf-hub-model-list-col">
+                          <h4 className="hf-hub-model-list-col-heading">Available</h4>
+                          {hfHubAvailableModels.length === 0 ? (
+                            <p className="muted hf-library-column-empty">All installed.</p>
+                          ) : (
+                            renderHfHubPaginatedTable(
+                              hfHubAvailableModelsSorted,
+                              hfAvailableListPage,
+                              setHfAvailableListPage,
+                              'Models available to install',
+                              {
+                                col: hfAvailableColSort.col,
+                                dir: hfAvailableColSort.dir,
+                                onCol: toggleHfAvailableColSort
+                              }
+                            )
+                          )}
+                        </div>
+                      </div>
                     ) : null}
                   </div>
                   <div className="drawer-section">
-                    <h3>
-                      Selected model —{' '}
-                      {runtimeKind === 'ollama' ? 'Ollama pull' : 'files & folder'}
-                    </h3>
+                    <h3>Selected model</h3>
                     {!detail && (
                       <p className="muted">
-                        {runtimeKind === 'ollama'
-                          ? 'Select a Hub model above. You can pull any Ollama library name, or use a preset tag when the card lists one.'
-                          : 'Select a model above to choose a specific file and download folder.'}
+                        {runtimeKind === 'ollama' ? 'Choose a row in the tables.' : 'Choose a row, then pick a file.'}
                       </p>
                     )}
                     {detail && (
                       <>
-                        <p className="muted">{detail.description?.slice(0, 320) ?? '—'}</p>
-                        <p className="muted">Total ~{(detail.totalSizeBytes / 1e9).toFixed(2)} GB (file sum)</p>
+                        <p className="muted">{detail.description?.slice(0, 120) ?? '—'}</p>
+                        <p className="muted">~{(detail.totalSizeBytes / 1e9).toFixed(2)} GB</p>
                         {runtimeKind === 'llamacpp' ? (
                           hfHardwareEval ? (
                             <div
                               className={`hf-model-fit hf-model-fit--${hfHardwareEval.verdict}`}
                               role="status"
                             >
-                              <p className="hf-model-fit-title">This machine vs selected file</p>
+                              <p className="hf-model-fit-title">Hardware fit</p>
                               <p className="hf-model-fit-headline">{hfHardwareEval.headline}</p>
                               <ul className="hf-model-fit-notes">
                                 {hfHardwareEval.notes.map((n, i) => (
@@ -4301,13 +5027,13 @@ export default function App(): React.ReactElement {
                               </ul>
                             </div>
                           ) : (
-                            <p className="muted hf-model-fit-loading">Checking this machine…</p>
+                            <p className="muted hf-model-fit-loading">Checking…</p>
                           )
                         ) : null}
                         {runtimeKind === 'ollama' ? (
                           <>
                             <label className="runtime-field-label" htmlFor="hf-ollama-pull-name">
-                              Ollama model name
+                              Model name
                             </label>
                             <input
                               id="hf-ollama-pull-name"
@@ -4315,12 +5041,9 @@ export default function App(): React.ReactElement {
                               style={{ marginBottom: 8 }}
                               value={ollamaHubPullNameDraft}
                               onChange={(e) => setOllamaHubPullNameDraft(e.target.value)}
-                              placeholder="e.g. llama3.2, qwen2.5:3b"
+                              placeholder="llama3.2, qwen2.5:3b…"
                               disabled={hfOllamaPullBusy}
                             />
-                            <p className="muted" style={{ margin: '0 0 10px', fontSize: 12 }}>
-                              Pulled models appear in the Ollama library list above and in the top bar model menu.
-                            </p>
                             <button
                               type="button"
                               className="btn-primary"
@@ -4372,9 +5095,13 @@ export default function App(): React.ReactElement {
                               style={{ marginBottom: 8 }}
                             />
                             <button type="button" className="btn-primary" onClick={() => void startDownload()}>
-                              Download selected file
+                              Download
                             </button>
-                            {lastJobId && <p className="muted">Last job: {lastJobId}</p>}
+                            {lastJobId && (
+                              <p className="muted" style={{ fontSize: 11 }}>
+                                {lastJobId}
+                              </p>
+                            )}
                             {selectedModel && hfDownloadJobs[selectedModel] ? (
                               <div className="hf-detail-download-progress" style={{ marginTop: 12 }}>
                                 <DownloadProgressBar
@@ -4532,7 +5259,7 @@ export default function App(): React.ReactElement {
                   <div className="drawer-section runtime-load-card">
                     <h3 className="runtime-load-card-title">Runtime setup</h3>
                     <p className="muted runtime-load-card-lead">
-                      Choose backend, model, and <strong>Start</strong> in the top bar. Use this panel for Ollama install,
+                      Choose backend, model, and press <strong>Play</strong> in the top bar. Use this panel for Ollama install,
                       llama-server binary, and downloads.
                     </p>
                     <div className="runtime-ollama-probe" role="status">
@@ -4758,7 +5485,7 @@ export default function App(): React.ReactElement {
                       <p className="muted">
                         Default save folder:{' '}
                         <span className="runtime-downloads-default-path">{paths?.modelsDefault ?? '—'}</span>{' '}
-                        <button type="button" className="btn-ghost-sm" onClick={() => setDrawer('settings')}>
+                        <button type="button" className="btn-ghost-sm" onClick={() => openSettings('data')}>
                           Settings
                         </button>
                       </p>
@@ -4866,12 +5593,16 @@ export default function App(): React.ReactElement {
 
               {drawer === 'metrics' && (
                 <>
-                  {metricsWidgetControls}
                   <p className="muted" style={{ marginTop: 0 }}>
-                    While this panel is open, a snapshot is saved and charts refresh every <strong>{formatRefreshLabel(metricsRefreshMs)}</strong>{' '}
-                    (same as Pinned widgets; adjust there). The pinned panel polls without writing history each tick.
+                    While this panel is open, a snapshot is saved and charts refresh every{' '}
+                    <strong>{formatRefreshLabel(metricsRefreshMs)}</strong> (same interval as pinned widgets). Configure
+                    which widgets are pinned, panel side, and refresh interval under{' '}
+                    <strong>Settings → Widgets &amp; metrics</strong>.
                   </p>
-                  <div className="row" style={{ marginBottom: 16 }}>
+                  <div className="row" style={{ marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+                    <button type="button" className="btn-secondary" onClick={() => openSettings('widgets')}>
+                      Open widget settings…
+                    </button>
                     <button type="button" className="btn-primary" onClick={() => void refreshMetricsBundle()}>
                       Record snapshot &amp; refresh now
                     </button>
@@ -4889,45 +5620,32 @@ export default function App(): React.ReactElement {
               )}
 
               {drawer === 'settings' && (
-                <div className="settings-page">
-                  <section className="settings-group" aria-labelledby="settings-grp-look">
-                    <h2 id="settings-grp-look" className="settings-group-heading">
-                      <i className="fa-solid fa-palette" aria-hidden />
-                      Look &amp; layout
-                    </h2>
-                    <div className="drawer-section">
-                      <h3 className="settings-section-title">
-                        <i className="fa-solid fa-swatchbook" aria-hidden />
-                        Appearance
-                      </h3>
-                      <p className="muted" style={{ marginTop: 0 }}>
-                        Accent palette for buttons, highlights, and chat accents. Secondary panels use a light glass treatment so the backdrop shows
-                        through.
-                      </p>
-                      <label style={{ display: 'block', marginTop: 12 }}>
-                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                          <i className="fa-solid fa-droplet" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
-                          Color scheme
-                        </span>
-                        <select
-                          className="select"
-                          style={{ width: '100%', maxWidth: 320 }}
-                          value={colorScheme}
-                          onChange={(e) => void saveColorScheme(parseColorScheme(e.target.value))}
-                        >
-                          {COLOR_SCHEME_IDS.map((id) => (
-                            <option key={id} value={id}>
-                              {COLOR_SCHEME_LABELS[id]}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    </div>
-                    <div className="drawer-section">
-                      <h3 className="settings-section-title">
-                        <i className="fa-solid fa-table-columns" aria-hidden />
-                        Chat slide panels
-                      </h3>
+                <div className="settings-view">
+                  <nav className="settings-view-nav" aria-label="Settings sections">
+                    {SETTINGS_NAV_ITEMS.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className={`settings-view-nav-btn${settingsNav === item.id ? ' settings-view-nav-btn--active' : ''}`}
+                        onClick={() => setSettingsNav(item.id)}
+                      >
+                        <i className={`fa-solid ${item.icon}`} aria-hidden />
+                        <span>{item.label}</span>
+                      </button>
+                    ))}
+                  </nav>
+                  <div className="settings-view-panels">
+                    {settingsNav === 'general' && (
+                      <section className="settings-group" aria-labelledby="settings-grp-general">
+                        <h2 id="settings-grp-general" className="settings-group-heading">
+                          <i className="fa-solid fa-sliders" aria-hidden />
+                          General
+                        </h2>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-table-columns" aria-hidden />
+                            Chat slide panels
+                          </h3>
                       <p className="muted" style={{ marginTop: 0 }}>
                         On medium widths the knowledge panel slides over the chat; at ≤720px the chat list does too. Wide layouts keep fixed columns.
                       </p>
@@ -4969,9 +5687,136 @@ export default function App(): React.ReactElement {
                           <option value="right">Right edge</option>
                         </select>
                       </label>
-                    </div>
-                  </section>
+                        </div>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-arrows-left-right" aria-hidden />
+                            Slide panel widths
+                          </h3>
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            Applied when panels slide over the chat. You can still drag resize handles in the layout.
+                          </p>
+                          <label style={{ display: 'block', marginTop: 12 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              Chats list width (px, min {SLIDE_CONV_MIN})
+                            </span>
+                            <input
+                              type="number"
+                              className="input"
+                              style={{ width: '100%', maxWidth: 200 }}
+                              min={SLIDE_CONV_MIN}
+                              value={slideConvWidthPx}
+                              onChange={(e) => {
+                                const n = parseInt(e.target.value, 10)
+                                if (!Number.isFinite(n)) return
+                                const v = clampSlideConv(n)
+                                setSlideConvWidthPx(v)
+                                try {
+                                  localStorage.setItem(LS_SLIDE_CONV_W, String(v))
+                                } catch {
+                                  /* ignore */
+                                }
+                              }}
+                            />
+                          </label>
+                          <label style={{ display: 'block', marginTop: 12 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              Knowledge panel width (px, min {SLIDE_KB_MIN})
+                            </span>
+                            <input
+                              type="number"
+                              className="input"
+                              style={{ width: '100%', maxWidth: 200 }}
+                              min={SLIDE_KB_MIN}
+                              value={slideKbWidthPx}
+                              onChange={(e) => {
+                                const n = parseInt(e.target.value, 10)
+                                if (!Number.isFinite(n)) return
+                                const v = clampSlideKb(n)
+                                setSlideKbWidthPx(v)
+                                try {
+                                  localStorage.setItem(LS_SLIDE_KB_W, String(v))
+                                } catch {
+                                  /* ignore */
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-book" aria-hidden />
+                            Knowledge column
+                          </h3>
+                          <label className="metrics-widget-check">
+                            <input
+                              type="checkbox"
+                              checked={!kbChatPanelCollapsed}
+                              onChange={(e) => {
+                                const show = e.target.checked
+                                setKbChatPanelCollapsed(!show)
+                                try {
+                                  localStorage.setItem(LS_KB_CHAT_COLLAPSED, show ? '0' : '1')
+                                } catch {
+                                  /* ignore */
+                                }
+                              }}
+                            />
+                            <span>Show wiki / knowledge column beside chat (wide layouts)</span>
+                          </label>
+                          <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                            When off, the sidebar stays collapsed until you expand it from the chat view.
+                          </p>
+                        </div>
+                        <div className="drawer-section">
+                          <button type="button" className="btn-secondary" onClick={() => setDrawer('runtime')}>
+                            Open inference runtime drawer…
+                          </button>
+                          <p className="muted" style={{ marginTop: 10, marginBottom: 0 }}>
+                            Start/stop the model, pick weights, Ollama install, and downloads list live there.
+                          </p>
+                        </div>
+                      </section>
+                    )}
 
+                    {settingsNav === 'appearance' && (
+                      <section className="settings-group" aria-labelledby="settings-grp-look">
+                        <h2 id="settings-grp-look" className="settings-group-heading">
+                          <i className="fa-solid fa-palette" aria-hidden />
+                          Appearance
+                        </h2>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-swatchbook" aria-hidden />
+                            Color scheme
+                          </h3>
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            Accent palette for buttons, highlights, and chat accents. Secondary panels use a light glass treatment so the backdrop shows
+                            through.
+                          </p>
+                          <label style={{ display: 'block', marginTop: 12 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              <i className="fa-solid fa-droplet" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
+                              Theme
+                            </span>
+                            <select
+                              className="select"
+                              style={{ width: '100%', maxWidth: 320 }}
+                              value={colorScheme}
+                              onChange={(e) => void saveColorScheme(parseColorScheme(e.target.value))}
+                            >
+                              {COLOR_SCHEME_IDS.map((id) => (
+                                <option key={id} value={id}>
+                                  {COLOR_SCHEME_LABELS[id]}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                      </section>
+                    )}
+
+                    {settingsNav === 'chat' && (
                   <section className="settings-group" aria-labelledby="settings-grp-chat">
                     <h2 id="settings-grp-chat" className="settings-group-heading">
                       <i className="fa-solid fa-comments" aria-hidden />
@@ -5029,7 +5874,9 @@ export default function App(): React.ReactElement {
                       </p>
                     </div>
                   </section>
+                    )}
 
+                    {settingsNav === 'integrations' && (
                   <section className="settings-group" aria-labelledby="settings-grp-integ">
                     <h2 id="settings-grp-integ" className="settings-group-heading">
                       <i className="fa-solid fa-plug" aria-hidden />
@@ -5121,12 +5968,46 @@ export default function App(): React.ReactElement {
                         Save token
                       </button>
                     </div>
+                    <div className="drawer-section">
+                      <h3 className="settings-section-title">
+                        <i className="fa-solid fa-clock-rotate-left" aria-hidden />
+                        Recent IDE bridge activity
+                      </h3>
+                      {integrationPluginReports.length === 0 ? (
+                        <p className="muted" style={{ marginTop: 0 }}>
+                          No plugin requests recorded yet. Enable the bridge above and use the IntelliJ integration.
+                        </p>
+                      ) : (
+                        <ul className="settings-plugin-report-list muted" style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                          {[...integrationPluginReports]
+                            .slice()
+                            .reverse()
+                            .slice(0, 14)
+                            .map((r, i) => (
+                              <li key={`${r.receivedAt}-${i}`} style={{ marginBottom: 6 }}>
+                                <strong style={{ color: 'var(--text-primary)' }}>{settingsPluginKindLabel(r.kind)}</strong>
+                                <span style={{ marginLeft: 8 }}>
+                                  {new Date(r.receivedAt).toLocaleString(undefined, {
+                                    month: 'short',
+                                    day: 'numeric',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                    second: '2-digit'
+                                  })}
+                                </span>
+                              </li>
+                            ))}
+                        </ul>
+                      )}
+                    </div>
                   </section>
+                    )}
 
+                    {settingsNav === 'data' && (
                   <section className="settings-group" aria-labelledby="settings-grp-storage">
                     <h2 id="settings-grp-storage" className="settings-group-heading">
                       <i className="fa-solid fa-hard-drive" aria-hidden />
-                      Storage &amp; paths
+                      Files &amp; paths
                     </h2>
                     <div className="drawer-section">
                       <h3 className="settings-section-title">
@@ -5186,15 +6067,220 @@ export default function App(): React.ReactElement {
                       <pre className="code-block">{JSON.stringify(paths, null, 2)}</pre>
                     </div>
                   </section>
+                    )}
 
+                    {settingsNav === 'runtime' && (
+                      <section className="settings-group" aria-labelledby="settings-grp-runtime">
+                        <h2 id="settings-grp-runtime" className="settings-group-heading">
+                          <i className="fa-solid fa-microchip" aria-hidden />
+                          Runtime &amp; backends
+                        </h2>
+                        <div className="drawer-section">
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            Choose the model and press <strong>Play</strong> in the top bar. This tab stores connection defaults; live status, install
+                            helpers, and downloads stay in the <strong>Run</strong> drawer.
+                          </p>
+                          <button type="button" className="btn-secondary" style={{ marginTop: 8 }} onClick={() => setDrawer('runtime')}>
+                            Open inference runtime drawer…
+                          </button>
+                        </div>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-layer-group" aria-hidden />
+                            Default backend
+                          </h3>
+                          <label style={{ display: 'block', marginTop: 8 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              Active runtime kind (matches top bar)
+                            </span>
+                            <select
+                              className="select"
+                              style={{ width: '100%', maxWidth: 320 }}
+                              value={runtimeKind}
+                              onChange={(e) => void applyRuntimeKindSetting(e.target.value as 'ollama' | 'llamacpp')}
+                            >
+                              <option value="ollama">Ollama</option>
+                              <option value="llamacpp">llama.cpp (server)</option>
+                            </select>
+                          </label>
+                        </div>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-link" aria-hidden />
+                            Ollama API
+                          </h3>
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            Base URL for tag listing, pulls, and chat when Ollama is selected. Probe updates after you save.
+                          </p>
+                          {ollamaHost != null ? (
+                            <p className="muted" style={{ marginTop: 8 }}>
+                              <span
+                                className={`runtime-ollama-probe-mark ${ollamaHost.reachable ? 'runtime-ollama-probe-mark--ok' : 'runtime-ollama-probe-mark--bad'}`}
+                                style={{ marginRight: 8 }}
+                                aria-hidden
+                              >
+                                {ollamaHost.reachable ? '✓' : '✗'}
+                              </span>
+                              Last check: <code className="inline-code">{ollamaHost.baseUrl}</code>
+                            </p>
+                          ) : null}
+                          <label style={{ display: 'block', marginTop: 12 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              API base URL
+                            </span>
+                            <input
+                              className="input"
+                              style={{ width: '100%', maxWidth: 420 }}
+                              value={ollamaBaseUrlDraft}
+                              onChange={(e) => setOllamaBaseUrlDraft(e.target.value)}
+                              onBlur={() => {
+                                const t = ollamaBaseUrlDraft.trim() || OLLAMA_BASE_DEFAULT
+                                setOllamaBaseUrlDraft(t)
+                                void window.api
+                                  .setConfig({ ollamaBaseUrl: t })
+                                  .then(() => {
+                                    void refreshRunDrawerQuick()
+                                    void refreshOllamaChatTags()
+                                  })
+                              }}
+                              placeholder={OLLAMA_BASE_DEFAULT}
+                            />
+                          </label>
+                        </div>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-server" aria-hidden />
+                            llama.cpp server
+                          </h3>
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            Port passed to <code className="inline-code">llama-server</code> when this app spawns it. Restart the runtime after changing.
+                          </p>
+                          <label style={{ display: 'block', marginTop: 12 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              Listen port
+                            </span>
+                            <input
+                              type="number"
+                              className="input"
+                              style={{ width: '100%', maxWidth: 200 }}
+                              min={1024}
+                              max={65535}
+                              value={llamaPortDraft}
+                              onChange={(e) => setLlamaPortDraft(e.target.value)}
+                              onBlur={() => {
+                                const n = parseInt(llamaPortDraft.trim(), 10)
+                                const v = clampLlamaPort(Number.isFinite(n) ? n : LLAMA_PORT_DEFAULT)
+                                setLlamaPortDraft(String(v))
+                                void window.api.setConfig({ llamaPort: v })
+                              }}
+                            />
+                          </label>
+                          <label style={{ display: 'block', marginTop: 16 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              <code className="inline-code">llama-server</code> binary path
+                            </span>
+                            <input
+                              className="input"
+                              style={{ width: '100%', maxWidth: 480 }}
+                              value={llamaBin}
+                              onChange={(e) => setLlamaBin(e.target.value)}
+                              placeholder="Path to llama-server executable"
+                            />
+                          </label>
+                          <div className="row" style={{ marginTop: 10, flexWrap: 'wrap', gap: 8 }}>
+                            <button type="button" className="btn-primary settings-btn-icon" onClick={() => void saveLlamaBinaryFromSettings()}>
+                              <i className="fa-solid fa-floppy-disk" aria-hidden />
+                              Save binary path
+                            </button>
+                          </div>
+                          {llamaEnv?.detected && llamaEnv.resolvedPath ? (
+                            <p className="muted" style={{ marginTop: 10, marginBottom: 0, fontSize: 12 }}>
+                              Detected on PATH: <code className="inline-code">{llamaEnv.resolvedPath}</code>
+                            </p>
+                          ) : null}
+                        </div>
+                      </section>
+                    )}
+
+                    {settingsNav === 'widgets' && (
                   <section className="settings-group" aria-labelledby="settings-grp-widgets">
                     <h2 id="settings-grp-widgets" className="settings-group-heading">
                       <i className="fa-solid fa-gauge-high" aria-hidden />
-                      Widgets &amp; refresh
+                      Widgets &amp; metrics
                     </h2>
                     {metricsWidgetControls}
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-up-right-and-down-left-from-center" aria-hidden />
+                            Default pinned panel size
+                          </h3>
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            Starting width and height when the pinned widgets rail opens. Drag panel edges in the UI anytime; use <strong>Save</strong> to
+                            persist numbers here.
+                          </p>
+                          <div className="row" style={{ flexWrap: 'wrap', gap: 12, marginTop: 12 }}>
+                            <label style={{ flex: '1 1 120px' }}>
+                              <span className="muted" style={{ display: 'block', marginBottom: 4 }}>
+                                Width (px)
+                              </span>
+                              <input
+                                type="number"
+                                className="input"
+                                min={PINNED_W_MIN}
+                                max={1400}
+                                value={pinnedWidgetsWidthPx}
+                                onChange={(e) => {
+                                  const n = parseInt(e.target.value, 10)
+                                  if (!Number.isFinite(n)) return
+                                  setPinnedWidgetsWidthPx(clampPinnedWidth(n))
+                                }}
+                              />
+                            </label>
+                            <label style={{ flex: '1 1 120px' }}>
+                              <span className="muted" style={{ display: 'block', marginBottom: 4 }}>
+                                Height (px)
+                              </span>
+                              <input
+                                type="number"
+                                className="input"
+                                min={PINNED_H_MIN}
+                                max={1200}
+                                value={pinnedWidgetsHeightPx}
+                                onChange={(e) => {
+                                  const n = parseInt(e.target.value, 10)
+                                  if (!Number.isFinite(n)) return
+                                  setPinnedWidgetsHeightPx(clampPinnedHeight(n))
+                                }}
+                              />
+                            </label>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn-secondary settings-btn-icon"
+                            style={{ marginTop: 12 }}
+                            onClick={() =>
+                              void window.api.setConfig({
+                                pinnedWidgetsWidthPx: clampPinnedWidth(pinnedWidgetsWidthPx),
+                                pinnedWidgetsHeightPx: clampPinnedHeight(pinnedWidgetsHeightPx)
+                              })
+                            }
+                          >
+                            <i className="fa-solid fa-floppy-disk" aria-hidden />
+                            Save panel size
+                          </button>
+                        </div>
+                        <div className="drawer-section">
+                          <button type="button" className="btn-secondary" onClick={() => setDrawer('metrics')}>
+                            Open metrics &amp; charts drawer…
+                          </button>
+                          <p className="muted" style={{ marginTop: 10, marginBottom: 0 }}>
+                            GPU, memory, and history charts; snapshot recording.
+                          </p>
+                        </div>
                   </section>
+                    )}
 
+                    {settingsNav === 'maintenance' && (
                   <section className="settings-group settings-group--danger" aria-labelledby="settings-grp-maint">
                     <h2 id="settings-grp-maint" className="settings-group-heading">
                       <i className="fa-solid fa-triangle-exclamation" aria-hidden />
@@ -5245,9 +6331,12 @@ export default function App(): React.ReactElement {
                       ) : null}
                     </div>
                   </section>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
+          </div>
           </div>
         </>
       )}
