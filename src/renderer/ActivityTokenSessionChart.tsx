@@ -144,7 +144,7 @@ export function ActivityTokenSessionChart(props: { history: ActivityTokenHistory
                 height={Math.max(0, hP)}
                 rx={1}
                 ry={1}
-                fill="#7c6cf0"
+                fill="var(--accent)"
                 className="activity-token-bar activity-token-bar--sent"
               />
               <rect
@@ -154,7 +154,7 @@ export function ActivityTokenSessionChart(props: { history: ActivityTokenHistory
                 height={Math.max(0, hC)}
                 rx={1}
                 ry={1}
-                fill="#e8a54b"
+                fill="var(--warning)"
                 className="activity-token-bar activity-token-bar--recv"
               />
             </g>

@@ -335,7 +335,7 @@ export function MetricsTimeSeries({
       <MiniChart
         title={variant === 'drawer' ? 'Process memory (resident set)' : 'Resident memory'}
         unit="MB"
-        color="#7c6cf0"
+        color="var(--chart-line-memory)"
         values={rss}
         ts={ts}
         formatTick={(v) => v.toFixed(0)}
@@ -346,7 +346,7 @@ export function MetricsTimeSeries({
       <MiniChart
         title={variant === 'drawer' ? 'Process CPU (approx.)' : 'CPU'}
         unit="%"
-        color="#3db89d"
+        color="var(--chart-line-cpu)"
         values={cpu}
         ts={ts}
         formatTick={(v) => v.toFixed(0)}
@@ -358,7 +358,7 @@ export function MetricsTimeSeries({
         <MiniChart
           title={variant === 'drawer' ? 'GPU memory used (NVIDIA)' : 'GPU MiB'}
           unit="MiB"
-          color="#5a8dee"
+          color="var(--chart-line-gpu-mem)"
           values={gpuUsed}
           ts={ts}
           formatTick={(v) => v.toFixed(0)}
@@ -371,7 +371,7 @@ export function MetricsTimeSeries({
         <MiniChart
           title={variant === 'drawer' ? 'GPU memory utilization' : 'GPU %'}
           unit="%"
-          color="#8b7ae8"
+          color="var(--chart-line-gpu-util)"
           values={gpuUtilPct}
           ts={ts}
           formatTick={(v) => v.toFixed(0)}
@@ -384,7 +384,7 @@ export function MetricsTimeSeries({
         <MiniChart
           title={variant === 'drawer' ? 'Model memory (runtime)' : 'Model'}
           unit="MiB"
-          color="#e878b8"
+          color="var(--chart-line-model)"
           values={modelMem}
           ts={ts}
           formatTick={(v) => v.toFixed(0)}
@@ -397,7 +397,7 @@ export function MetricsTimeSeries({
         <MiniChart
           title={variant === 'drawer' ? 'Runtime tokens / sec' : 'Tok/s'}
           unit="tok/s"
-          color="#e8a54b"
+          color="var(--chart-line-tok)"
           values={tok}
           ts={ts}
           formatTick={(v) => v.toFixed(1)}
@@ -410,7 +410,7 @@ export function MetricsTimeSeries({
         <MiniChart
           title={variant === 'drawer' ? 'Context used (runtime)' : 'Ctx'}
           unit="tokens"
-          color="#c4a35a"
+          color="var(--chart-line-ctx)"
           values={ctx}
           ts={ts}
           formatTick={(v) => v.toFixed(0)}
@@ -423,7 +423,7 @@ export function MetricsTimeSeries({
         <MiniChart
           title={variant === 'drawer' ? 'Avg prompt → reply (rolling)' : 'Prompt→reply'}
           unit="s"
-          color="#6ecff6"
+          color="var(--chart-line-latency)"
           values={avgPromptToRespSec}
           ts={ts}
           formatTick={(v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1))}
