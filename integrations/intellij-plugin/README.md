@@ -21,7 +21,7 @@ On Windows: `gradlew.bat buildPlugin`. If you use a system Gradle install instea
 
 Install **Settings → Plugins → ⚙ → Install Plugin from Disk…** and pick:
 
-`build/distributions/local-llm-intellij-0.2.4.zip`
+`build/distributions/local-llm-intellij-0.2.5.zip`
 
 Or open this folder in IntelliJ as a Gradle project and use the **Gradle** tool window → **buildPlugin**.
 
@@ -34,6 +34,7 @@ Or open this folder in IntelliJ as a Gradle project and use the **Gradle** tool 
 - **Vocabulary…** — scans the same Java/Kotlin sources as the structural graph (plus attached file names/paths) and opens a **domain vocabulary** report: terms grouped by **domain** (first two package segments, e.g. `com.example`), then by **package**, with types, methods, properties, and CamelCase-derived word hints.
 - **Connection strip** at the top polls **GET /health** on the configured port (same as the desktop bridge): shows disconnected / bridge OK / runtime running vs stopped, with **Refresh connection**. Chat **ConnectException**-style failures refresh this strip and avoid a noisy modal when it is clearly a network reachability issue.
 - **Tools → Local LLM Chat…** (or editor context menu) opens the tool window and **prefills the prompt** from the current selection when there is one.
+- **Inline completion** — in **Settings → Tools → Local LLM Desktop**, leave **Enable gray inline completion** on (default). With the desktop **runtime** running, the IDE shows **gray ghost text** after a short typing pause; accept with the platform **inline completion** shortcut (often **Tab**, depending on keymap). Uses `POST /v1/chat` with a small per-request `maxTokens` cap.
 
 **Dependencies:** the plugin declares `**com.intellij.java`** for Java PSI. It does **not** depend on the Kotlin plugin — Kotlin sources use **text parsing** so the plugin works with Kotlin **K2** analysis in the IDE.
 

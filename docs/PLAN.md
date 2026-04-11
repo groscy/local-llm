@@ -30,7 +30,7 @@ Living summary of major work completed and what remains optional. Last updated: 
 | **Localhost HTTP bridge** | `integrationServer.ts` on **127.0.0.1** only: `/health`, `/v1/runtime/status`, `/v1/chat`; optional bearer token; respects `chatMaxTokens`.                                                                                                                                                  |
 | **Settings**              | Toggle listen, port, token; changing integration keys restarts the server.                                                                                                                                                                                                                   |
 | **Docs**                  | `docs/intellij-integration.md` describes API and security.                                                                                                                                                                                                                                   |
-| **Sample plugin**         | `integrations/intellij-plugin/` **v0.2.4** — **Local LLM** tool window, **live bridge/health strip**, Java PSI + Kotlin **text** graph (K2-safe), `**[CLARIFY]`** loop, optional **structured file apply**, **domain vocabulary** (package-grouped), Settings + **Tools → Local LLM Chat…**. |
+| **Sample plugin**         | `integrations/intellij-plugin/` **v0.2.5** — same as v0.2.4 plus **gray inline completion** (`InlineCompletionProvider` → `POST /v1/chat` with short `maxTokens`). |
 
 
 ### IntelliJ plugin build (Gradle)

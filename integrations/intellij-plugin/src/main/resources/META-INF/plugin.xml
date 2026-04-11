@@ -9,6 +9,7 @@
     built from Java (PSI) and Kotlin (<b>text heuristics</b>, no Kotlin K1 PSI — compatible with Kotlin <b>K2</b> mode),
     optional <b>apply file blocks</b> from model replies (with confirmation), a <b>domain vocabulary</b> view (terms grouped by package domain),
     and follow-up when the model asks for clarification (<code>[CLARIFY]</code> protocol).
+    <b>Inline completion</b> (gray text) calls the same bridge with a short token budget when the desktop runtime is on — toggle under plugin settings.
     Configure port and optional bearer token under <b>Settings → Tools → Local LLM Desktop</b>.
     ]]></description>
 
@@ -24,6 +25,8 @@
         <toolWindow id="LocalLLM" secondary="true" anchor="right"
                     factoryClass="com.localllm.intellij.LocalLlmToolWindowFactory"/>
         <projectService serviceImplementation="com.localllm.intellij.LocalLlmBridgeService"/>
+        <inline.completion.provider id="com.localllm.intellij.LocalLlmInlineCompletionProvider"
+                                    implementation="com.localllm.intellij.LocalLlmInlineCompletionProvider"/>
     </extensions>
 
     <actions>

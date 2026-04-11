@@ -44,11 +44,14 @@ Same auth rules as `/v1/chat`. Returns `running`, `kind`, `modelPath`, `endpoint
   "messages": [
     { "role": "system", "content": "You are a helpful assistant." },
     { "role": "user", "content": "Hello" }
-  ]
+  ],
+  "maxTokens": 160
 }
 ```
 
 `role` may be `system`, `user`, or `assistant`. The sample IntelliJ plugin sends a **system** message (instructions + optional codebase graph) and **user** messages; clarification rounds append **assistant** then **user** turns.
+
+Optional **`maxTokens`** (integer, 1–262144): caps **this** request only. Omitted means the desktop app uses **Settings → Max response tokens**. The plugin uses a small `maxTokens` for **inline (gray) completion** so suggestions stay short without changing your global chat limit.
 
 Response `200`:
 
@@ -110,5 +113,6 @@ replacement
 ```
 
 - **Tools → Local LLM Chat…** — opens the tool window and prefills from the editor selection when present.
+- **Inline completion** — when enabled under **Settings → Tools → Local LLM Desktop**, the IDE’s gray **inline** suggestions (typing debounce + **Insert Inline Completion** / platform shortcut) call `POST /v1/chat` with local prefix/suffix context and a short `maxTokens` budget. Requires the desktop **runtime** to be started and **IDE integration** enabled.
 
-Build from `integrations/intellij-plugin/` with **JDK 17+** and **Gradle 8.13+** (IntelliJ Platform Gradle Plugin 2.x). Prefer `./gradlew buildPlugin` / `gradlew.bat buildPlugin` (wrapper uses Gradle 9.4.1; bump the wrapper when Gradle 10 is released). Then **Settings → Plugins → ⚙ → Install Plugin from Disk…** and choose the ZIP under `build/distributions/` (for example `local-llm-intellij-0.2.4.zip`).
+Build from `integrations/intellij-plugin/` with **JDK 17+** and **Gradle 8.13+** (IntelliJ Platform Gradle Plugin 2.x). Prefer `./gradlew buildPlugin` / `gradlew.bat buildPlugin` (wrapper uses Gradle 9.4.1; bump the wrapper when Gradle 10 is released). Then **Settings → Plugins → ⚙ → Install Plugin from Disk…** and choose the ZIP under `build/distributions/` (for example `local-llm-intellij-0.2.5.zip`).

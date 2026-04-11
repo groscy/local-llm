@@ -64,7 +64,9 @@ const chatBodySchema = z.object({
         content: z.string()
       })
     )
-    .min(1)
+    .min(1),
+  /** Optional cap for this request (e.g. IDE inline completion). Falls back to app chat max when omitted. */
+  maxTokens: z.number().int().min(1).max(262_144).optional()
 })
 
 const pluginReportMetaValue = z.union([z.string(), z.number(), z.boolean(), z.null()])
@@ -170,7 +172,10 @@ export function configureIntegrationServer(ctx: {
           return
         }
         const messages = parsed.data.messages as ChatMessage[]
-        const maxTokens = readChatMaxTokens(store)
+        const maxTokens =
+          parsed.data.maxTokens != null
+            ? Math.min(262_144, Math.max(1, Math.floor(parsed.data.maxTokens)))
+            : readChatMaxTokens(store)
         try {
           const usage: { promptTokens?: number; completionTokens?: number } = {}
           const chatStarted = Date.now()

@@ -168,12 +168,29 @@ object LocalLlmHttpClient {
         }
     }
 
-    fun chat(port: Int, token: String, messages: List<ChatMessage>): ChatCompletion {
-        val body = buildMessagesJson(messages)
+    class LocalLlmHttpException(val status: Int, val body: String) :
+        Exception("HTTP $status: ${body.take(500)}")
+
+    fun chat(port: Int, token: String, messages: List<ChatMessage>): ChatCompletion =
+        chat(port, token, messages, maxTokens = null, requestTimeout = Duration.ofMinutes(15))
+
+    /**
+     * @param maxTokens when set, sent as `maxTokens` in the JSON body so the desktop app can cap completion length
+     * (e.g. inline IDE suggestions) without changing global chat settings.
+     * @param requestTimeout HTTP client timeout for the whole request (inline completion uses a shorter value).
+     */
+    fun chat(
+        port: Int,
+        token: String,
+        messages: List<ChatMessage>,
+        maxTokens: Int?,
+        requestTimeout: Duration
+    ): ChatCompletion {
+        val body = buildMessagesJson(messages, maxTokens)
         val uri = URI.create("http://127.0.0.1:$port/v1/chat")
         val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build()
         val rb = HttpRequest.newBuilder(uri)
-            .timeout(Duration.ofMinutes(15))
+            .timeout(requestTimeout)
             .header("Content-Type", "application/json; charset=utf-8")
         if (token.isNotBlank()) {
             rb.header("Authorization", "Bearer $token")
@@ -196,14 +213,12 @@ object LocalLlmHttpClient {
         }
     }
 
-    class LocalLlmHttpException(val status: Int, val body: String) :
-        Exception("HTTP $status: ${body.take(500)}")
-
-    private fun buildMessagesJson(messages: List<ChatMessage>): String {
+    private fun buildMessagesJson(messages: List<ChatMessage>, maxTokens: Int? = null): String {
         val parts = messages.joinToString(",") { m ->
             """{"role":${jsonString(m.role)},"content":${jsonString(m.content)}}"""
         }
-        return """{"messages":[$parts]}"""
+        val maxPart = if (maxTokens != null) ""","maxTokens":${maxTokens.coerceIn(1, 262_144)}""" else ""
+        return """{"messages":[$parts]$maxPart}"""
     }
 
     private fun jsonString(s: String): String {
