@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Local LLM Desktop — Run models locally with RAG, wiki &amp; training</title>
+    <title>Local LLM Desktop — Local inference, Hugging Face, RAG wiki &amp; training</title>
     <meta
       name="description"
-      content="Desktop app for local inference with Hugging Face hub, Ollama and llama.cpp, knowledge wiki, and optional LoRA training."
+      content="Desktop app for private local LLM chat: Hugging Face downloads (GGUF and Safetensors with sidecars), Ollama or llama.cpp, RAG wiki with inline highlights, metrics widgets, accent themes, and optional LoRA training. PolyForm Noncommercial license."
     />
-    <link rel="icon" type="image/png" href="assets/app-icon.png" />
-    <link rel="apple-touch-icon" href="assets/app-icon.png" />
-    <link rel="stylesheet" href="css/site.css" />
+    <link rel="icon" type="image/png" href="./assets/app-icon.png" />
+    <link rel="apple-touch-icon" href="./assets/app-icon.png" />
+    <link rel="stylesheet" href="./css/site.css" />
   </head>
   <body>
     <div class="bg-grid" aria-hidden="true"></div>
@@ -18,7 +18,7 @@
     <div class="wrap">
       <header class="site-nav">
         <a class="brand" href="index.html">
-          <img class="brand-mark" src="assets/app-icon.png" width="36" height="36" alt="" />
+          <img class="brand-mark" src="./assets/app-icon.png" width="36" height="36" alt="" decoding="async" />
           <span>Local LLM Desktop</span>
         </a>
         <nav class="nav-links" aria-label="Primary">
@@ -35,9 +35,10 @@
           <p class="hero-badge">Local-first · Private · Extensible</p>
           <h1>Inference, knowledge, and tooling—on your machine.</h1>
           <p class="hero-lead">
-            A focused desktop shell for chatting with local models, browsing a compiled wiki from your
-            documents, pulling weights from Hugging Face or Ollama, and experimenting with LoRA training—without
-            sending prompts to the cloud.
+            A focused desktop shell for chatting with local models, browsing a compiled wiki from your documents, and
+            installing weights from the Hugging Face hub or Ollama—without sending prompts to the cloud. The UI uses a
+            cohesive dark “glass” theme with selectable accent presets, pinned metrics and download progress, and optional
+            LoRA training hooks when you want to experiment.
           </p>
           <div class="hero-actions">
             <a class="btn btn-primary" href="download.html">Download</a>
@@ -54,10 +55,12 @@
           <h2 id="showcase-heading" class="visually-hidden">Product preview</h2>
           <div class="showcase-frame">
             <img
-              src="assets/screenshot-chat.svg"
+              src="./assets/screenshot-chat.svg"
               width="1200"
               height="720"
               alt="Concept preview: chat layout with conversation list, message thread, composer, and knowledge sidebar in a dark glass UI."
+              decoding="async"
+              fetchpriority="high"
             />
           </div>
           <div class="showcase-caption">
@@ -69,35 +72,47 @@
             <figure class="shot-card">
               <div class="showcase-frame">
                 <img
-                  src="assets/screenshot-models.svg"
+                  src="./assets/screenshot-models.svg"
                   width="1200"
                   height="720"
-                  alt="Concept preview: model library drawer with search and model cards."
+                  alt="Concept preview: model library drawer with search, model cards, and download actions."
+                  decoding="async"
                 />
               </div>
-              <figcaption>Model library — Hub, filters, and install flows.</figcaption>
+              <figcaption>
+                Model library — search the Hub, expandable rows, one-click download (GGUF or Safetensors), or Ollama pull
+                when the backend matches.
+              </figcaption>
             </figure>
             <figure class="shot-card">
               <div class="showcase-frame">
                 <img
-                  src="assets/screenshot-wiki.svg"
+                  src="./assets/screenshot-wiki.svg"
                   width="1200"
                   height="720"
                   alt="Concept preview: wiki article view with topic list and knowledge graph panel."
+                  decoding="async"
                 />
               </div>
-              <figcaption>Wiki &amp; graph — RAG-backed pages and topic links.</figcaption>
+              <figcaption>
+                Wiki &amp; graph — RAG-backed articles, glossary, knowledge graph, and wiki term highlights in chat with
+                quick navigation to sources.
+              </figcaption>
             </figure>
             <figure class="shot-card">
               <div class="showcase-frame">
                 <img
-                  src="assets/screenshot-chat.svg"
+                  src="./assets/screenshot-chat.svg"
                   width="1200"
                   height="720"
                   alt="Concept preview: same chat workspace emphasizing layout."
+                  decoding="async"
                 />
               </div>
-              <figcaption>Unified shell — nav, runtime controls, and side tools.</figcaption>
+              <figcaption>
+                Unified shell — bottom or side nav, runtime controls, pinned widgets (metrics, downloads, token
+                activity), and appearance accents you can switch in Settings.
+              </figcaption>
             </figure>
           </div>
         </section>
@@ -106,7 +121,8 @@
           <p class="section-label">Capabilities</p>
           <h2 id="features-heading">Built for serious local workflows</h2>
           <p class="section-lead">
-            Everything runs on your hardware. Swap backends, attach knowledge, and keep telemetry optional.
+            Everything runs on your hardware. Swap backends, attach knowledge, pin the stats you care about, and keep
+            cloud use limited to what you explicitly start (e.g. Hub downloads).
           </p>
           <div class="bento">
             <article class="bento-card">
@@ -121,23 +137,29 @@
               <div class="bento-icon" aria-hidden="true">◎</div>
               <h3>Hugging Face hub</h3>
               <p>
-                Search and download models from the Hub into your configured folder, with progress and resume-friendly
-                transfers.
+                Search curated and community models, then install with one action: prefer
+                <strong>GGUF</strong> when available, or <strong>Safetensors</strong> with automatic pulls of config,
+                tokenizer files, and multi-part shards into a per-model folder layout so local conversion and llama.cpp can
+                succeed. Progress in the drawer and pinned downloads; resume uses stable resolve URLs.
               </p>
             </article>
             <article class="bento-card">
               <div class="bento-icon" aria-hidden="true">✦</div>
               <h3>RAG &amp; wiki</h3>
               <p>
-                Ingest sources, compile markdown wiki pages, search chunks, and highlight terms inline in chat replies.
+                Ingest sources, compile markdown wiki pages, search chunks, and surface glossary-style
+                <strong>wiki highlights</strong> inside assistant messages—hover for context and jump straight to the
+                article.
               </p>
             </article>
             <article class="bento-card wide">
               <div class="bento-icon" aria-hidden="true">⌁</div>
-              <h3>Training hook</h3>
+              <h3>Training, metrics &amp; polish</h3>
               <p>
-                Optional local LoRA training pipeline for experimentation—wired as a separate step so inference stays
-                snappy. Metrics and pinned widgets keep GPU and token stats visible when you want them.
+                Optional local LoRA training for experimentation stays separate from inference. Pin
+                <strong>metrics</strong> (memory, CPU, GPU, tokens, latency mini-charts) and
+                <strong>activity</strong> bars alongside downloads. The interface uses a unified cosmic palette with
+                <strong>accent presets</strong> (violet, teal, amber, rose, sky) in Settings → Appearance.
               </p>
             </article>
           </div>
@@ -147,8 +169,11 @@
           <p class="section-label">Licensing</p>
           <h2 id="license-teaser-heading">Free for you. Fair for teams.</h2>
           <p class="section-lead">
-            Personal and academic use is free. Organizations using the product for commercial work should purchase an
-            enterprise license.
+            The software is offered under the
+            <strong>PolyForm Noncommercial License 1.0.0</strong> plus terms naming
+            <strong>Cyril Grossenbacher</strong> as copyright holder: noncommercial use is free; commercial use needs a
+            separate agreement and fees. Read the full text on the license page before redistributing or deploying in a
+            business.
           </p>
           <a class="btn btn-ghost" href="license.html">View license terms</a>
         </section>

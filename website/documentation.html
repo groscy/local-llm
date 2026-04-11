@@ -4,10 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Documentation — Local LLM Desktop</title>
-    <meta name="description" content="Documentation for Local LLM Desktop: setup, runtimes, models, RAG wiki, and training." />
-    <link rel="icon" type="image/png" href="assets/app-icon.png" />
-    <link rel="apple-touch-icon" href="assets/app-icon.png" />
-    <link rel="stylesheet" href="css/site.css" />
+    <meta
+      name="description"
+      content="Local LLM Desktop: Models hub, Ollama or Files on my PC runtime, GGUF &amp; Safetensors downloads, RAG wiki, metrics &amp; pinned widgets, appearance, license."
+    />
+    <link rel="icon" type="image/png" href="./assets/app-icon.png" />
+    <link rel="apple-touch-icon" href="./assets/app-icon.png" />
+    <link rel="stylesheet" href="./css/site.css" />
   </head>
   <body class="content-page">
     <div class="bg-grid" aria-hidden="true"></div>
@@ -15,7 +18,7 @@
     <div class="wrap">
       <header class="site-nav">
         <a class="brand" href="index.html">
-          <img class="brand-mark" src="assets/app-icon.png" width="36" height="36" alt="" />
+          <img class="brand-mark" src="./assets/app-icon.png" width="36" height="36" alt="" decoding="async" />
           <span>Local LLM Desktop</span>
         </a>
         <nav class="nav-links" aria-label="Primary">
@@ -32,66 +35,158 @@
           <p class="section-label">Docs</p>
           <h1>Documentation</h1>
           <p class="hero-lead" style="margin: 0; text-align: left; max-width: none">
-            Quick reference for installing, choosing a runtime, loading models, and using knowledge features. For
-            engine-specific details, follow links to Ollama and llama.cpp upstream docs.
+            How to install, pick a runtime from the top bar, use the <strong>Models</strong> hub, run chat with RAG wiki
+            features, and tune appearance and widgets. For Ollama and llama.cpp specifics, see their upstream
+            documentation.
           </p>
         </section>
 
         <nav aria-label="On this page">
           <ul class="doc-toc">
             <li><a href="#start">Getting started</a></li>
+            <li><a href="#ui">Main window &amp; appearance</a></li>
             <li><a href="#runtime">Inference runtime</a></li>
-            <li><a href="#models">Models &amp; Hub</a></li>
-            <li><a href="#rag">Knowledge &amp; wiki</a></li>
+            <li><a href="#models">Models (Hub) &amp; downloads</a></li>
+            <li><a href="#safetensors">Safetensors &amp; GGUF conversion</a></li>
+            <li><a href="#rag">Knowledge, wiki &amp; chat</a></li>
+            <li><a href="#metrics">Metrics &amp; pinned widgets</a></li>
             <li><a href="#train">Training</a></li>
-            <li><a href="#privacy">Privacy &amp; data</a></li>
+            <li><a href="#settings">Settings &amp; confirmations</a></li>
+            <li><a href="#privacy">Privacy, data &amp; license</a></li>
             <li><a href="download.html#tooling">IDE plugin (IntelliJ)</a></li>
           </ul>
         </nav>
 
         <h2 id="start">Getting started</h2>
         <p>
-          Install the app for your platform from the <a href="download.html">Download</a> page. On first launch, open
-          <strong>Run</strong> (inference runtime drawer) to confirm either Ollama is reachable or llama.cpp binary is
-          detected, then pick a model and press <strong>Start</strong>.
+          Install from the <a href="download.html">Download</a> page (or run from source with <code>npm run dev</code>).
+          Open <strong>Your AI (Run)</strong> in the sidebar to confirm <strong>Ollama</strong> is reachable or
+          <strong>llama-server</strong> is configured, pick a model, then use <strong>Start</strong>. The header shows
+          whether the runtime is on; you can click the status to open Run.
+        </p>
+
+        <h2 id="ui">Main window &amp; appearance</h2>
+        <p>
+          The app uses a dark, glass-style layout. <strong>Settings → Appearance</strong> offers accent presets (violet,
+          teal, amber, rose, sky) that recolor buttons, highlights, and chart lines together.
+        </p>
+        <p>
+          Sidebar entries open slide-over drawers: <strong>Models</strong> (title in the drawer:
+          <em>Browse models</em>), <strong>Your AI (Run)</strong>, <strong>Training</strong>,
+          <strong>Metrics</strong>, and <strong>Settings</strong>. On small windows the nav may dock to the bottom; chat
+          and knowledge panels can slide from edges you choose (stored per window).
         </p>
 
         <h2 id="runtime">Inference runtime</h2>
-        <h3>Ollama</h3>
         <p>
-          Select <strong>Ollama</strong> in the top bar, choose a tag from the list, and start. If a model is missing,
-          the app can pull it into your local Ollama library (see Model library when Ollama is the active backend).
+          The <strong>top bar</strong> selects how models are loaded (independent of which drawer you have open):
         </p>
-        <h3>llama.cpp</h3>
+        <ul>
+          <li>
+            <strong>Ollama</strong> — uses your local Ollama API (default <code>http://127.0.0.1:11434</code>). Enter a
+            model tag you have pulled (e.g. <code>llama3.2</code>). Override the base URL in Settings if needed.
+          </li>
+          <li>
+            <strong>Files on my PC</strong> — runs <strong>llama.cpp</strong> <code>llama-server</code> against a file
+            path. Point Settings at the <code>llama-server</code> binary if it is not auto-detected, set the HTTP port if
+            8080 is busy, then choose a <code>.gguf</code> path (or <code>.safetensors</code> with conversion
+            configured — see below).
+          </li>
+        </ul>
+
+        <h2 id="models">Models (Hub) &amp; downloads</h2>
         <p>
-          Select <strong>llama.cpp</strong>, point to a <code>.gguf</code> file under your models directory (or download
-          from the Hub into that folder), configure the <code>llama-server</code> binary if needed, then start.
+          Open <strong>Models</strong> in the sidebar. You can switch <strong>Recommended</strong> vs search, open the
+          <strong>Browse / installed</strong> views, sort and filter cards, and expand rows for details. The primary
+          <strong>Download</strong> action:
+        </p>
+        <ul>
+          <li>
+            Prefers a main <code>.gguf</code> file when the repository lists one (skipping common auxiliary blobs such
+            as vision projector files when possible).
+          </li>
+          <li>
+            Otherwise downloads a primary <code>.safetensors</code> weight together with listed
+            <strong>config</strong>, <strong>tokenizer</strong>, and related small files, and with other parts of the
+            same <strong>sharded</strong> set (<code>…-01-of-04…</code>) when applicable.
+          </li>
+          <li>
+            Stores everything under your models directory inside a <strong>per-repo folder</strong> that keeps
+            Hugging Face <strong>relative paths</strong> (so <code>config.json</code> and weights stay in a valid tree).
+          </li>
+          <li>
+            With <strong>Ollama</strong> selected in the top bar, some curated repos map to an Ollama library name and
+            use <code>ollama pull</code> instead of a file download when there is no suitable GGUF/Safetensors file in the
+            listing.
+          </li>
+        </ul>
+        <p>
+          Progress appears in the Models drawer and can be mirrored in a <strong>pinned Downloads</strong> widget
+          (Settings). Completed downloads register for “installed” detection. Interrupted downloads can
+          <strong>resume</strong> after restart when the app recorded the Hub file path. Add a
+          <a href="https://huggingface.co/settings/tokens">Hugging Face token</a> in Settings for gated models or better
+          rate limits.
         </p>
 
-        <h2 id="models">Models &amp; Hub</h2>
+        <h2 id="safetensors">Safetensors &amp; GGUF conversion</h2>
         <p>
-          The <strong>Models</strong> drawer searches Hugging Face, shows curated recommendations, and splits
-          <em>installed</em> vs <em>available</em> based on your active backend. With llama.cpp, installs are file
-          downloads; with Ollama, matching entries use <code>ollama pull</code> against your configured API URL.
+          <code>llama-server</code> expects <strong>GGUF</strong> for inference. If you only have
+          <strong>Safetensors</strong> checkpoints on disk, the app can run a one-time conversion using
+          <strong>llama.cpp</strong>’s <code>convert_hf_to_gguf.py</code> (and Python) when those paths are set under
+          <strong>Settings → AI engine</strong>. Ensure your layout includes <code>config.json</code> next to the
+          weights—Hub installs arranged as above are intended to satisfy that. Very custom or partial repos may still need
+          a full manual clone from the Hub.
         </p>
 
-        <h2 id="rag">Knowledge &amp; wiki</h2>
+        <h2 id="rag">Knowledge, wiki &amp; chat</h2>
         <p>
-          Ingest text, files, or conversations into the knowledge base. Compiled wiki pages support glossary blocks,
-          cross-links, and a knowledge graph view. Chat can highlight wiki-derived phrases and link back to sources.
+          Ingest documents, notes, or saved chats into the knowledge base. The app chunks text, searches it at query
+          time, and can compile <strong>wiki</strong> pages with glossary blocks, cross-links, and a
+          <strong>knowledge graph</strong> (sampled on large libraries for performance).
+        </p>
+        <p>
+          Wiki-linked <strong>terms</strong> can appear as highlights inside assistant messages; hover for a short
+          excerpt and open the wiki article from there. Optional <strong>auto-extract notes</strong> after each reply
+          (Settings → Chat generation) runs an extra local completion to distill bullets into knowledge—disable it to
+          save tokens.
+        </p>
+
+        <h2 id="metrics">Metrics &amp; pinned widgets</h2>
+        <p>
+          <strong>Metrics</strong> shows time-series charts (process RSS, CPU, optional NVIDIA memory, runtime tokens,
+          context, rolling prompt→reply latency, etc.). You can <strong>pin</strong> a compact metrics block, a
+          <strong>downloads</strong> strip, and an <strong>activity</strong> (token throughput) visualization to any dock
+          edge, adjust refresh interval and layout weights in Settings, and resize the pinned strip.
         </p>
 
         <h2 id="train">Training</h2>
         <p>
-          The training panel launches a local Python LoRA workflow when configured. Keep model weights and datasets on
-          disk paths the app can read; refer to project <code>training/</code> scripts for CLI options and dependencies.
+          The <strong>Training</strong> drawer starts an optional local Python LoRA workflow when configured. Keep dataset
+          and base model paths readable by the app; see the repository <code>training/</code> folder for scripts and
+          dependencies. The shipped stub is minimal until you extend it with a real PyTorch / PEFT stack.
         </p>
 
-        <h2 id="privacy">Privacy &amp; data</h2>
+        <h2 id="settings">Settings &amp; confirmations</h2>
         <p>
-          Inference runs locally. No cloud API is required for core chat. Third-party services (e.g. Hugging Face
-          downloads) are only used when you initiate them. Review the <a href="license.html">license</a> for
-          redistribution terms.
+          Settings cover the models directory, llama binary and conversion script paths, Ollama URL, ports, max response
+          tokens, Hugging Face token, IDE HTTP bridge, pinned widgets, color scheme, and maintenance actions.
+        </p>
+        <p>
+          Destructive actions (for example deleting models, clearing caches, or factory reset) use the
+          <strong>system confirmation dialog</strong> so they appear above other UI.
+        </p>
+
+        <h2 id="privacy">Privacy, data &amp; license</h2>
+        <p>
+          Chat history, knowledge, wiki, metrics samples, and download metadata live in a local <strong>SQLite</strong>
+          database under app user data. Model files live in your chosen folder. Core inference does not require a cloud
+          API; Hugging Face is contacted only for searches and downloads you start.
+        </p>
+        <p>
+          Redistribution and commercial use are governed by the
+          <a href="license.html">license</a>: <strong>PolyForm Noncommercial License 1.0.0</strong> with additional
+          terms naming <strong>Cyril Grossenbacher</strong> as copyright holder. Noncommercial use is allowed under those
+          terms; commercial use requires a separate agreement.
         </p>
       </main>
 
