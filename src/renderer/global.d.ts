@@ -45,6 +45,8 @@ type Api = {
   }>
   deleteAllModels: () => Promise<{ removed: number; errors: string[]; downloadsRemoved: number }>
   resetFactoryConfig: () => Promise<{ ok: boolean }>
+  /** OS modal attached to the window; use instead of `window.confirm` so the prompt stays above in-app drawers. */
+  confirmDestructive: (p: { message: string; detail?: string; confirmLabel?: string }) => Promise<boolean>
   /** Optional destDir: when set and the path exists, free-disk is measured on that volume. */
   hardwareSummary: (destDir?: string) => Promise<HardwareSummary>
   hfSearch: (q: string, limit?: number) => Promise<unknown[]>
@@ -62,8 +64,8 @@ type Api = {
   hfCancelDownload: (id: string) => Promise<boolean>
   downloadsList: () => Promise<DownloadRow[]>
   runtimeList: () => Promise<{ id: string; label: string }[]>
-  /** `.gguf` files under the configured models / download directory (recursive). */
-  listLocalModelsInDownloadDir: () => Promise<{ modelsDir: string; paths: string[] }>
+  /** `.gguf` / `.safetensors` / `.safetensor` under the configured models dir and optional extra folders (e.g. Hub save path). */
+  listLocalModelsInDownloadDir: (additionalRoots?: string[]) => Promise<{ modelsDir: string; paths: string[] }>
   runtimeInstallPath: () => Promise<{
     llamaBinary: string
     ollamaBase: string
@@ -96,11 +98,15 @@ type Api = {
   ollamaPullModel: (modelName: string) => Promise<{ ok: true }>
   /** Progress events during `ollamaPullModel`; returns unsubscribe. */
   onOllamaPullProgress: (callback: (payload: RuntimeLoadProgress) => void) => () => void
-  /** Permanently delete one `.gguf` under the configured models directory (unload first if it is loaded). */
+  /** Permanently delete one weight file (`.gguf`, `.safetensors`, or `.safetensor`) under the models directory (unload first if loaded). */
   deleteLocalGgufModel: (absolutePath: string) => Promise<{ ok: true }>
   /** Remove one model from the Ollama library. Unload first if it is the active model. */
   deleteOllamaModel: (modelName: string) => Promise<{ ok: true }>
-  runtimeChat: (messages: { role: string; content: string }[], requestId: string) => Promise<string>
+  runtimeChat: (
+    messages: { role: string; content: string }[],
+    requestId: string,
+    opts?: { maxTokens?: number }
+  ) => Promise<string>
   conversationsList: () => Promise<unknown[]>
   conversationCreate: (title?: string) => Promise<unknown>
   conversationMessages: (id: string) => Promise<unknown[]>

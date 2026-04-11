@@ -117,12 +117,26 @@ function ChatWikiKeywordShell(props: {
   children: ReactNode
   onNavigate?: (sourceId: string) => void
 }): ReactElement {
-  const [tip, setTip] = useState<{ left: number; top: number; snippet: string } | null>(null)
+  const [tip, setTip] = useState<{
+    left: number
+    top: number
+    snippet: string
+    graphSummary?: string
+  } | null>(null)
 
   const onOut = (e: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>) => {
     const rel = e.relatedTarget
     if (rel instanceof Node && e.currentTarget.contains(rel)) return
     setTip(null)
+  }
+
+  const readTipFromEl = (el: HTMLElement): void => {
+    const sid = el.getAttribute('data-source-id')
+    if (!sid) return
+    const sn = el.getAttribute('data-snippet') ?? ''
+    const gs = el.getAttribute('data-graph-summary')?.trim() || undefined
+    const r = el.getBoundingClientRect()
+    setTip({ left: r.left, top: r.bottom + 6, snippet: sn, graphSummary: gs })
   }
 
   return (
@@ -131,19 +145,13 @@ function ChatWikiKeywordShell(props: {
       onMouseOver={(e) => {
         const el = pickWikiKwEl(e.target)
         if (!el || !e.currentTarget.contains(el)) return
-        const sid = el.getAttribute('data-source-id')
-        if (!sid) return
-        const sn = el.getAttribute('data-snippet') ?? ''
-        const r = el.getBoundingClientRect()
-        setTip({ left: r.left, top: r.bottom + 6, snippet: sn })
+        readTipFromEl(el)
       }}
       onMouseOut={onOut}
       onFocus={(e) => {
         const el = pickWikiKwEl(e.target)
         if (!el || !e.currentTarget.contains(el)) return
-        const sn = el.getAttribute('data-snippet') ?? ''
-        const r = el.getBoundingClientRect()
-        setTip({ left: r.left, top: r.bottom + 6, snippet: sn })
+        readTipFromEl(el)
       }}
       onBlur={onOut}
       onClick={(e) => {
@@ -171,7 +179,13 @@ function ChatWikiKeywordShell(props: {
           style={{ left: tip.left, top: tip.top }}
           role="tooltip"
         >
-          {tip.snippet}
+          {tip.snippet ? <div className="chat-wiki-kw-tooltip-kb">{tip.snippet}</div> : null}
+          {tip.graphSummary ? (
+            <div className="chat-wiki-kw-tooltip-kg">
+              <div className="chat-wiki-kw-tooltip-kg-label">Knowledge graph</div>
+              <div className="chat-wiki-kw-tooltip-kg-body">{tip.graphSummary}</div>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -232,11 +246,18 @@ export function ChatRichContent(props: {
           ) : (
             <span
               key={`k-${i}`}
-              className={CHAT_WIKI_KW_CLASS}
+              className={
+                p.term.graphSummary?.trim()
+                  ? `${CHAT_WIKI_KW_CLASS} chat-wiki-kw--kg`
+                  : CHAT_WIKI_KW_CLASS
+              }
               role="link"
               tabIndex={0}
               data-source-id={p.term.sourceId}
               data-snippet={p.term.snippet.replace(/\s+/g, ' ').trim()}
+              {...(p.term.graphSummary?.trim()
+                ? { 'data-graph-summary': p.term.graphSummary.replace(/\s+/g, ' ').trim() }
+                : {})}
             >
               {p.value}
             </span>

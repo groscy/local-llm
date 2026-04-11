@@ -97,6 +97,10 @@ export function applyWikiHighlightsToElement(root: HTMLElement, terms: readonly 
     span.setAttribute('tabindex', '0')
     span.dataset.sourceId = term.sourceId
     span.dataset.snippet = term.snippet.replace(/\s+/g, ' ').trim()
+    if (term.graphSummary?.trim()) {
+      span.dataset.graphSummary = term.graphSummary.replace(/\s+/g, ' ').trim()
+      span.classList.add('chat-wiki-kw--kg')
+    }
     span.textContent = mid
 
     const parent = node.parentNode

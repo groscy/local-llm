@@ -27,6 +27,7 @@ import type {
   WikiSourceKind,
   WikiTopic
 } from '@shared/types'
+import { hfResolveRevision, pickPrimaryHubWeightFile } from '@shared/hfGgufPick'
 import { evaluateModelForHardware } from '@shared/modelHardwareFit'
 import type { ColorSchemeId } from '@shared/colorScheme'
 import { COLOR_SCHEME_IDS, COLOR_SCHEME_LABELS, DEFAULT_COLOR_SCHEME, parseColorScheme } from '@shared/colorScheme'
@@ -90,6 +91,47 @@ function groupWikiTopicsByKind(topics: WikiTopic[]): Map<WikiSourceKind, WikiTop
   return m
 }
 
+const COMPOSER_INLINE_SUGGEST_SYSTEM =
+  'You complete a chat message the user is typing to an AI assistant. Output ONLY the immediate continuation: the next few words or one short sentence. Do not repeat text they already wrote. No quotes, markdown, labels, roleplay, or explanation. If no sensible continuation exists, output a single period.'
+
+function normalizeComposerSuggestion(raw: string, draft: string): string {
+  let s = raw.replace(/\r\n/g, '\n').trim()
+  if (!s || s === '.' || s === '。') return ''
+  const fence = /^```(?:\w*\n)?([\s\S]*?)```$/m.exec(s)
+  if (fence) s = fence[1].trim()
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim()
+  }
+  const lowerStart = s.toLowerCase()
+  for (const prefix of ['continuation:', 'suffix:', 'completion:']) {
+    if (lowerStart.startsWith(prefix)) {
+      s = s.slice(prefix.length).trimStart()
+      break
+    }
+  }
+  const d = draft.replace(/\r\n/g, '\n')
+  const dTrim = d.trimEnd()
+  if (dTrim.length > 0) {
+    const dl = dTrim.toLowerCase()
+    const sl = s.toLowerCase()
+    if (sl.startsWith(dl) && s.length >= dTrim.length) {
+      s = s.slice(dTrim.length).trimStart()
+    }
+    const lastLine = d.split('\n').pop() ?? d
+    const ll = lastLine.trimEnd()
+    if (ll.length > 0) {
+      const sll = s.toLowerCase()
+      if (sll.startsWith(ll.toLowerCase()) && s.length > ll.length) {
+        s = s.slice(ll.length).trimStart()
+      }
+    }
+  }
+  const para = (s.split(/\n\n/, 2)[0] ?? s).trim()
+  s = para
+  if (s.length > 600) s = s.slice(0, 600)
+  return s
+}
+
 const METRICS_REFRESH_PRESETS_MS = [
   1000, 2000, 3000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000, 3_600_000
 ] as const
@@ -128,6 +170,9 @@ type SettingsNavId =
   | 'data'
   | 'maintenance'
 type HfLibraryMode = 'recommended' | 'search'
+
+/** Models drawer: browse Hub vs manage installed entries. */
+type HfHubSubview = 'store' | 'installed'
 type HfModelSortKey = 'downloads' | 'likes' | 'size'
 type PinnedWidgetsSide = 'left' | 'right' | 'top' | 'bottom'
 
@@ -195,7 +240,8 @@ function clampSlideKb(px: number): number {
 
 const PINNED_W_MIN = 200
 const PINNED_W_DEFAULT = 308
-const PINNED_H_MIN = 140
+/** Enough room for chrome (title, pins, dock) plus at least one widget without clipping. */
+const PINNED_H_MIN = 300
 const PINNED_H_DEFAULT = 360
 
 function clampPinnedWidth(px: number): number {
@@ -232,11 +278,29 @@ function clampLlamaPort(n: number): number {
   return Math.min(65535, Math.max(1024, Math.floor(n)))
 }
 
+/** Increment in app when welcome/onboarding copy should show again for everyone. */
+const WELCOME_GUIDE_LATEST = 1
+
+function humanizeChatError(raw: string): string {
+  const stripped = raw
+    .replace(/^Error:\s*Error invoking remote method 'runtime:chat':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim()
+  if (/^runtime not started/i.test(stripped)) {
+    return 'Your AI is not running yet. Pick a model in the top bar, press the play button, and wait until loading finishes. Open Run in the sidebar if you need help installing or choosing a model.'
+  }
+  if (/nothing is listening/i.test(stripped)) {
+    return 'The AI engine did not answer. Make sure the model is started (play button) and wait until it is ready. Open Run to check setup.'
+  }
+  if (stripped.length > 0 && stripped.length < 420) return stripped
+  return raw
+}
+
 const SETTINGS_NAV_ITEMS: { id: SettingsNavId; label: string; icon: string }[] = [
   { id: 'general', label: 'General', icon: 'fa-sliders' },
   { id: 'appearance', label: 'Appearance', icon: 'fa-palette' },
   { id: 'chat', label: 'Chat & knowledge', icon: 'fa-comments' },
-  { id: 'runtime', label: 'Runtime & backends', icon: 'fa-microchip' },
+  { id: 'runtime', label: 'AI engine', icon: 'fa-microchip' },
   { id: 'integrations', label: 'Integrations', icon: 'fa-plug' },
   { id: 'widgets', label: 'Widgets & metrics', icon: 'fa-gauge-high' },
   { id: 'data', label: 'Files & paths', icon: 'fa-hard-drive' },
@@ -269,7 +333,8 @@ function pinnedWidgetsAsideStyle(
   heightPx: number
 ): React.CSSProperties {
   if (narrowStack && (side === 'left' || side === 'right')) {
-    return { width: '100%', maxHeight: clampPinnedHeight(heightPx) }
+    const h = clampPinnedHeight(heightPx)
+    return { width: '100%', minHeight: h, maxHeight: h }
   }
   if (side === 'left' || side === 'right') {
     return { width: clampPinnedWidth(widthPx) }
@@ -313,6 +378,70 @@ function huggingFaceModelUrl(repoId: string): string {
   return `https://huggingface.co/${repoId.split('/').map(encodeURIComponent).join('/')}`
 }
 
+/** Hub paths that are not `owner/repo` model pages. */
+const HF_URL_NON_MODEL_ROOTS = new Set([
+  'datasets',
+  'spaces',
+  'organizations',
+  'collections',
+  'docs',
+  'blog',
+  'tasks',
+  'papers',
+  'login',
+  'join',
+  'oauth'
+])
+
+/**
+ * If `raw` is a Hugging Face model URL (or scheme-less `huggingface.co/...`), returns `namespace/repo`.
+ * Strips `/tree/...`, `/blob/...`, query strings, and fragments.
+ */
+function parseHuggingFaceRepoIdFromInput(raw: string): string | null {
+  const t = raw.trim()
+  if (!t) return null
+
+  const isHfHost = (host: string): boolean => {
+    const h = host.toLowerCase()
+    return h === 'huggingface.co' || h === 'www.huggingface.co' || h === 'hf.co'
+  }
+
+  try {
+    let pathname: string | null = null
+    if (/^https?:\/\//i.test(t)) {
+      const u = new URL(t)
+      if (isHfHost(u.hostname)) pathname = u.pathname
+    } else if (/^(https?:\/\/)?(www\.)?huggingface\.co\//i.test(t) || /^(https?:\/\/)?hf\.co\//i.test(t)) {
+      const normalized = /^https?:\/\//i.test(t) ? t : `https://${t.replace(/^\/+/, '')}`
+      pathname = new URL(normalized).pathname
+    }
+    if (!pathname) return null
+    const parts = pathname.split('/').filter(Boolean)
+    if (parts.length < 2) return null
+    const owner = parts[0]!
+    const repo = parts[1]!
+    if (HF_URL_NON_MODEL_ROOTS.has(owner.toLowerCase())) return null
+    return `${owner}/${repo}`
+  } catch {
+    return null
+  }
+}
+
+function hfDetailToBrowseSummary(d: HfModelDetail): HfModelSummary {
+  return {
+    id: d.id,
+    author: d.author,
+    downloads: d.downloads,
+    likes: d.likes,
+    tags: d.tags,
+    pipeline_tag: d.pipeline_tag,
+    private: d.private,
+    description: d.description,
+    totalSizeBytes: d.totalSizeBytes,
+    ollamaLibraryName: d.ollamaLibraryName
+  }
+}
+
 function parseNonNegativeInt(raw: string): number | undefined {
   const t = raw.trim()
   if (!t) return undefined
@@ -332,6 +461,29 @@ function parseNonNegativeFloat(raw: string): number | undefined {
 function parsePinnedWidgetsSide(raw: unknown): PinnedWidgetsSide {
   if (raw === 'left' || raw === 'right' || raw === 'top' || raw === 'bottom') return raw
   return 'left'
+}
+
+type PinnedWidgetKind = 'metrics' | 'downloads' | 'activity'
+
+const PINNED_WIDGET_WEIGHT_DEFAULT: Record<PinnedWidgetKind, number> = {
+  metrics: 1,
+  downloads: 1,
+  activity: 1
+}
+
+function clampPinnedWidgetWeights(raw: unknown): Record<PinnedWidgetKind, number> {
+  const d = PINNED_WIDGET_WEIGHT_DEFAULT
+  if (!raw || typeof raw !== 'object') return { ...d }
+  const o = raw as Record<string, unknown>
+  const one = (v: unknown): number => {
+    if (typeof v !== 'number' || !Number.isFinite(v)) return 1
+    return Math.min(100, Math.max(0.05, v))
+  }
+  return {
+    metrics: one(o.metrics),
+    downloads: one(o.downloads),
+    activity: one(o.activity)
+  }
 }
 
 function runtimeKindLabel(kind: RuntimeStatus['kind']): string {
@@ -364,6 +516,40 @@ type ChatMessageVm = {
 
 function charTokenEst(s: string): number {
   return Math.max(1, Math.ceil(s.length / 4))
+}
+
+type UserPromptReceipt = { delivered: boolean; responseStarted: boolean }
+
+function userMessageReceiptKey(cid: string | null, m: ChatMessageVm): string | undefined {
+  if (!cid || m.role !== 'user') return undefined
+  const suffix =
+    m.id ??
+    (typeof m.createdAt === 'number' && Number.isFinite(m.createdAt) ? `t:${m.createdAt}` : '')
+  if (!suffix) return undefined
+  return `${cid}:${suffix}`
+}
+
+function UserPromptReceiptMarks(props: { receipt: UserPromptReceipt | undefined }): ReactElement | null {
+  const r = props.receipt
+  if (!r) return null
+  const label =
+    r.delivered && r.responseStarted
+      ? 'Prompt reached the model and the reply has started.'
+      : r.delivered
+        ? 'Prompt reached the model; waiting for the first reply tokens.'
+        : 'Sending prompt to the model…'
+  return (
+    <span className="msg-prompt-receipts" role="status" aria-label={label}>
+      <i
+        className={`fa-solid fa-check msg-prompt-receipt${r.delivered ? ' msg-prompt-receipt--on' : ''}`}
+        aria-hidden
+      />
+      <i
+        className={`fa-solid fa-check msg-prompt-receipt${r.responseStarted ? ' msg-prompt-receipt--on' : ''}`}
+        aria-hidden
+      />
+    </span>
+  )
 }
 
 function bubbleTokenLine(m: ChatMessageVm): string {
@@ -454,6 +640,7 @@ const HF_HUB_PAGE_SIZE = 12
 function hfSummaryFormatLabel(m: HfModelSummary): string {
   const tags = m.tags ?? []
   if (tags.some((t) => t.toLowerCase() === 'gguf')) return 'GGUF'
+  if (tags.some((t) => t.toLowerCase() === 'safetensors')) return 'Safetensors'
   if (/gguf/i.test(m.id)) return 'GGUF'
   if (tags.length > 0) return tags.slice(0, 4).join(', ')
   if (m.pipeline_tag?.trim()) return m.pipeline_tag.trim()
@@ -463,6 +650,55 @@ function hfSummaryFormatLabel(m: HfModelSummary): string {
 function hfSummarySizeDisplay(m: HfModelSummary): string {
   const b = m.totalSizeBytes
   return b != null && b > 0 ? `~${formatBytes(b)}` : '—'
+}
+
+function hfHardwareFitTooltipLines(ev: ReturnType<typeof evaluateModelForHardware>): string {
+  return `${ev.headline}\n\n${ev.notes.join('\n')}`
+}
+
+/** First column for downloadable hub rows: green / yellow / red check from `evaluateModelForHardware`. */
+function renderHfHubHardwareFitCell(m: HfModelSummary, hw: HardwareSummary | null): ReactElement {
+  if (!hw) {
+    return (
+      <td className="hf-model-table-fit" onClick={(e) => e.stopPropagation()}>
+        <span
+          className="hf-model-table-fit-icon hf-model-table-fit-icon--pending"
+          title="Hardware summary not loaded yet"
+        >
+          <i className="fa-solid fa-minus" aria-hidden />
+        </span>
+        <span className="visually-hidden">Hardware fit not available yet</span>
+      </td>
+    )
+  }
+  const ev = evaluateModelForHardware(m.totalSizeBytes, hw)
+  const { verdict } = ev
+  const title = hfHardwareFitTooltipLines(ev)
+  const iconClass =
+    verdict === 'good'
+      ? 'hf-model-table-fit-icon hf-model-table-fit-icon--good'
+      : verdict === 'marginal'
+        ? 'hf-model-table-fit-icon hf-model-table-fit-icon--marginal'
+        : verdict === 'poor'
+          ? 'hf-model-table-fit-icon hf-model-table-fit-icon--poor'
+          : 'hf-model-table-fit-icon hf-model-table-fit-icon--unknown'
+  const iconName = verdict === 'unknown' ? 'fa-circle-question' : 'fa-circle-check'
+  const label =
+    verdict === 'good'
+      ? 'Good hardware fit (approximate)'
+      : verdict === 'marginal'
+        ? 'Marginal hardware fit (approximate)'
+        : verdict === 'poor'
+          ? 'Poor hardware fit (approximate)'
+          : 'Hardware fit unknown — size may be missing on the card'
+  return (
+    <td className="hf-model-table-fit" onClick={(e) => e.stopPropagation()}>
+      <span className={iconClass} title={title}>
+        <i className={`fa-solid ${iconName}`} aria-hidden />
+      </span>
+      <span className="visually-hidden">{label}</span>
+    </td>
+  )
 }
 
 function hfInstalledSizeDisplay(
@@ -678,14 +914,15 @@ export default function App(): React.ReactElement {
   const [hfResults, setHfResults] = useState<HfModelSummary[]>([])
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [detail, setDetail] = useState<HfModelDetail | null>(null)
-  const [downloadFile, setDownloadFile] = useState('')
   const [destDir, setDestDir] = useState('')
-  const [lastJobId, setLastJobId] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [welcomeModalOpen, setWelcomeModalOpen] = useState(false)
 
   const [runtimeKind, setRuntimeKind] = useState<'llamacpp' | 'ollama'>('ollama')
   const [modelPath, setModelPath] = useState('llama3.2')
   const [llamaBin, setLlamaBin] = useState('')
+  const [llamaConvertScriptPath, setLlamaConvertScriptPath] = useState('')
+  const [llamaPythonPath, setLlamaPythonPath] = useState('')
   const [llamaEnv, setLlamaEnv] = useState<LlamaEnvInfo | null>(null)
   const [ollamaHost, setOllamaHost] = useState<OllamaHostStatus | null>(null)
   const [ollamaInstallBusy, setOllamaInstallBusy] = useState(false)
@@ -867,6 +1104,8 @@ export default function App(): React.ReactElement {
   const [saveChatKbBusy, setSaveChatKbBusy] = useState(false)
   const [messages, setMessages] = useState<ChatMessageVm[]>([])
   const [draft, setDraft] = useState('')
+  const [composerGhostSuffix, setComposerGhostSuffix] = useState('')
+  const [composerSuggestBusy, setComposerSuggestBusy] = useState(false)
   const [ragQuery, setRagQuery] = useState('')
   const [ragSnippets, setRagSnippets] = useState<string[]>([])
   const [ragLoading, setRagLoading] = useState(false)
@@ -874,6 +1113,9 @@ export default function App(): React.ReactElement {
   const [ragSuggestFocused, setRagSuggestFocused] = useState(false)
   const [ragSuggestActive, setRagSuggestActive] = useState(-1)
   const ragSuggestSeqRef = useRef(0)
+  const composerSuggestGenRef = useRef(0)
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const composerMirrorInnerRef = useRef<HTMLDivElement | null>(null)
 
   const [wikiTopics, setWikiTopics] = useState<WikiTopic[]>([])
   const [wikiHighlightTerms, setWikiHighlightTerms] = useState<WikiChatHighlightTerm[]>([])
@@ -899,6 +1141,7 @@ export default function App(): React.ReactElement {
   const [recommendedModels, setRecommendedModels] = useState<HfModelSummary[]>([])
   const [recommendedLoading, setRecommendedLoading] = useState(false)
   const [hfLibraryMode, setHfLibraryMode] = useState<HfLibraryMode>('recommended')
+  const [hfHubSubview, setHfHubSubview] = useState<HfHubSubview>('store')
   const [hfSearchLoading, setHfSearchLoading] = useState(false)
   const [hfSortBy, setHfSortBy] = useState<HfModelSortKey>('downloads')
   const [hfSortDir, setHfSortDir] = useState<'asc' | 'desc'>('desc')
@@ -920,7 +1163,6 @@ export default function App(): React.ReactElement {
   const [hfOllamaPullRepoId, setHfOllamaPullRepoId] = useState<string | null>(null)
   const [hfOllamaPullBusy, setHfOllamaPullBusy] = useState(false)
   const [hfOllamaPullProgress, setHfOllamaPullProgress] = useState<RuntimeLoadProgress | null>(null)
-  const [ollamaHubPullNameDraft, setOllamaHubPullNameDraft] = useState('')
   const [trainJobs, setTrainJobs] = useState<unknown[]>([])
   const [trainBase, setTrainBase] = useState('')
   const [trainDataset, setTrainDataset] = useState('')
@@ -981,6 +1223,17 @@ export default function App(): React.ReactElement {
     startW: number
     startH: number
   } | null>(null)
+  const pinnedWidgetsBodyRef = useRef<HTMLDivElement>(null)
+  const [pinnedWidgetSplitResizing, setPinnedWidgetSplitResizing] = useState(false)
+  const pinnedWidgetWeightsRef = useRef(PINNED_WIDGET_WEIGHT_DEFAULT)
+  const widgetSplitDragRef = useRef<{
+    a: PinnedWidgetKind
+    b: PinnedWidgetKind
+    startA: number
+    startB: number
+    startClient: number
+    visible: PinnedWidgetKind[]
+  } | null>(null)
   narrowForPinnedRef.current = narrowSlideConv
 
   useEffect(() => {
@@ -1001,6 +1254,13 @@ export default function App(): React.ReactElement {
 
   const [pinnedWidgetsWidthPx, setPinnedWidgetsWidthPx] = useState(PINNED_W_DEFAULT)
   const [pinnedWidgetsHeightPx, setPinnedWidgetsHeightPx] = useState(PINNED_H_DEFAULT)
+  const [pinnedWidgetWeights, setPinnedWidgetWeights] = useState(() => ({
+    ...PINNED_WIDGET_WEIGHT_DEFAULT
+  }))
+
+  useEffect(() => {
+    pinnedWidgetWeightsRef.current = pinnedWidgetWeights
+  }, [pinnedWidgetWeights])
 
   useEffect(() => {
     pinnedWRef.current = pinnedWidgetsWidthPx
@@ -1127,12 +1387,67 @@ export default function App(): React.ReactElement {
     }
   }, [pinnedBarResizing])
 
+  useEffect(() => {
+    if (!pinnedWidgetSplitResizing) return
+    const onMove = (e: PointerEvent): void => {
+      const r = widgetSplitDragRef.current
+      const body = pinnedWidgetsBodyRef.current
+      if (!r || !body) return
+      const side = pinnedWidgetsSideRef.current
+      const inRow =
+        (side === 'top' || side === 'bottom') && !narrowForPinnedRef.current
+      const L = inRow ? body.clientWidth : body.clientHeight
+      if (L < 48) return
+      const deltaClient = inRow ? e.clientX - r.startClient : e.clientY - r.startClient
+      const w = { ...pinnedWidgetWeightsRef.current }
+      const sVis = r.visible.reduce((acc, k) => acc + w[k], 0)
+      if (sVis <= 0) return
+      const sumPair = r.startA + r.startB
+      const d = (deltaClient / L) * sVis
+      const minPx = 72
+      const waMin = (minPx / L) * sVis
+      const waMax = sumPair - (minPx / L) * sVis
+      if (waMin > waMax) return
+      let wa = r.startA + d
+      wa = Math.min(Math.max(wa, waMin), waMax)
+      const wb = sumPair - wa
+      w[r.a] = wa
+      w[r.b] = wb
+      pinnedWidgetWeightsRef.current = w
+      setPinnedWidgetWeights({ ...w })
+    }
+    const onUp = (): void => {
+      void window.api.setConfig({ pinnedWidgetWeights: { ...pinnedWidgetWeightsRef.current } })
+      setPinnedWidgetSplitResizing(false)
+      widgetSplitDragRef.current = null
+    }
+    const side = pinnedWidgetsSideRef.current
+    const inRow = (side === 'top' || side === 'bottom') && !narrowForPinnedRef.current
+    const cursor = inRow ? 'ew-resize' : 'ns-resize'
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp, true)
+    window.addEventListener('pointercancel', onUp, true)
+    document.body.style.cursor = cursor
+    document.body.style.userSelect = 'none'
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp, true)
+      window.removeEventListener('pointercancel', onUp, true)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [pinnedWidgetSplitResizing])
+
   const [metricsPinned, setMetricsPinned] = useState(false)
   const [downloadsPinned, setDownloadsPinned] = useState(false)
   const [activityPinned, setActivityPinned] = useState(false)
   const [runtimeLoadProgress, setRuntimeLoadProgress] = useState<RuntimeLoadProgress | null>(null)
   const [runtimeStarting, setRuntimeStarting] = useState(false)
   const [chatSending, setChatSending] = useState(false)
+  const [userPromptReceipts, setUserPromptReceipts] = useState<
+    Record<string, UserPromptReceipt>
+  >({})
+  const chatStreamSawFirstTokenRef = useRef(false)
   const [streamingReplyStartedAt, setStreamingReplyStartedAt] = useState<number | null>(null)
   const [chatStreamBuffer, setChatStreamBuffer] = useState('')
   const [activityChatTokens, setActivityChatTokens] = useState<ActivityChatTokens | null>(null)
@@ -1140,6 +1455,11 @@ export default function App(): React.ReactElement {
   const [activityTokenHistory, setActivityTokenHistory] = useState<ActivityTokenHistoryPoint[]>([])
   const [integrationPluginReports, setIntegrationPluginReports] = useState<PluginIntegrationReport[]>([])
   const [pinnedWidgetsSide, setPinnedWidgetsSide] = useState<PinnedWidgetsSide>('left')
+
+  useEffect(() => {
+    pinnedWidgetsSideRef.current = pinnedWidgetsSide
+  }, [pinnedWidgetsSide])
+
   const [pinnedDownloadsSnapshot, setPinnedDownloadsSnapshot] = useState<DownloadRow[]>([])
   const [metricsRefreshMs, setMetricsRefreshMs] = useState(3000)
   const [metricsRefreshCustomMode, setMetricsRefreshCustomMode] = useState(false)
@@ -1157,6 +1477,79 @@ export default function App(): React.ReactElement {
     if (!chatSending && !chatStreamBuffer) return
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [chatSending, chatStreamBuffer])
+
+  useEffect(() => {
+    setUserPromptReceipts({})
+  }, [convId])
+
+  const migrateUserPromptReceipt = useCallback((cid: string, userSentAt: number, messageId: string) => {
+    const oldK = `${cid}:t:${userSentAt}`
+    const newK = `${cid}:${messageId}`
+    setUserPromptReceipts((prev) => {
+      const v = prev[oldK]
+      if (!v) return prev
+      const next = { ...prev }
+      delete next[oldK]
+      next[newK] = v
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    const generation = ++composerSuggestGenRef.current
+    setComposerGhostSuffix('')
+
+    if (!runtimeStatus?.running || !convId || chatSending) {
+      setComposerSuggestBusy(false)
+      return
+    }
+    const trimmed = draft.trim()
+    if (trimmed.length < 12 || draft.length > 6000) {
+      setComposerSuggestBusy(false)
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        if (generation !== composerSuggestGenRef.current) return
+        setComposerSuggestBusy(true)
+        try {
+          const historyForSuggest = messages
+            .filter((m) => m.role === 'user' || m.role === 'assistant')
+            .slice(-6)
+            .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+          const msgs = [
+            { role: 'system' as const, content: COMPOSER_INLINE_SUGGEST_SYSTEM },
+            ...historyForSuggest,
+            {
+              role: 'user' as const,
+              content: `Continue this draft with only the suffix — the very next words (do not repeat existing text):\n\n${draft}`
+            }
+          ]
+          const reply = await window.api.runtimeChat(msgs, '', { maxTokens: 96 })
+          if (generation !== composerSuggestGenRef.current) return
+          const normalized = normalizeComposerSuggestion(reply, draft)
+          if (generation !== composerSuggestGenRef.current) return
+          setComposerGhostSuffix(normalized)
+        } catch {
+          if (generation !== composerSuggestGenRef.current) return
+          setComposerGhostSuffix('')
+        } finally {
+          if (generation === composerSuggestGenRef.current) setComposerSuggestBusy(false)
+        }
+      })()
+    }, 480)
+
+    return () => window.clearTimeout(timer)
+  }, [draft, messages, convId, runtimeStatus?.running, chatSending])
+
+  useLayoutEffect(() => {
+    const ta = composerTextareaRef.current
+    const inner = composerMirrorInnerRef.current
+    if (ta && inner) {
+      inner.style.transform = `translateY(${-ta.scrollTop}px)`
+    }
+  }, [draft, composerGhostSuffix])
 
   const refreshPaths = useCallback(async () => {
     const p = await window.api.getPaths()
@@ -1346,12 +1739,19 @@ export default function App(): React.ReactElement {
 
   const refreshLocalModelFiles = useCallback(async () => {
     try {
-      const r = await window.api.listLocalModelsInDownloadDir()
+      const md = (paths?.modelsDefault ?? '').trim()
+      const dt = destDir.trim()
+      const extra: string[] = []
+      if (dt) {
+        if (md && !localModelPathsEqual(dt, md, winPlatform)) extra.push(dt)
+        else if (!md) extra.push(dt)
+      }
+      const r = await window.api.listLocalModelsInDownloadDir(extra.length > 0 ? extra : undefined)
       setLocalModelFilePaths(r.paths)
     } catch {
       setLocalModelFilePaths([])
     }
-  }, [])
+  }, [paths?.modelsDefault, destDir, winPlatform])
 
   const refreshRunDrawer = useCallback(async () => {
     await refreshRunDrawerQuick()
@@ -1361,6 +1761,39 @@ export default function App(): React.ReactElement {
   const openSettings = useCallback((section: SettingsNavId = 'general') => {
     setSettingsNav(section)
     setDrawer('settings')
+  }, [])
+
+  const markWelcomeGuideSeen = useCallback(async () => {
+    const r = await window.api.setConfig({ welcomeGuideVersion: WELCOME_GUIDE_LATEST })
+    if (!r.ok) {
+      setErr(r.error ?? 'Could not save preferences')
+      return
+    }
+    setWelcomeModalOpen(false)
+  }, [])
+
+  const onWelcomeOpenRunSetup = useCallback(async () => {
+    setRuntimeKind('ollama')
+    const r = await window.api.setConfig({
+      runtimeKind: 'ollama',
+      welcomeGuideVersion: WELCOME_GUIDE_LATEST
+    })
+    if (!r.ok) {
+      setErr(r.error ?? 'Could not save preferences')
+      return
+    }
+    setWelcomeModalOpen(false)
+    setDrawer('runtime')
+    void refreshRunDrawerQuick()
+  }, [refreshRunDrawerQuick])
+
+  const showWelcomeGuideAgain = useCallback(async () => {
+    const r = await window.api.setConfig({ welcomeGuideVersion: 0 })
+    if (!r.ok) {
+      setErr(r.error ?? 'Could not save preferences')
+      return
+    }
+    setWelcomeModalOpen(true)
   }, [])
 
   const applyRuntimeKindSetting = useCallback(
@@ -1412,12 +1845,12 @@ export default function App(): React.ReactElement {
     if (localGgufDeleteMarks.length === 0) return
     const toDelete = [...localGgufDeleteMarks]
     const lines = toDelete.map((p) => fileNameFromPath(p)).join('\n')
-    if (
-      !window.confirm(
-        `Permanently delete ${toDelete.length} file(s)?\n\n${lines}\n\nThis cannot be undone.`
-      )
-    )
-      return
+    const ok = await window.api.confirmDestructive({
+      message: `Permanently delete ${toDelete.length} file(s)?`,
+      detail: `${lines}\n\nThis cannot be undone.`,
+      confirmLabel: 'Delete'
+    })
+    if (!ok) return
     setModelPurgeBusy(true)
     setErr(null)
     try {
@@ -1447,12 +1880,12 @@ export default function App(): React.ReactElement {
     if (ollamaDeleteMarks.length === 0) return
     const toRemove = [...ollamaDeleteMarks]
     const lines = toRemove.join('\n')
-    if (
-      !window.confirm(
-        `Remove ${toRemove.length} model(s) from Ollama?\n\n${lines}\n\nThis frees disk space in Ollama's store.`
-      )
-    )
-      return
+    const ok = await window.api.confirmDestructive({
+      message: `Remove ${toRemove.length} model(s) from Ollama?`,
+      detail: `${lines}\n\nThis frees disk space in Ollama's store.`,
+      confirmLabel: 'Remove'
+    })
+    if (!ok) return
     setModelPurgeBusy(true)
     setErr(null)
     try {
@@ -1617,7 +2050,6 @@ export default function App(): React.ReactElement {
     try {
       const r = await window.api.deleteAllModels()
       setHfDownloadJobs({})
-      setLastJobId(null)
       const failHint =
         r.errors.length > 0 ? ` Some items could not be removed: ${r.errors.slice(0, 4).join(' · ')}` : ''
       setSettingsMaintenanceMessage(
@@ -1697,6 +2129,11 @@ export default function App(): React.ReactElement {
       if (typeof c.pinnedWidgetsHeightPx === 'number') {
         setPinnedWidgetsHeightPx(clampPinnedHeight(c.pinnedWidgetsHeightPx))
       }
+      if (c.pinnedWidgetWeights !== undefined) {
+        const next = clampPinnedWidgetWeights(c.pinnedWidgetWeights)
+        setPinnedWidgetWeights(next)
+        pinnedWidgetWeightsRef.current = next
+      }
       if (typeof c.metricsRefreshMs === 'number') {
         const ms = clampMetricsRefreshMs(c.metricsRefreshMs)
         setMetricsRefreshMs(ms)
@@ -1715,6 +2152,9 @@ export default function App(): React.ReactElement {
       }
       if (typeof c.integrationToken === 'string') setIntegrationTokenDraft(c.integrationToken)
       if (c.runtimeKind === 'ollama' || c.runtimeKind === 'llamacpp') setRuntimeKind(c.runtimeKind)
+      const wv = c.welcomeGuideVersion
+      const welcomeSeen = typeof wv === 'number' && wv >= WELCOME_GUIDE_LATEST
+      if (!welcomeSeen) setWelcomeModalOpen(true)
       if (typeof c.ollamaBaseUrl === 'string' && c.ollamaBaseUrl.trim()) {
         setOllamaBaseUrlDraft(c.ollamaBaseUrl.trim())
       } else {
@@ -1725,6 +2165,8 @@ export default function App(): React.ReactElement {
       } else {
         setLlamaPortDraft(String(LLAMA_PORT_DEFAULT))
       }
+      if (typeof c.llamaConvertScriptPath === 'string') setLlamaConvertScriptPath(c.llamaConvertScriptPath)
+      if (typeof c.llamaPythonPath === 'string') setLlamaPythonPath(c.llamaPythonPath)
     })
   }, [refreshPaths, loadConversations, loadWiki, refreshRuntimeStatus, applyRuntimeInstallPaths])
 
@@ -1867,6 +2309,7 @@ export default function App(): React.ReactElement {
       activityPinned?: boolean
       metricsRefreshMs?: number
       pinnedWidgetsSide?: PinnedWidgetsSide
+      pinnedWidgetWeights?: Record<PinnedWidgetKind, number>
     }) => {
       const body: Record<string, unknown> = {}
       if (patch.metricsPinned !== undefined) body.metricsPinned = patch.metricsPinned
@@ -1874,6 +2317,9 @@ export default function App(): React.ReactElement {
       if (patch.activityPinned !== undefined) body.activityPinned = patch.activityPinned
       if (patch.metricsRefreshMs !== undefined) body.metricsRefreshMs = clampMetricsRefreshMs(patch.metricsRefreshMs)
       if (patch.pinnedWidgetsSide !== undefined) body.pinnedWidgetsSide = patch.pinnedWidgetsSide
+      if (patch.pinnedWidgetWeights !== undefined) {
+        body.pinnedWidgetWeights = clampPinnedWidgetWeights(patch.pinnedWidgetWeights)
+      }
       await window.api.setConfig(body)
     },
     []
@@ -2156,7 +2602,6 @@ export default function App(): React.ReactElement {
       setHfSearchLoading(false)
       setSelectedModel(null)
       setDetail(null)
-      setOllamaHubPullNameDraft('')
       setRecommendedLoading(true)
       void refreshDownloadsList()
       void refreshLocalModelFiles()
@@ -2179,19 +2624,6 @@ export default function App(): React.ReactElement {
       cancelled = true
     }
   }, [drawer, destDir])
-
-  const hfSelectedFileSizeBytes = useMemo(() => {
-    if (!detail || !downloadFile) return undefined
-    const s = detail.siblings?.find((x) => x.path === downloadFile)?.size
-    return s != null && s > 0 ? s : undefined
-  }, [detail, downloadFile])
-
-  const hfHardwareEval = useMemo(() => {
-    if (!hardwareSummary) return null
-    return evaluateModelForHardware(hfSelectedFileSizeBytes, hardwareSummary, {
-      fileSelectedSizeMissing: Boolean(downloadFile) && hfSelectedFileSizeBytes == null
-    })
-  }, [hardwareSummary, hfSelectedFileSizeBytes, downloadFile])
 
   const hfListModels = hfLibraryMode === 'search' ? hfResults : recommendedModels
   const hfListLoading = hfLibraryMode === 'search' ? hfSearchLoading : recommendedLoading
@@ -2239,11 +2671,31 @@ export default function App(): React.ReactElement {
   }, [hfListModels, hfSortBy, hfSortDir, hfFilterMinLikes, hfFilterMinDownloads, hfFilterMaxSizeGb])
 
   const hfHubInstalledModels = useMemo(() => {
-    return hfDisplayModels.filter((m) =>
+    const fromList = hfDisplayModels.filter((m) =>
       runtimeKind === 'ollama'
         ? ollamaRegistryTagInstalled(ollamaChatTags, m.ollamaLibraryName ?? '')
         : localDownloads.some((r) => r.repo_id === m.id && r.status === 'complete')
     )
+    if (runtimeKind !== 'llamacpp') return fromList
+
+    const seen = new Set(fromList.map((m) => m.id))
+    const orphanRepoIds = new Set<string>()
+    for (const r of localDownloads) {
+      if (r.status !== 'complete') continue
+      if (seen.has(r.repo_id)) continue
+      orphanRepoIds.add(r.repo_id)
+    }
+    const extras: HfModelSummary[] = [...orphanRepoIds]
+      .sort((a, b) => a.localeCompare(b))
+      .map((repoId) => {
+        const rows = localDownloads.filter((x) => x.repo_id === repoId && x.status === 'complete')
+        const sum = rows.reduce((acc, x) => acc + (Number(x.bytes_total) || 0), 0)
+        return {
+          id: repoId,
+          totalSizeBytes: sum > 0 ? sum : undefined
+        }
+      })
+    return [...extras, ...fromList]
   }, [hfDisplayModels, runtimeKind, ollamaChatTags, localDownloads])
 
   const hfHubAvailableModels = useMemo(() => {
@@ -2333,24 +2785,12 @@ export default function App(): React.ReactElement {
     setHfAvailableListPage((p) => (p > tp ? tp : p))
   }, [hfHubAvailableModels.length])
 
-  const hfFiltersActive =
-    hfFilterMinLikes.trim() !== '' || hfFilterMinDownloads.trim() !== '' || hfFilterMaxSizeGb.trim() !== ''
-
-  function clearHfListFilters(): void {
-    setHfFilterMinLikes('')
-    setHfFilterMinDownloads('')
-    setHfFilterMaxSizeGb('')
-    setHfInstalledListPage(1)
-    setHfAvailableListPage(1)
-  }
-
   function backToRecommendations(): void {
     setHfLibraryMode('recommended')
     setHfResults([])
     setHfSearchLoading(false)
     setSelectedModel(null)
     setDetail(null)
-    setOllamaHubPullNameDraft('')
     setHfInstalledListPage(1)
     setHfAvailableListPage(1)
     setHfInstalledColSort({ col: 'name', dir: 'asc' })
@@ -2363,11 +2803,25 @@ export default function App(): React.ReactElement {
     setHfSearchLoading(true)
     setSelectedModel(null)
     setDetail(null)
-    setOllamaHubPullNameDraft('')
     setHfInstalledColSort({ col: 'name', dir: 'asc' })
     setHfAvailableColSort({ col: 'likes', dir: 'desc' })
+    const repoFromUrl = parseHuggingFaceRepoIdFromInput(hfQuery)
+    const queryText = hfQuery.trim()
+    const effectiveQuery = repoFromUrl ?? queryText
+    if (repoFromUrl) {
+      setHfQuery(repoFromUrl)
+    }
     try {
-      const r = await window.api.hfSearch(hfQuery, 40)
+      if (repoFromUrl) {
+        try {
+          const d = (await window.api.hfModelInfo(repoFromUrl)) as HfModelDetail
+          setHfResults([hfDetailToBrowseSummary(d)])
+          return
+        } catch {
+          /* not a model repo or network error — fall through to hub search */
+        }
+      }
+      const r = await window.api.hfSearch(effectiveQuery, 40)
       setHfResults(r as HfModelSummary[])
     } catch (e) {
       setErr(String(e))
@@ -2379,37 +2833,51 @@ export default function App(): React.ReactElement {
     }
   }
 
-  async function quickDownloadFromRepo(repoId: string): Promise<void> {
+  /**
+   * Browse (Hub) single action: if the repo has a main GGUF or Safetensors file, download it from Hugging Face;
+   * otherwise, when using Ollama and the model has a mapped library tag, pull that image instead.
+   */
+  async function installHubModelFromBrowse(repoId: string): Promise<void> {
     setErr(null)
     setQuickDownloadRepo(repoId)
     try {
       const d = (await window.api.hfModelInfo(repoId)) as HfModelDetail
-      const gguf = d.siblings?.find((s) => /\.gguf$/i.test(s.path))
-      const file = gguf ?? d.siblings?.[0]
-      if (!file) {
-        setErr('No downloadable files found for this model.')
+      const filePath = pickPrimaryHubWeightFile(d.siblings ?? [])
+
+      if (filePath) {
+        const revision = hfResolveRevision(d, 'main')
+        const j = (await window.api.hfDownload({
+          repoId,
+          revision,
+          filename: filePath,
+          destDir: destDir.trim() || undefined,
+          chatDisplayName: repoId
+        })) as { id: string; progress?: number; bytesReceived?: number; bytesTotal?: number; status?: string }
+        void refreshDownloadsList()
+        setHfDownloadJobs((prev) => ({
+          ...prev,
+          [repoId]: {
+            jobId: j.id,
+            progress: typeof j.progress === 'number' ? j.progress : 0,
+            bytesReceived: typeof j.bytesReceived === 'number' ? j.bytesReceived : 0,
+            bytesTotal: typeof j.bytesTotal === 'number' ? j.bytesTotal : 0,
+            status: typeof j.status === 'string' ? j.status : 'downloading'
+          }
+        }))
         return
       }
-      const j = (await window.api.hfDownload({
-        repoId,
-        revision: 'main',
-        filename: file.path,
-        destDir,
-        chatDisplayName: repoId
-      })) as { id: string; progress?: number; bytesReceived?: number; bytesTotal?: number; status?: string }
-      setLastJobId(j.id)
-      void refreshDownloadsList()
-      setHfDownloadJobs((prev) => ({
-        ...prev,
-        [repoId]: {
-          jobId: j.id,
-          progress: typeof j.progress === 'number' ? j.progress : 0,
-          bytesReceived: typeof j.bytesReceived === 'number' ? j.bytesReceived : 0,
-          bytesTotal: typeof j.bytesTotal === 'number' ? j.bytesTotal : 0,
-          status: typeof j.status === 'string' ? j.status : 'downloading'
-        }
-      }))
-      void loadDetail(repoId)
+
+      const tag = d.ollamaLibraryName?.trim()
+      if (runtimeKind === 'ollama' && tag) {
+        if (hfOllamaPullBusy) return
+        setQuickDownloadRepo(null)
+        await runOllamaPullForHub(repoId, tag)
+        return
+      }
+
+      setErr(
+        'No .gguf or .safetensors weight file found in this repository (or only auxiliary files such as mmproj). For models that exist only in the Ollama library, switch the top bar to Ollama and try again, or open Run to pull by name.'
+      )
     } catch (e) {
       setErr(String(e))
     } finally {
@@ -2422,12 +2890,7 @@ export default function App(): React.ReactElement {
     setErr(null)
     try {
       const d = await window.api.hfModelInfo(id)
-      const detailRow = d as HfModelDetail
-      setDetail(detailRow)
-      const tag = detailRow.ollamaLibraryName?.trim()
-      setOllamaHubPullNameDraft(tag ?? '')
-      const gguf = detailRow.siblings?.find((s) => s.path.endsWith('.gguf'))
-      if (gguf) setDownloadFile(gguf.path)
+      setDetail(d as HfModelDetail)
     } catch (e) {
       setErr(String(e))
       setDetail(null)
@@ -2460,64 +2923,6 @@ export default function App(): React.ReactElement {
     }
   }
 
-  async function hubQuickInstall(repoId: string): Promise<void> {
-    const summary = hfListModels.find((x) => x.id === repoId)
-    if (!summary) {
-      setErr('Model not found in the current list.')
-      return
-    }
-    if (runtimeKind === 'llamacpp') {
-      await quickDownloadFromRepo(repoId)
-      return
-    }
-    const tag = summary.ollamaLibraryName?.trim()
-    if (!tag) {
-      setErr(
-        'No preset Ollama tag for this Hub entry. Select the row and type a model name under “Selected model”, or switch the top bar to llama.cpp to download the .gguf file.'
-      )
-      return
-    }
-    await runOllamaPullForHub(repoId, tag)
-  }
-
-  async function startDownload(): Promise<void> {
-    setErr(null)
-    if (runtimeKind === 'ollama') {
-      if (!selectedModel) return
-      const tag = ollamaHubPullNameDraft.trim()
-      if (!tag) {
-        setErr('Enter an Ollama model name to pull (for example: llama3.2).')
-        return
-      }
-      await runOllamaPullForHub(selectedModel, tag)
-      return
-    }
-    if (!selectedModel || !downloadFile || !destDir) return
-    try {
-      const j = (await window.api.hfDownload({
-        repoId: selectedModel,
-        revision: 'main',
-        filename: downloadFile,
-        destDir,
-        chatDisplayName: selectedModel
-      })) as { id: string; progress?: number; bytesReceived?: number; bytesTotal?: number; status?: string }
-      setLastJobId(j.id)
-      void refreshDownloadsList()
-      setHfDownloadJobs((prev) => ({
-        ...prev,
-        [selectedModel]: {
-          jobId: j.id,
-          progress: typeof j.progress === 'number' ? j.progress : 0,
-          bytesReceived: typeof j.bytesReceived === 'number' ? j.bytesReceived : 0,
-          bytesTotal: typeof j.bytesTotal === 'number' ? j.bytesTotal : 0,
-          status: typeof j.status === 'string' ? j.status : 'downloading'
-        }
-      }))
-    } catch (e) {
-      setErr(String(e))
-    }
-  }
-
   async function deleteInstalledHubModel(m: HfModelSummary): Promise<void> {
     if (hfHubDeleteRepoBusy) return
     setErr(null)
@@ -2528,12 +2933,12 @@ export default function App(): React.ReactElement {
         setErr('Could not resolve an Ollama model name to remove.')
         return
       }
-      if (
-        !window.confirm(
-          `Remove “${tag}” from your Ollama library?\n\nThis frees disk space in Ollama’s store.`
-        )
-      )
-        return
+      const ok = await window.api.confirmDestructive({
+        message: `Remove “${tag}” from your Ollama library?`,
+        detail: 'This frees disk space in Ollama’s store.',
+        confirmLabel: 'Remove'
+      })
+      if (!ok) return
       setHfHubDeleteRepoBusy(m.id)
       try {
         await window.api.deleteOllamaModel(tag)
@@ -2563,12 +2968,12 @@ export default function App(): React.ReactElement {
       return
     }
     const lines = rows.map((r) => fileNameFromPath(r.local_path)).join('\n')
-    if (
-      !window.confirm(
-        `Permanently delete ${rows.length === 1 ? 'this file' : 'these files'}?\n\n${lines}\n\nThis cannot be undone.`
-      )
-    )
-      return
+    const ok = await window.api.confirmDestructive({
+      message: `Permanently delete ${rows.length === 1 ? 'this file' : 'these files'}?`,
+      detail: `${lines}\n\nThis cannot be undone.`,
+      confirmLabel: 'Delete'
+    })
+    if (!ok) return
     setHfHubDeleteRepoBusy(m.id)
     try {
       for (const r of rows) {
@@ -2650,7 +3055,7 @@ export default function App(): React.ReactElement {
           : `${hfJob.progress}%`
         : 'Starting…'
       : undefined
-    const ollamaPullHere = runtimeKind === 'ollama' && hfOllamaPullRepoId === m.id
+    const ollamaPullHere = hfOllamaPullBusy && hfOllamaPullRepoId === m.id
     const oPullPct =
       ollamaPullHere && hfOllamaPullProgress?.percent != null ? hfOllamaPullProgress.percent : null
     const oPullMeta =
@@ -2661,10 +3066,14 @@ export default function App(): React.ReactElement {
         : ollamaPullHere
           ? 'Pulling…'
           : undefined
-    const installBusy =
-      !!hfJob || quickDownloadRepo === m.id || (runtimeKind === 'ollama' && hfOllamaPullBusy)
-    const quickOllamaBlocked = runtimeKind === 'ollama' && !m.ollamaLibraryName?.trim()
+    const rowInstallBusy = !!hfJob || quickDownloadRepo === m.id || ollamaPullHere
     const showProgress = ollamaPullHere || !!hfJob
+    const downloadButtonLabel = ((): string => {
+      if (ollamaPullHere) return 'Pulling…'
+      if (hfJob) return 'Downloading…'
+      if (quickDownloadRepo === m.id) return 'Working…'
+      return 'Download'
+    })()
 
     return (
       <Fragment key={m.id}>
@@ -2677,6 +3086,7 @@ export default function App(): React.ReactElement {
           aria-expanded={selectedModel === m.id}
           onClick={() => onHubLibraryRowActivate(m)}
         >
+          {renderHfHubHardwareFitCell(m, hardwareSummary)}
           <td>
             <button
               type="button"
@@ -2699,45 +3109,26 @@ export default function App(): React.ReactElement {
           <td className="hf-model-table-format">{hfSummaryFormatLabel(m)}</td>
           <td className="hf-model-table-num">{(m.likes ?? 0).toLocaleString()}</td>
           <td className="hf-model-table-actions">
-            <a
-              href={huggingFaceModelUrl(m.id)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hf-model-table-hub-link"
-              onClick={(e) => e.stopPropagation()}
-            >
-              Hub
-            </a>
-            <button
-              type="button"
-              className="btn-card-download hf-model-table-install"
-              disabled={installBusy || quickOllamaBlocked}
-              title={
-                quickOllamaBlocked
-                  ? 'Select the row and enter an Ollama model name below, or use llama.cpp to download the file.'
-                  : undefined
-              }
-              onClick={(e) => {
-                e.stopPropagation()
-                void hubQuickInstall(m.id)
-              }}
-            >
-              {hfJob
-                ? 'Downloading…'
-                : ollamaPullHere
-                  ? 'Pulling…'
-                  : quickDownloadRepo === m.id
-                    ? 'Preparing…'
-                    : runtimeKind === 'ollama'
-                      ? 'Pull'
-                      : 'Download'}
-            </button>
+            <div className="hf-model-table-action-btns">
+              <button
+                type="button"
+                className="btn-secondary hf-model-table-action-btn"
+                disabled={rowInstallBusy}
+                title="Downloads the main GGUF or Safetensors file from Hugging Face when available; if the repo has no such file but maps to an Ollama library model and the top bar is set to Ollama, pulls that image instead."
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void installHubModelFromBrowse(m.id)
+                }}
+              >
+                {downloadButtonLabel}
+              </button>
+            </div>
           </td>
         </tr>
-        {renderHfHubExpandedDetailRow(m, 5)}
+        {renderHfHubExpandedDetailRow(m, 6)}
         {showProgress ? (
           <tr className="hf-model-table-row hf-model-table-row--progress">
-            <td colSpan={5}>
+            <td colSpan={6}>
               <div className="hf-model-table-progress-inner">
                 {ollamaPullHere ? (
                   <DownloadProgressBar compact pct={oPullPct} meta={oPullMeta} />
@@ -2791,6 +3182,10 @@ export default function App(): React.ReactElement {
           <table className="hf-model-table" aria-label={caption}>
             <thead>
               <tr>
+                <th scope="col" className="hf-model-table-fit-th" title="Approximate RAM, disk, and GPU fit">
+                  <span className="visually-hidden">Hardware fit</span>
+                  <i className="fa-solid fa-microchip hf-model-table-fit-th-icon" aria-hidden />
+                </th>
                 <th scope="col" aria-sort={ariaFor('name')}>
                   <button
                     type="button"
@@ -2825,7 +3220,7 @@ export default function App(): React.ReactElement {
                     className="hf-model-table-th-btn"
                     onClick={() => colSort.onCol('format')}
                   >
-                    Format
+                    Type
                     {colSort.col === 'format' ? (
                       <span className="hf-model-table-sort-cue" aria-hidden>
                         {colSort.dir === 'asc' ? ' ▲' : ' ▼'}
@@ -3028,12 +3423,13 @@ export default function App(): React.ReactElement {
     try {
       const s = await window.api.runtimeStart({ kind: runtimeKind, modelPath })
       setRuntimeStatus(s)
-      const pathForStore =
-        runtimeKind === 'llamacpp'
-          ? llamaBin.trim() || llamaEnv?.resolvedPath || ''
-          : llamaBin
-      await window.api.setConfig({ llamaBinaryPath: pathForStore, runtimeKind })
-      if (runtimeKind === 'llamacpp' && pathForStore) setLlamaBin(pathForStore)
+      if (runtimeKind === 'llamacpp') {
+        const pathForStore = llamaBin.trim() || llamaEnv?.resolvedPath || ''
+        await window.api.setConfig({ llamaBinaryPath: pathForStore, runtimeKind })
+        if (pathForStore) setLlamaBin(pathForStore)
+      } else {
+        await window.api.setConfig({ runtimeKind })
+      }
       void refreshRunDrawer()
     } catch (e) {
       setErr(String(e))
@@ -3084,6 +3480,12 @@ export default function App(): React.ReactElement {
 
   async function sendChat(): Promise<void> {
     if (!convId || !draft.trim() || chatSending) return
+    if (!runtimeStatus?.running) {
+      setErr(
+        'Your AI is not running yet. In the top bar, choose a model and press the play button. When the dot turns green, try sending again — or open Run for setup help.'
+      )
+      return
+    }
     setErr(null)
     const userText = draft.trim()
     setDraft('')
@@ -3121,9 +3523,34 @@ export default function App(): React.ReactElement {
     }
     activityChatTokensRef.current = initialTok
     setActivityChatTokens(initialTok)
+    const receiptKeyPending = `${convId}:t:${userSentAt}`
+    chatStreamSawFirstTokenRef.current = false
+    setUserPromptReceipts((prev) => ({
+      ...prev,
+      [receiptKeyPending]: { delivered: false, responseStarted: false }
+    }))
     const offChat = window.api.onRuntimeChatProgress((p) => {
       if (p.requestId !== requestId) return
+      if (p.kind === 'started') {
+        setUserPromptReceipts((prev) => {
+          const cur = prev[receiptKeyPending]
+          if (!cur) return prev
+          return { ...prev, [receiptKeyPending]: { ...cur, delivered: true } }
+        })
+        return
+      }
       if (p.kind === 'token' && p.text) {
+        if (!chatStreamSawFirstTokenRef.current) {
+          chatStreamSawFirstTokenRef.current = true
+          setUserPromptReceipts((prev) => {
+            const cur = prev[receiptKeyPending]
+            if (!cur) return prev
+            return {
+              ...prev,
+              [receiptKeyPending]: { delivered: true, responseStarted: true }
+            }
+          })
+        }
         const chunk = p.text
         setChatStreamBuffer((prev) => prev + chunk)
         setActivityChatTokens((prev) => {
@@ -3193,7 +3620,25 @@ export default function App(): React.ReactElement {
         })
       }
       const m = await window.api.conversationMessages(convId)
-      setMessages(m as ChatMessageVm[])
+      const reloaded = m as ChatMessageVm[]
+      setMessages(reloaded)
+      let lastAsst = -1
+      for (let j = reloaded.length - 1; j >= 0; j--) {
+        if (reloaded[j].role === 'assistant') {
+          lastAsst = j
+          break
+        }
+      }
+      if (lastAsst >= 1) {
+        const u = reloaded[lastAsst - 1]
+        if (
+          u.role === 'user' &&
+          u.id &&
+          (u.createdAt === userSentAt || u.content.trim() === userText.trim())
+        ) {
+          migrateUserPromptReceipt(convId, userSentAt, u.id)
+        }
+      }
       const convTitle = conversations.find((c) => c.id === convId)?.title
       void window.api
         .kbWikiExtractTurn({
@@ -3209,7 +3654,7 @@ export default function App(): React.ReactElement {
           /* extraction is best-effort */
         })
     } catch (e) {
-      setErr(String(e))
+      setErr(humanizeChatError(String(e)))
     } finally {
       offChat()
       setChatSending(false)
@@ -3382,6 +3827,19 @@ export default function App(): React.ReactElement {
   }
 
   function onComposerKeyDown(e: ReactKeyboardEvent<HTMLTextAreaElement>): void {
+    if (e.key === 'Tab' && !e.shiftKey && composerGhostSuffix) {
+      e.preventDefault()
+      setDraft((d) => d + composerGhostSuffix)
+      setComposerGhostSuffix('')
+      composerSuggestGenRef.current++
+      return
+    }
+    if (e.key === 'Escape' && composerGhostSuffix) {
+      e.preventDefault()
+      setComposerGhostSuffix('')
+      composerSuggestGenRef.current++
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       void sendChat()
@@ -3489,7 +3947,7 @@ export default function App(): React.ReactElement {
         personality={modelProfile.vibe}
       />
       <aside className="nav-rail" aria-label="Primary navigation">
-        <div className="nav-brand" title="Local LLM Desktop">
+        <div className="nav-brand" title="Local LLM Desktop — private chat on your computer">
           <img src="/app-icon.png" alt="" width={44} height={44} decoding="async" />
         </div>
         <nav className="nav-main">
@@ -3517,11 +3975,16 @@ export default function App(): React.ReactElement {
         </nav>
         <div className="nav-spacer" />
         <nav className="nav-tools" aria-label="Tools">
-          <button type="button" className="nav-btn" onClick={() => setDrawer('hf')} title="Models">
+          <button type="button" className="nav-btn" onClick={() => setDrawer('hf')} title="Browse and download models">
             <IconBox />
             Models
           </button>
-          <button type="button" className="nav-btn" onClick={() => setDrawer('runtime')} title="Runtime">
+          <button
+            type="button"
+            className="nav-btn"
+            onClick={() => setDrawer('runtime')}
+            title="Run — turn your AI model on or off"
+          >
             <IconCpu />
             Run
           </button>
@@ -3542,7 +4005,7 @@ export default function App(): React.ReactElement {
 
       <div className={`shell-content shell-content--pinned-${pinnedWidgetsSide}`}>
         <aside
-          className={`pinned-widgets-aside ${pinnedBarResizing ? 'pinned-widgets-aside--resizing' : ''}`}
+          className={`pinned-widgets-aside ${pinnedBarResizing || pinnedWidgetSplitResizing ? 'pinned-widgets-aside--resizing' : ''}`}
           aria-label="Pinned widgets"
           style={pinnedWidgetsAsideStyle(
             narrowSlideConv,
@@ -3638,59 +4101,129 @@ export default function App(): React.ReactElement {
             </div>
           </div>
           <div
-            className={`pinned-widgets-aside-body ${!metricsPinned && !downloadsPinned && !activityPinned ? 'pinned-widgets-aside-body--empty' : ''}`}
+            ref={pinnedWidgetsBodyRef}
+            className={[
+              'pinned-widgets-aside-body',
+              !metricsPinned && !downloadsPinned && !activityPinned ? 'pinned-widgets-aside-body--empty' : '',
+              (metricsPinned && downloadsPinned) ||
+              (metricsPinned && activityPinned) ||
+              (downloadsPinned && activityPinned)
+                ? 'pinned-widgets-aside-body--split'
+                : ''
+            ]
+              .filter(Boolean)
+              .join(' ')}
           >
             {!metricsPinned && !downloadsPinned && !activityPinned ? (
               <p className="pinned-widgets-aside-empty muted">Pin metrics, downloads, or activity using the buttons above.</p>
             ) : null}
-            {metricsPinned && (
-              <MetricsPinnedWidget
-                snapshot={widgetSnap}
-                series={widgetSeries}
-                refreshMs={metricsRefreshMs}
-                runtimeOn={runtimeOn}
-                onUnpin={() => {
-                  setMetricsPinned(false)
-                  void saveMetricsWidgetConfig({ metricsPinned: false })
-                }}
-                onOpenStats={() => setDrawer('metrics')}
-              />
-            )}
-            {downloadsPinned && (
-              <DownloadsPinnedWidget
-                downloads={pinnedDownloadsSnapshot}
-                onUnpin={() => {
-                  setDownloadsPinned(false)
-                  void saveMetricsWidgetConfig({ downloadsPinned: false })
-                }}
-                onOpenRun={() => setDrawer('runtime')}
-                onCancelJob={cancelDownloadJob}
-              />
-            )}
-            {activityPinned && (
-              <ActivityPinnedWidget
-                modelLoad={
-                  runtimeStarting
-                    ? (runtimeLoadProgress ?? { phase: 'starting', message: 'Starting runtime…' })
-                    : null
-                }
-                chatSending={chatSending}
-                chatTokens={activityChatTokens}
-                tokenHistory={activityTokenHistory}
-                runtimeOn={runtimeOn}
-                pluginReports={integrationPluginReports}
-                onUnpin={() => {
-                  setActivityPinned(false)
-                  void saveMetricsWidgetConfig({ activityPinned: false })
-                }}
-                onOpenChat={() => {
-                  setMainView('chat')
-                  setMobileConvOpen(false)
-                  setMobileKbOpen(false)
-                }}
-              />
-            )}
-            </div>
+            {(() => {
+              const items: { kind: PinnedWidgetKind; node: ReactElement }[] = []
+              if (metricsPinned) {
+                items.push({
+                  kind: 'metrics',
+                  node: (
+                    <MetricsPinnedWidget
+                      snapshot={widgetSnap}
+                      series={widgetSeries}
+                      refreshMs={metricsRefreshMs}
+                      runtimeOn={runtimeOn}
+                      onUnpin={() => {
+                        setMetricsPinned(false)
+                        void saveMetricsWidgetConfig({ metricsPinned: false })
+                      }}
+                      onOpenStats={() => setDrawer('metrics')}
+                    />
+                  )
+                })
+              }
+              if (downloadsPinned) {
+                items.push({
+                  kind: 'downloads',
+                  node: (
+                    <DownloadsPinnedWidget
+                      downloads={pinnedDownloadsSnapshot}
+                      onUnpin={() => {
+                        setDownloadsPinned(false)
+                        void saveMetricsWidgetConfig({ downloadsPinned: false })
+                      }}
+                      onOpenRun={() => setDrawer('runtime')}
+                      onCancelJob={cancelDownloadJob}
+                    />
+                  )
+                })
+              }
+              if (activityPinned) {
+                items.push({
+                  kind: 'activity',
+                  node: (
+                    <ActivityPinnedWidget
+                      modelLoad={
+                        runtimeStarting
+                          ? (runtimeLoadProgress ?? { phase: 'starting', message: 'Starting runtime…' })
+                          : null
+                      }
+                      chatSending={chatSending}
+                      chatTokens={activityChatTokens}
+                      tokenHistory={activityTokenHistory}
+                      runtimeOn={runtimeOn}
+                      pluginReports={integrationPluginReports}
+                      onUnpin={() => {
+                        setActivityPinned(false)
+                        void saveMetricsWidgetConfig({ activityPinned: false })
+                      }}
+                      onOpenChat={() => {
+                        setMainView('chat')
+                        setMobileConvOpen(false)
+                        setMobileKbOpen(false)
+                      }}
+                    />
+                  )
+                })
+              }
+              const inRow =
+                (pinnedWidgetsSide === 'top' || pinnedWidgetsSide === 'bottom') && !narrowSlideConv
+              const visibleKinds = items.map((x) => x.kind)
+              return items.map((it, i) => (
+                <Fragment key={it.kind}>
+                  <div
+                    className="pinned-widget-slot"
+                    style={{
+                      flex: `${pinnedWidgetWeights[it.kind]} 1 0%`,
+                      minWidth: 0,
+                      minHeight: 0
+                    }}
+                  >
+                    {it.node}
+                  </div>
+                  {i < items.length - 1 ? (
+                    <div
+                      role="separator"
+                      aria-orientation={inRow ? 'vertical' : 'horizontal'}
+                      aria-label="Resize space between pinned widgets"
+                      className={`pinned-widget-split-handle pinned-widget-split-handle--${inRow ? 'row' : 'col'}`}
+                      onPointerDown={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        const a = visibleKinds[i]!
+                        const b = visibleKinds[i + 1]!
+                        const w = pinnedWidgetWeightsRef.current
+                        widgetSplitDragRef.current = {
+                          a,
+                          b,
+                          startA: w[a],
+                          startB: w[b],
+                          startClient: inRow ? e.clientX : e.clientY,
+                          visible: visibleKinds
+                        }
+                        setPinnedWidgetSplitResizing(true)
+                      }}
+                    />
+                  ) : null}
+                </Fragment>
+              ))
+            })()}
+          </div>
             <div
               role="separator"
               aria-orientation={
@@ -3731,18 +4264,18 @@ export default function App(): React.ReactElement {
               <select
                 id="top-bar-runtime-backend-select"
                 className="select top-bar-runtime-backend"
-                aria-label="Inference backend"
+                aria-label="How models are loaded"
                 value={runtimeKind}
                 disabled={runtimeStarting || runtimeOn}
                 onChange={(e) => setRuntimeKind(e.target.value as 'llamacpp' | 'ollama')}
               >
-                <option value="ollama">Ollama</option>
-                <option value="llamacpp">llama.cpp</option>
+                <option value="ollama">Ollama (easiest)</option>
+                <option value="llamacpp">Files on my PC (advanced)</option>
               </select>
               <select
                 id="top-bar-runtime-model-select"
                 className="select top-bar-runtime-model-select"
-                aria-label={runtimeKind === 'ollama' ? 'Ollama model' : 'Model weights file'}
+                aria-label={runtimeKind === 'ollama' ? 'Which Ollama model to use' : 'Which model file to load'}
                 disabled={runtimeStarting || runtimeOn}
                 value={topBarModelSelectValue}
                 onChange={(e) => {
@@ -3759,7 +4292,7 @@ export default function App(): React.ReactElement {
                           ? 'No Ollama models found'
                           : 'Choose Ollama model…'
                     : localModelFilePaths.length === 0
-                      ? 'No .gguf in folder'
+                      ? 'No weights in folder'
                       : 'Choose model file…'}
                 </option>
                 {runtimeKind === 'llamacpp'
@@ -3794,21 +4327,21 @@ export default function App(): React.ReactElement {
                 disabled={!runtimeOn && (runtimeStarting || !modelPath.trim())}
                 title={
                   runtimeOn
-                    ? 'Stop runtime'
+                    ? 'Stop — unload model from memory'
                     : runtimeStarting
-                      ? 'Starting…'
+                      ? 'Starting your model…'
                       : !modelPath.trim()
-                        ? 'Choose a model first'
-                        : 'Start runtime'
+                        ? 'Choose a model from the list first'
+                        : 'Start — load model so you can chat'
                 }
                 aria-label={
                   runtimeOn
-                    ? 'Stop runtime'
+                    ? 'Stop and unload the model'
                     : runtimeStarting
-                      ? 'Starting runtime'
+                      ? 'Starting your model'
                       : !modelPath.trim()
-                        ? 'Start runtime (choose a model first)'
-                        : 'Start runtime'
+                        ? 'Start AI (choose a model first)'
+                        : 'Start AI model'
                 }
                 onClick={() => (runtimeOn ? void stopRuntime() : void startRuntime())}
               >
@@ -3864,13 +4397,13 @@ export default function App(): React.ReactElement {
               className="runtime-pill"
               title={
                 runtimeOn
-                  ? 'Runtime running — open Run panel'
-                  : 'Runtime off — open Run panel to start'
+                  ? 'AI is on — click for details'
+                  : 'AI is off — click for help starting a model'
               }
               aria-label={
                 runtimeOn
-                  ? 'Runtime running. Open Run panel for details.'
-                  : 'Runtime off. Open Run panel to start.'
+                  ? 'AI model is running. Open Run for details.'
+                  : 'AI model is off. Open Run to start.'
               }
               onClick={() => setDrawer('runtime')}
               role="button"
@@ -3888,6 +4421,51 @@ export default function App(): React.ReactElement {
         </header>
 
         {err && <div className="err-banner">{err}</div>}
+
+        {welcomeModalOpen && (
+          <div
+            className="modal-overlay welcome-modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="welcome-modal-title"
+          >
+            <div className="modal-box modal-box--welcome" onClick={(e) => e.stopPropagation()}>
+              <h2 id="welcome-modal-title" className="modal-title">
+                Welcome to Local LLM Desktop
+              </h2>
+              <p className="modal-text welcome-modal-lead">
+                Your chats stay on this device. This app helps you browse models, turn them on, and talk to them — no account
+                required.
+              </p>
+              <ol className="welcome-modal-steps">
+                <li>
+                  <strong>Keep “Ollama (easiest)”</strong> in the top bar unless you already use downloaded model files.
+                </li>
+                <li>
+                  <strong>Open Run</strong> in the sidebar. If Ollama is missing, install it from there (or ollama.com).
+                </li>
+                <li>
+                  <strong>Pick a model</strong> in the top bar, press <strong>play</strong>, and wait until the green dot
+                  appears.
+                </li>
+                <li>
+                  <strong>New chat</strong>, type a message, and send.
+                </li>
+              </ol>
+              <p className="welcome-modal-foot">
+                Reopen these tips anytime: <strong>Settings</strong> → <strong>General</strong> → First-time tips.
+              </p>
+              <div className="modal-actions welcome-modal-actions">
+                <button type="button" className="btn-primary" onClick={() => void onWelcomeOpenRunSetup()}>
+                  Open Run &amp; set up
+                </button>
+                <button type="button" className="btn-secondary" onClick={() => void markWelcomeGuideSeen()}>
+                  I&apos;m ready
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {deleteConvId && (
           <div
@@ -3946,60 +4524,6 @@ export default function App(): React.ReactElement {
                 </button>
                 <button type="button" className="btn-danger" onClick={() => void confirmDeleteWikiEntry()}>
                   Remove entry
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {settingsConfirmKind && (
-          <div
-            className="modal-overlay"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="settings-destructive-title"
-            onClick={() => setSettingsConfirmKind(null)}
-          >
-            <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-              <h2 id="settings-destructive-title" className="modal-title">
-                {settingsConfirmKind === 'caches' && 'Clear all caches?'}
-                {settingsConfirmKind === 'models' && 'Delete all model files?'}
-                {settingsConfirmKind === 'factory' && 'Reset settings to factory defaults?'}
-              </h2>
-              {settingsConfirmKind === 'caches' ? (
-                <p className="muted modal-text">
-                  This cancels active downloads, clears the download registry and Hugging Face metadata cache in the database, wipes metrics history and training job records, and deletes files under the vectors index folder. Your conversations, knowledge base, wiki pages, and downloaded model weight files are kept.
-                </p>
-              ) : null}
-              {settingsConfirmKind === 'models' ? (
-                <p className="muted modal-text">
-                  Stops the runtime and cancels active downloads, then permanently deletes every file and folder inside your current models directory (
-                  <code className="inline-code">{paths?.modelsDefault ?? '—'}</code>
-                  ). The download registry is cleared. This cannot be undone.
-                </p>
-              ) : null}
-              {settingsConfirmKind === 'factory' ? (
-                <p className="muted modal-text">
-                  Stops the runtime and cancels in-flight downloads. All saved settings (including custom models folder, llama binary path, Ollama URL, ports, max response tokens, auto wiki extraction from chat, IDE integration, and pinned widgets) return to defaults, and your Hugging Face token is removed from this device. Chats, knowledge base, wiki, caches, and model files are not changed by this action alone.
-                </p>
-              ) : null}
-              <div className="modal-actions">
-                <button type="button" className="btn-secondary" onClick={() => setSettingsConfirmKind(null)}>
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="btn-danger"
-                  disabled={settingsMaintenanceBusy !== false}
-                  onClick={() => {
-                    if (settingsConfirmKind === 'caches') void runClearAllCaches()
-                    else if (settingsConfirmKind === 'models') void runDeleteAllModels()
-                    else void runResetFactoryConfig()
-                  }}
-                >
-                  {settingsConfirmKind === 'caches' && 'Clear caches'}
-                  {settingsConfirmKind === 'models' && 'Delete models'}
-                  {settingsConfirmKind === 'factory' && 'Reset settings'}
                 </button>
               </div>
             </div>
@@ -4172,53 +4696,90 @@ export default function App(): React.ReactElement {
                 <div className="messages-scroll">
                   {!convId && (
                     <div className="messages-empty">
-                      <h2>Start a conversation</h2>
-                      <p>Create a new chat, connect your runtime, and optional wiki context appears on the right.</p>
+                      <h2>Welcome</h2>
+                      <p>
+                        Press <strong>New chat</strong>, then turn on your AI with the <strong>play button</strong> in the
+                        top bar. When the green dot appears, you can type and send.
+                      </p>
+                      {!runtimeOn ? (
+                        <p className="messages-empty-hint">
+                          <button type="button" className="btn-secondary messages-empty-cta" onClick={() => setDrawer('runtime')}>
+                            Open Run — start your AI
+                          </button>
+                        </p>
+                      ) : null}
                     </div>
                   )}
                   {convId && messages.length === 0 && (
                     <div className="messages-empty">
                       <h2>Say hello</h2>
-                      <p>Messages are saved automatically. Use the wiki panel to pull in knowledge before you send.</p>
+                      {!runtimeOn ? (
+                        <>
+                          <p>Start your model from the top bar (play button), then type a message below.</p>
+                          <p className="messages-empty-hint">
+                            <button type="button" className="btn-secondary messages-empty-cta" onClick={() => setDrawer('runtime')}>
+                              Need help? Open Run
+                            </button>
+                          </p>
+                        </>
+                      ) : (
+                        <p>Messages save automatically. Add knowledge from the panel on the right if you like.</p>
+                      )}
                     </div>
                   )}
-                  {messages.map((m, i) => (
-                    <div key={m.id ?? `m-${i}`} className={`msg-row ${m.role === 'user' ? 'user' : 'assistant'}`}>
-                      <div className="msg-bubble">
-                        <div className="msg-bubble-top">
-                          <div
-                            className="msg-role"
-                            title={
-                              m.role === 'assistant' && runtimeStatus?.running && runtimeStatus.modelPath
-                                ? runtimeStatus.modelPath
-                                : undefined
-                            }
-                          >
-                            {m.role === 'assistant'
-                              ? assistantResponderLabel
-                              : m.role === 'user'
-                                ? 'you'
-                                : m.role}
-                          </div>
-                          {typeof m.createdAt === 'number' && Number.isFinite(m.createdAt) ? (
-                            <time
-                              className="msg-time"
-                              dateTime={new Date(m.createdAt).toISOString()}
-                              title={chatTimeTitle(m.createdAt)}
+                  {messages.map((m, i) => {
+                    const userRcKey = m.role === 'user' ? userMessageReceiptKey(convId, m) : undefined
+                    return (
+                      <div key={m.id ?? `m-${i}`} className={`msg-row ${m.role === 'user' ? 'user' : 'assistant'}`}>
+                        <div className="msg-bubble">
+                          <div className="msg-bubble-top">
+                            <div
+                              className="msg-role"
+                              title={
+                                m.role === 'assistant' && runtimeStatus?.running && runtimeStatus.modelPath
+                                  ? runtimeStatus.modelPath
+                                  : undefined
+                              }
                             >
-                              {formatChatTimestamp(m.createdAt)}
-                            </time>
-                          ) : null}
+                              {m.role === 'assistant'
+                                ? assistantResponderLabel
+                                : m.role === 'user'
+                                  ? 'you'
+                                  : m.role}
+                            </div>
+                            {typeof m.createdAt === 'number' && Number.isFinite(m.createdAt) ? (
+                              <time
+                                className="msg-time"
+                                dateTime={new Date(m.createdAt).toISOString()}
+                                title={chatTimeTitle(m.createdAt)}
+                              >
+                                {formatChatTimestamp(m.createdAt)}
+                              </time>
+                            ) : null}
+                          </div>
+                          <ChatRichContent
+                            content={m.content}
+                            wikiHighlightTerms={
+                              m.role === 'assistant' ? wikiHighlightTerms : undefined
+                            }
+                            onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
+                          />
+                          {m.role === 'user' ? (
+                            userRcKey != null && userPromptReceipts[userRcKey] != null ? (
+                              <div className="msg-user-footer">
+                                <UserPromptReceiptMarks receipt={userPromptReceipts[userRcKey]} />
+                                <div className="msg-token-foot msg-token-foot--user">{bubbleTokenLine(m)}</div>
+                              </div>
+                            ) : (
+                              <div className="msg-token-foot">{bubbleTokenLine(m)}</div>
+                            )
+                          ) : (
+                            <div className="msg-token-foot">{bubbleTokenLine(m)}</div>
+                          )}
                         </div>
-                        <ChatRichContent
-                          content={m.content}
-                          wikiHighlightTerms={wikiHighlightTerms}
-                          onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
-                        />
-                        <div className="msg-token-foot">{bubbleTokenLine(m)}</div>
                       </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                   {chatSending ? (
                     <div className="msg-row assistant">
                       <div className="msg-bubble msg-bubble--streaming">
@@ -4345,20 +4906,65 @@ export default function App(): React.ReactElement {
                     )}
                   </div>
                   <div className="composer-box">
-                    <textarea
-                      placeholder={convId ? 'Message… (Enter to send, Shift+Enter for line)' : 'Pick or create a chat first'}
-                      value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
-                      onKeyDown={onComposerKeyDown}
-                      disabled={!convId || chatSending}
-                      rows={2}
-                    />
+                    <div
+                      className="composer-field"
+                      aria-describedby={composerGhostSuffix ? 'composer-inline-hint' : undefined}
+                    >
+                      <div className="composer-mirror-backdrop" aria-hidden>
+                        <div ref={composerMirrorInnerRef} className="composer-mirror-inner">
+                          <span className="composer-mirror-draft">{draft}</span>
+                          {composerGhostSuffix ? (
+                            <span className="composer-mirror-ghost">{composerGhostSuffix}</span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <textarea
+                        ref={composerTextareaRef}
+                        id="chat-composer-input"
+                        className="composer-field-input"
+                        placeholder={
+                          convId
+                            ? !runtimeStatus?.running
+                              ? 'Start your AI with the play button above, then type here…'
+                              : composerGhostSuffix
+                                ? 'Message… (Tab accepts gray text, Esc dismisses)'
+                                : 'Message… (Enter to send, Shift+Enter for line)'
+                            : 'Pick or create a chat first'
+                        }
+                        value={draft}
+                        onChange={(e) => setDraft(e.target.value)}
+                        onScroll={(ev) => {
+                          const inner = composerMirrorInnerRef.current
+                          if (inner) inner.style.transform = `translateY(${-ev.currentTarget.scrollTop}px)`
+                        }}
+                        onKeyDown={onComposerKeyDown}
+                        disabled={!convId || chatSending}
+                        rows={2}
+                        spellCheck
+                        autoComplete="off"
+                        aria-autocomplete={composerGhostSuffix ? 'inline' : undefined}
+                      />
+                      {composerGhostSuffix ? (
+                        <span id="composer-inline-hint" className="visually-hidden">
+                          Inline suggestion shown after your text. Press Tab to insert it, Escape to dismiss.
+                        </span>
+                      ) : null}
+                      {composerSuggestBusy && !composerGhostSuffix ? (
+                        <span className="composer-suggest-busy" aria-hidden>
+                          …
+                        </span>
+                      ) : null}
+                    </div>
                     <button
                       type="button"
                       className="btn-send"
-                      disabled={!convId || !draft.trim() || chatSending}
+                      disabled={!convId || !draft.trim() || chatSending || !runtimeStatus?.running}
                       onClick={() => void sendChat()}
-                      title="Send"
+                      title={
+                        !runtimeStatus?.running && convId
+                          ? 'Start your AI with the play button first'
+                          : 'Send'
+                      }
                     >
                       <IconSend />
                     </button>
@@ -4781,8 +5387,8 @@ export default function App(): React.ReactElement {
             >
             <div className="drawer-header">
               <h2 id="drawer-title">
-                {drawer === 'hf' && 'Models'}
-                {drawer === 'runtime' && 'Inference runtime'}
+                {drawer === 'hf' && 'Browse models'}
+                {drawer === 'runtime' && 'Your AI (Run)'}
                 {drawer === 'train' && 'Training'}
                 {drawer === 'metrics' && 'Metrics'}
                 {drawer === 'settings' && (
@@ -4802,14 +5408,24 @@ export default function App(): React.ReactElement {
             <div className="drawer-body">
               {drawer === 'hf' && (
                 <>
-                  <div className="drawer-section">
-                    <div className="row">
+                  <div className="drawer-section hf-models-search-section">
+                    <div className="row hf-models-search-row">
                       <input
                         className="input"
                         style={{ flex: 1, minWidth: 160 }}
                         value={hfQuery}
                         onChange={(e) => setHfQuery(e.target.value)}
+                        onPaste={(e) => {
+                          const text = e.clipboardData.getData('text/plain')
+                          const repo = parseHuggingFaceRepoIdFromInput(text)
+                          if (repo) {
+                            e.preventDefault()
+                            setHfQuery(repo)
+                          }
+                        }}
                         onKeyDown={(e) => e.key === 'Enter' && void runHfSearch()}
+                        placeholder="Search or paste a Hugging Face model URL…"
+                        aria-label="Search models on Hugging Face"
                       />
                       <button type="button" className="btn-primary" onClick={() => void runHfSearch()} disabled={hfSearchLoading}>
                         {hfSearchLoading ? 'Searching…' : 'Search'}
@@ -4818,178 +5434,74 @@ export default function App(): React.ReactElement {
                   </div>
                   <div className="drawer-section hf-library-section">
                     <div className="hf-library-toolbar">
-                      <h3 style={{ margin: 0, flex: 1 }}>
-                        {hfLibraryMode === 'search' ? 'Results' : 'Recommended'}
+                      <h3 className="hf-library-toolbar-title">
+                        {hfLibraryMode === 'search' ? 'Search results' : 'Recommended for you'}
                       </h3>
                       {hfLibraryMode === 'search' && (
-                        <button type="button" className="btn-secondary" onClick={() => backToRecommendations()}>
-                          ← Back
+                        <button type="button" className="btn-ghost-sm hf-library-back-btn" onClick={() => backToRecommendations()}>
+                          ← Recommended
                         </button>
                       )}
                     </div>
-                    <p className="hf-library-runtime-hint muted" style={{ margin: '0 0 10px' }}>
-                      {runtimeKind === 'ollama' ? (
-                        <>
-                          <strong>Ollama</strong>: preset = <strong>Pull</strong>; else name in Selected model.
-                        </>
-                      ) : (
-                        <>
-                          <strong>llama.cpp</strong>: <code>.gguf</code> → models folder.
-                        </>
-                      )}
-                    </p>
-                    {runtimeKind === 'llamacpp' && localModelFilePaths.length > 0 ? (
-                      <div className="hf-library-disk-block" role="region" aria-label="Weights on disk">
-                        <h4 className="hf-library-subheading">Local .gguf</h4>
-                        <ul className="hf-library-disk-list muted">
-                          {localModelFilePaths.map((p) => (
-                            <li key={p}>
-                              <code className="inline-code">{fileNameFromPath(p)}</code>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                    {runtimeKind === 'ollama' ? (
-                      <div className="hf-library-disk-block" role="region" aria-label="Ollama library">
-                        <h4 className="hf-library-subheading">Ollama library</h4>
-                        {ollamaChatTagsLoading ? (
-                          <p className="muted" style={{ margin: 0 }}>
-                            Loading…
-                          </p>
-                        ) : ollamaChatTagsErr ? (
-                          <p className="muted" style={{ margin: 0 }}>
-                            {ollamaChatTagsErr}
-                          </p>
-                        ) : ollamaChatTags.length === 0 ? (
-                          <p className="muted" style={{ margin: 0 }}>
-                            None yet.
-                          </p>
-                        ) : (
-                          <ul className="hf-library-disk-list hf-library-disk-list--tags">
-                            {ollamaChatTags.map((tag) => (
-                              <li key={tag}>
-                                <code className="inline-code">{tag}</code>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    ) : null}
-                    <div className="hf-library-filters" aria-label="Sort and filter models">
-                      <div className="hf-library-filters-grid">
-                        <label className="hf-library-filter-field">
-                          <span className="hf-library-filter-label">Sort by</span>
-                          <select
-                            className="select"
-                            value={hfSortBy}
-                            onChange={(e) => setHfSortBy(e.target.value as HfModelSortKey)}
-                          >
-                            <option value="downloads">Downloads</option>
-                            <option value="likes">Likes</option>
-                            <option value="size">Size</option>
-                          </select>
-                        </label>
-                        <label className="hf-library-filter-field">
-                          <span className="hf-library-filter-label">Order</span>
-                          <select
-                            className="select"
-                            value={hfSortDir}
-                            onChange={(e) => setHfSortDir(e.target.value as 'asc' | 'desc')}
-                          >
-                            <option value="desc">High → low</option>
-                            <option value="asc">Low → high</option>
-                          </select>
-                        </label>
-                        <label className="hf-library-filter-field">
-                          <span className="hf-library-filter-label">Min likes</span>
-                          <input
-                            className="input"
-                            type="number"
-                            min={0}
-                            step={1}
-                            placeholder="Any"
-                            value={hfFilterMinLikes}
-                            onChange={(e) => setHfFilterMinLikes(e.target.value)}
-                          />
-                        </label>
-                        <label className="hf-library-filter-field">
-                          <span className="hf-library-filter-label">Min downloads</span>
-                          <input
-                            className="input"
-                            type="number"
-                            min={0}
-                            step={1}
-                            placeholder="Any"
-                            value={hfFilterMinDownloads}
-                            onChange={(e) => setHfFilterMinDownloads(e.target.value)}
-                          />
-                        </label>
-                        <label className="hf-library-filter-field">
-                          <span className="hf-library-filter-label">Max size (GiB)</span>
-                          <input
-                            className="input"
-                            type="number"
-                            min={0}
-                            step={0.1}
-                            placeholder="Any"
-                            value={hfFilterMaxSizeGb}
-                            onChange={(e) => setHfFilterMaxSizeGb(e.target.value)}
-                          />
-                        </label>
-                        {hfFiltersActive && (
-                          <div className="hf-library-filter-actions">
-                            <button type="button" className="btn-secondary" onClick={clearHfListFilters}>
-                              Clear filters
-                            </button>
-                          </div>
-                        )}
-                      </div>
+                    <div className="hf-hub-view-tabs" role="tablist" aria-label="Model list">
+                      <button
+                        type="button"
+                        id="hf-hub-tab-store"
+                        role="tab"
+                        aria-selected={hfHubSubview === 'store'}
+                        className={`hf-hub-view-tab${hfHubSubview === 'store' ? ' hf-hub-view-tab--active' : ''}`}
+                        onClick={() => setHfHubSubview('store')}
+                      >
+                        Browse
+                      </button>
+                      <button
+                        type="button"
+                        id="hf-hub-tab-installed"
+                        role="tab"
+                        aria-selected={hfHubSubview === 'installed'}
+                        className={`hf-hub-view-tab${hfHubSubview === 'installed' ? ' hf-hub-view-tab--active' : ''}`}
+                        onClick={() => setHfHubSubview('installed')}
+                      >
+                        On this device
+                      </button>
                     </div>
+                    {hfHubSubview !== 'store' ? (
+                      <p className="muted hf-hub-installed-view-hint" style={{ margin: '0 0 12px' }}>
+                        Models from this list that are already on your device. Use <strong>Browse</strong> to find more.
+                      </p>
+                    ) : null}
                     {hfListLoading && (
                       <div className="hf-library-loading">
                         {hfLibraryMode === 'search' ? 'Searching…' : 'Loading…'}
                       </div>
                     )}
                     {!hfListLoading && hfListModels.length === 0 && hfLibraryMode === 'recommended' && (
-                      <p className="muted">No recommendations. Try search.</p>
+                      <p className="muted">No picks loaded. Try a search above.</p>
                     )}
                     {!hfListLoading && hfListModels.length === 0 && hfLibraryMode === 'search' && (
-                      <p className="muted">No matches.</p>
+                      <p className="muted">No models matched. Try different words.</p>
                     )}
                     {!hfListLoading && hfListModels.length > 0 && hfDisplayModels.length === 0 && (
-                      <p className="muted">No matches for filters.</p>
+                      <p className="muted">No models match the current filters.</p>
                     )}
                     {!hfListLoading && hfDisplayModels.length > 0 ? (
-                      <div className="hf-hub-model-lists">
-                        <div className="hf-hub-model-list-col">
-                          <h4 className="hf-hub-model-list-col-heading">Installed</h4>
-                          {hfHubInstalledModels.length === 0 ? (
-                            <p className="muted hf-library-column-empty">None in this list.</p>
-                          ) : (
-                            renderHfHubInstalledPaginatedTable(
-                              hfHubInstalledModelsSorted,
-                              hfInstalledListPage,
-                              setHfInstalledListPage,
-                              'Installed models from this list',
-                              {
-                                col: hfInstalledColSort.col,
-                                dir: hfInstalledColSort.dir,
-                                onCol: toggleHfInstalledColSort
-                              }
-                            )
-                          )}
-                        </div>
-                        <div className="hf-hub-model-list-col">
-                          <h4 className="hf-hub-model-list-col-heading">Available</h4>
+                      hfHubSubview === 'store' ? (
+                        <div
+                          className="hf-hub-view-panel"
+                          role="tabpanel"
+                          id="hf-hub-panel-store"
+                          aria-labelledby="hf-hub-tab-store"
+                        >
                           {hfHubAvailableModels.length === 0 ? (
-                            <p className="muted hf-library-column-empty">All installed.</p>
+                            <p className="muted hf-library-column-empty">
+                              All of these are already on your device — open <strong>On this device</strong>.
+                            </p>
                           ) : (
                             renderHfHubPaginatedTable(
                               hfHubAvailableModelsSorted,
                               hfAvailableListPage,
                               setHfAvailableListPage,
-                              'Models available to install',
+                              'Models you can add',
                               {
                                 col: hfAvailableColSort.col,
                                 dir: hfAvailableColSort.dir,
@@ -4998,138 +5510,33 @@ export default function App(): React.ReactElement {
                             )
                           )}
                         </div>
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className="drawer-section">
-                    <h3>Selected model</h3>
-                    {!detail && (
-                      <p className="muted">
-                        {runtimeKind === 'ollama' ? 'Choose a row in the tables.' : 'Choose a row, then pick a file.'}
-                      </p>
-                    )}
-                    {detail && (
-                      <>
-                        <p className="muted">{detail.description?.slice(0, 120) ?? '—'}</p>
-                        <p className="muted">~{(detail.totalSizeBytes / 1e9).toFixed(2)} GB</p>
-                        {runtimeKind === 'llamacpp' ? (
-                          hfHardwareEval ? (
-                            <div
-                              className={`hf-model-fit hf-model-fit--${hfHardwareEval.verdict}`}
-                              role="status"
-                            >
-                              <p className="hf-model-fit-title">Hardware fit</p>
-                              <p className="hf-model-fit-headline">{hfHardwareEval.headline}</p>
-                              <ul className="hf-model-fit-notes">
-                                {hfHardwareEval.notes.map((n, i) => (
-                                  <li key={i}>{n}</li>
-                                ))}
-                              </ul>
-                            </div>
+                      ) : (
+                        <div
+                          className="hf-hub-view-panel"
+                          role="tabpanel"
+                          id="hf-hub-panel-installed"
+                          aria-labelledby="hf-hub-tab-installed"
+                        >
+                          {hfHubInstalledModels.length === 0 ? (
+                            <p className="muted hf-library-column-empty">
+                              Nothing from this browse list is saved yet. Pick a model and press Download.
+                            </p>
                           ) : (
-                            <p className="muted hf-model-fit-loading">Checking…</p>
-                          )
-                        ) : null}
-                        {runtimeKind === 'ollama' ? (
-                          <>
-                            <label className="runtime-field-label" htmlFor="hf-ollama-pull-name">
-                              Model name
-                            </label>
-                            <input
-                              id="hf-ollama-pull-name"
-                              className="input"
-                              style={{ marginBottom: 8 }}
-                              value={ollamaHubPullNameDraft}
-                              onChange={(e) => setOllamaHubPullNameDraft(e.target.value)}
-                              placeholder="llama3.2, qwen2.5:3b…"
-                              disabled={hfOllamaPullBusy}
-                            />
-                            <button
-                              type="button"
-                              className="btn-primary"
-                              disabled={hfOllamaPullBusy || !ollamaHubPullNameDraft.trim()}
-                              onClick={() => void startDownload()}
-                            >
-                              {hfOllamaPullBusy ? 'Pulling…' : 'Pull model'}
-                            </button>
-                            {selectedModel &&
-                            hfOllamaPullRepoId === selectedModel &&
-                            hfOllamaPullProgress?.message ? (
-                              <div className="hf-detail-download-progress" style={{ marginTop: 12 }}>
-                                <DownloadProgressBar
-                                  compact
-                                  pct={
-                                    hfOllamaPullProgress.percent != null
-                                      ? hfOllamaPullProgress.percent
-                                      : null
-                                  }
-                                  meta={
-                                    hfOllamaPullProgress.percent != null
-                                      ? `${hfOllamaPullProgress.percent}% · ${hfOllamaPullProgress.message}`
-                                      : hfOllamaPullProgress.message
-                                  }
-                                />
-                              </div>
-                            ) : null}
-                          </>
-                        ) : (
-                          <>
-                            <select
-                              className="select"
-                              value={downloadFile}
-                              onChange={(e) => setDownloadFile(e.target.value)}
-                              style={{ marginBottom: 8 }}
-                            >
-                              <option value="">Choose file</option>
-                              {detail.siblings?.map((s) => (
-                                <option key={s.path} value={s.path}>
-                                  {s.path}
-                                </option>
-                              ))}
-                            </select>
-                            <input
-                              className="input"
-                              placeholder="Download folder"
-                              value={destDir}
-                              onChange={(e) => setDestDir(e.target.value)}
-                              style={{ marginBottom: 8 }}
-                            />
-                            <button type="button" className="btn-primary" onClick={() => void startDownload()}>
-                              Download
-                            </button>
-                            {lastJobId && (
-                              <p className="muted" style={{ fontSize: 11 }}>
-                                {lastJobId}
-                              </p>
-                            )}
-                            {selectedModel && hfDownloadJobs[selectedModel] ? (
-                              <div className="hf-detail-download-progress" style={{ marginTop: 12 }}>
-                                <DownloadProgressBar
-                                  compact
-                                  pct={hfCardProgressPct(hfDownloadJobs[selectedModel])}
-                                  meta={
-                                    hfCardProgressPct(hfDownloadJobs[selectedModel]) != null
-                                      ? hfDownloadJobs[selectedModel].bytesTotal > 0
-                                        ? `${hfDownloadJobs[selectedModel].progress}% · ${formatBytes(hfDownloadJobs[selectedModel].bytesReceived)} / ${formatBytes(hfDownloadJobs[selectedModel].bytesTotal)}`
-                                        : `${hfDownloadJobs[selectedModel].progress}%`
-                                      : 'Starting…'
-                                  }
-                                />
-                                <div className="download-progress-cancel-row">
-                                  <button
-                                    type="button"
-                                    className="btn-ghost-sm"
-                                    onClick={() => void cancelDownloadJob(hfDownloadJobs[selectedModel].jobId)}
-                                  >
-                                    Cancel download
-                                  </button>
-                                </div>
-                              </div>
-                            ) : null}
-                          </>
-                        )}
-                      </>
-                    )}
+                            renderHfHubInstalledPaginatedTable(
+                              hfHubInstalledModelsSorted,
+                              hfInstalledListPage,
+                              setHfInstalledListPage,
+                              'Already on this device',
+                              {
+                                col: hfInstalledColSort.col,
+                                dir: hfInstalledColSort.dir,
+                                onCol: toggleHfInstalledColSort
+                              }
+                            )
+                          )}
+                        </div>
+                      )
+                    ) : null}
                   </div>
                 </>
               )}
@@ -5257,14 +5664,19 @@ export default function App(): React.ReactElement {
                   {!runtimeOn ? (
                     <>
                   <div className="drawer-section runtime-load-card">
-                    <h3 className="runtime-load-card-title">Runtime setup</h3>
+                    <h3 className="runtime-load-card-title">Get your AI running</h3>
                     <p className="muted runtime-load-card-lead">
-                      Choose backend, model, and press <strong>Play</strong> in the top bar. Use this panel for Ollama install,
-                      llama-server binary, and downloads.
+                      <strong>Easiest:</strong> leave the top bar on <strong>Ollama (easiest)</strong>, install Ollama if needed
+                      below, pick a model, then press <strong>play</strong> in the top bar. <strong>Advanced:</strong> switch
+                      to files on your PC if you use downloaded{' '}
+                      <code className="inline-code">.gguf</code> or a full Hugging Face folder with{' '}
+                      <code className="inline-code">.safetensors</code> (the app converts those to GGUF once using
+                      llama.cpp’s <code className="inline-code">convert_hf_to_gguf.py</code> — set paths under Settings →
+                      AI engine if needed).
                     </p>
                     <div className="runtime-ollama-probe" role="status">
                       <div className="runtime-ollama-probe-row">
-                        <span className="runtime-ollama-probe-label">Ollama on host</span>
+                        <span className="runtime-ollama-probe-label">Ollama reachable</span>
                         {ollamaHost == null ? (
                           <span className="muted runtime-ollama-probe-pending">Checking…</span>
                         ) : (
@@ -5407,7 +5819,7 @@ export default function App(): React.ReactElement {
                   ) : null}
                     {runtimeKind === 'llamacpp' ? (
                       <p className="muted runtime-field-hint-inline">
-                        .gguf scan folder:{' '}
+                        Weight files in folder:{' '}
                         <span className="runtime-local-models-dir">{paths?.modelsDefault ?? '—'}</span>
                       </p>
                     ) : null}
@@ -5427,11 +5839,18 @@ export default function App(): React.ReactElement {
                           onChange={(e) => setLlamaBin(e.target.value)}
                           placeholder="Path to llama-server"
                         />
+                        <p className="muted" style={{ marginTop: 10, fontSize: 12, lineHeight: 1.45 }}>
+                          <strong>Safetensors:</strong> put the whole model repo in your models folder (with{' '}
+                          <code className="inline-code">config.json</code> next to the weights), pick any{' '}
+                          <code className="inline-code">.safetensors</code> file, then Start. The first run converts to GGUF
+                          (cached under app data). Optional: set the convert script and Python paths in Settings → AI
+                          engine.
+                        </p>
                       </>
                     ) : null}
                     {runtimeKind === 'llamacpp' && localModelFilePaths.length > 0 ? (
                       <div className="runtime-model-purge" role="group" aria-label="Delete local GGUF files">
-                        <div className="runtime-model-purge-title">Delete local .gguf files</div>
+                        <div className="runtime-model-purge-title">Delete local weight files</div>
                         <p className="muted" style={{ margin: '0 0 10px', fontSize: 12 }}>
                           Permanently removes files from the configured models folder. Stop the runtime first if one of
                           these is loaded.
@@ -5643,6 +6062,18 @@ export default function App(): React.ReactElement {
                         </h2>
                         <div className="drawer-section">
                           <h3 className="settings-section-title">
+                            <i className="fa-solid fa-hand-sparkles" aria-hidden />
+                            First-time tips
+                          </h3>
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            Show the welcome checklist again (models, Run, and chat).
+                          </p>
+                          <button type="button" className="btn-secondary" onClick={() => void showWelcomeGuideAgain()}>
+                            Show welcome tips…
+                          </button>
+                        </div>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
                             <i className="fa-solid fa-table-columns" aria-hidden />
                             Chat slide panels
                           </h3>
@@ -5770,10 +6201,10 @@ export default function App(): React.ReactElement {
                         </div>
                         <div className="drawer-section">
                           <button type="button" className="btn-secondary" onClick={() => setDrawer('runtime')}>
-                            Open inference runtime drawer…
+                            Open Run (AI setup)…
                           </button>
                           <p className="muted" style={{ marginTop: 10, marginBottom: 0 }}>
-                            Start/stop the model, pick weights, Ollama install, and downloads list live there.
+                            Start or stop your model, install Ollama, and see downloads.
                           </p>
                         </div>
                       </section>
@@ -6198,6 +6629,36 @@ export default function App(): React.ReactElement {
                               Detected on PATH: <code className="inline-code">{llamaEnv.resolvedPath}</code>
                             </p>
                           ) : null}
+                          <label style={{ display: 'block', marginTop: 18 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              Path to <code className="inline-code">convert_hf_to_gguf.py</code> (optional — for{' '}
+                              <code className="inline-code">.safetensors</code>)
+                            </span>
+                            <input
+                              className="input"
+                              style={{ width: '100%', maxWidth: 560 }}
+                              value={llamaConvertScriptPath}
+                              onChange={(e) => setLlamaConvertScriptPath(e.target.value)}
+                              onBlur={() =>
+                                void window.api.setConfig({ llamaConvertScriptPath: llamaConvertScriptPath.trim() })
+                              }
+                              placeholder="e.g. C:\src\llama.cpp\convert_hf_to_gguf.py"
+                            />
+                          </label>
+                          <label style={{ display: 'block', marginTop: 14 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              Python for conversion (optional — default <code className="inline-code">python</code> on
+                              Windows, <code className="inline-code">python3</code> elsewhere)
+                            </span>
+                            <input
+                              className="input"
+                              style={{ width: '100%', maxWidth: 400 }}
+                              value={llamaPythonPath}
+                              onChange={(e) => setLlamaPythonPath(e.target.value)}
+                              onBlur={() => void window.api.setConfig({ llamaPythonPath: llamaPythonPath.trim() })}
+                              placeholder="python3 or full path to python.exe"
+                            />
+                          </label>
                         </div>
                       </section>
                     )}
@@ -6339,6 +6800,60 @@ export default function App(): React.ReactElement {
           </div>
           </div>
         </>
+      )}
+
+      {settingsConfirmKind && (
+        <div
+          className="modal-overlay modal-overlay--layer-top"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="settings-destructive-title"
+          onClick={() => setSettingsConfirmKind(null)}
+        >
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <h2 id="settings-destructive-title" className="modal-title">
+              {settingsConfirmKind === 'caches' && 'Clear all caches?'}
+              {settingsConfirmKind === 'models' && 'Delete all model files?'}
+              {settingsConfirmKind === 'factory' && 'Reset settings to factory defaults?'}
+            </h2>
+            {settingsConfirmKind === 'caches' ? (
+              <p className="muted modal-text">
+                This cancels active downloads, clears the download registry and Hugging Face metadata cache in the database, wipes metrics history and training job records, and deletes files under the vectors index folder. Your conversations, knowledge base, wiki pages, and downloaded model weight files are kept.
+              </p>
+            ) : null}
+            {settingsConfirmKind === 'models' ? (
+              <p className="muted modal-text">
+                Stops the runtime and cancels active downloads, then permanently deletes every file and folder inside your current models directory (
+                <code className="inline-code">{paths?.modelsDefault ?? '—'}</code>
+                ). The download registry is cleared. This cannot be undone.
+              </p>
+            ) : null}
+            {settingsConfirmKind === 'factory' ? (
+              <p className="muted modal-text">
+                Stops the runtime and cancels in-flight downloads. All saved settings (including custom models folder, llama binary and Safetensors-convert paths, Ollama URL, ports, max response tokens, auto wiki extraction from chat, IDE integration, and pinned widgets) return to defaults, and your Hugging Face token is removed from this device. Chats, knowledge base, wiki, caches, and model files are not changed by this action alone.
+              </p>
+            ) : null}
+            <div className="modal-actions">
+              <button type="button" className="btn-secondary" onClick={() => setSettingsConfirmKind(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-danger"
+                disabled={settingsMaintenanceBusy !== false}
+                onClick={() => {
+                  if (settingsConfirmKind === 'caches') void runClearAllCaches()
+                  else if (settingsConfirmKind === 'models') void runDeleteAllModels()
+                  else void runResetFactoryConfig()
+                }}
+              >
+                {settingsConfirmKind === 'caches' && 'Clear caches'}
+                {settingsConfirmKind === 'models' && 'Delete models'}
+                {settingsConfirmKind === 'factory' && 'Reset settings'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
