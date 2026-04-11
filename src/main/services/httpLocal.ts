@@ -193,8 +193,10 @@ export async function httpPostNdjsonStream(options: {
           for (;;) {
             const nl = buf.indexOf('\n')
             if (nl < 0) break
-            const line = buf.slice(0, nl).trim()
+            let line = buf.slice(0, nl).trim()
             buf = buf.slice(nl + 1)
+            if (!line) continue
+            if (line.startsWith('data:')) line = line.slice(5).trim()
             if (!line) continue
             try {
               options.onObject(JSON.parse(line) as Record<string, unknown>)
@@ -210,7 +212,8 @@ export async function httpPostNdjsonStream(options: {
             resolve({ statusCode: code, errorText: errText || undefined })
             return
           }
-          const tail = buf.trim()
+          let tail = buf.trim()
+          if (tail.startsWith('data:')) tail = tail.slice(5).trim()
           if (tail) {
             try {
               options.onObject(JSON.parse(tail) as Record<string, unknown>)

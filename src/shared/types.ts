@@ -61,6 +61,8 @@ export interface DownloadJob {
   error?: string
   /** Hub model id (e.g. org/name) saved at download time for chat author label when this file is loaded. */
   chatDisplayName?: string
+  /** Repo-relative path (e.g. Q4_K_M/model.gguf). Required to resume after app restart. */
+  hfFilename?: string
 }
 
 /** Row from `downloads` table (SQLite column names). */
@@ -79,6 +81,8 @@ export interface DownloadRow {
   progress_percent?: number
   /** Hugging Face model id (or custom label) stored when the file was downloaded; used as chat “author” when loaded. */
   chat_display_name?: string
+  /** HF file path inside the repo; used to rebuild the resolve URL when resuming. */
+  hf_filename?: string
 }
 
 export interface RuntimeStatus {
@@ -168,8 +172,10 @@ export interface WikiChatHighlightTerm {
   sourceId: string
   /** Match this text case-insensitively in chat (trimmed). */
   phrase: string
-  /** Short preview for hover tooltip. */
+  /** Short preview for hover tooltip (excerpt from KB chunk, glossary, or title). */
   snippet: string
+  /** Knowledge-graph context (chunk count, wiki link, related sources) for the hover popup. */
+  graphSummary?: string
 }
 
 /** Another KB source related by overlapping topical tokens (title + early chunks). */
@@ -269,7 +275,7 @@ export interface RuntimeLoadProgress {
 /** Main → renderer while a chat completion is streaming. */
 export interface RuntimeChatProgress {
   requestId: string
-  kind: 'token' | 'error' | 'usage'
+  kind: 'token' | 'error' | 'usage' | 'started'
   text?: string
   message?: string
   /** From Ollama / llama.cpp when the stream finishes (exact counts). */

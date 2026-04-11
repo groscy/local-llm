@@ -11,6 +11,8 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   pinnedWidgetsSide: 'left',
   pinnedWidgetsWidthPx: 308,
   pinnedWidgetsHeightPx: 360,
+  /** Relative flex weights for metrics / downloads / activity when multiple pinned widgets are stacked. */
+  pinnedWidgetWeights: { metrics: 1, downloads: 1, activity: 1 },
   colorScheme: 'violet',
   /** Upper bound on assistant completion length (Ollama `num_predict`, llama.cpp `max_tokens`). */
   chatMaxTokens: 512,

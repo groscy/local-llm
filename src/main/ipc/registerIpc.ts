@@ -1,7 +1,7 @@
-import { ipcMain, dialog, safeStorage, BrowserWindow, shell } from 'electron'
+import { ipcMain, dialog, safeStorage, BrowserWindow, shell, type MessageBoxOptions } from 'electron'
 import { randomUUID } from 'crypto'
 import { basename, join, resolve } from 'path'
-import { existsSync, mkdirSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, statSync, unlinkSync } from 'fs'
 import type Store from 'electron-store'
 import { z } from 'zod'
 import type Database from 'better-sqlite3'
@@ -15,7 +15,8 @@ import {
   listDownloadsWithProgress,
   getActiveDownload,
   clearDownloadRegistryAndHfCache,
-  cancelAllActiveDownloads
+  cancelAllActiveDownloads,
+  hfResolveDownloadUrl
 } from '../services/downloadManager'
 import { createRuntime, type RuntimeAdapter } from '../services/runtime'
 import { installOllamaForPlatform } from '../services/ollamaInstaller'
@@ -44,11 +45,19 @@ import { configureIntegrationServer } from '../services/integrationServer'
 import { getPluginReportHistory } from '../services/pluginIntegrationHub'
 import { listGgufModelsInDir } from '../services/localModelsScan'
 import { hfDownloadDestFileName } from '../services/hfDownloadNaming'
+import {
+  ensureGgufForSafetensorsModelPath,
+  isSafetensorsWeightFilePath
+} from '../services/safetensorsGgufConvert'
 
 const configSchema = z.object({
   /** Set to `null` to clear and use the app default under user data. */
   modelsDir: z.union([z.string().min(1), z.null()]).optional(),
   llamaBinaryPath: z.string().optional(),
+  /** Full path to llama.cpp `convert_hf_to_gguf.py` (optional; otherwise searched near llama-server). */
+  llamaConvertScriptPath: z.string().max(4096).optional(),
+  /** Python executable for conversion (optional; default python / python3). */
+  llamaPythonPath: z.string().max(4096).optional(),
   runtimeKind: z.enum(['llamacpp', 'ollama']).optional(),
   ollamaBaseUrl: z.string().optional(),
   llamaPort: z.number().optional(),
@@ -59,13 +68,22 @@ const configSchema = z.object({
   activityPinned: z.boolean().optional(),
   pinnedWidgetsSide: z.enum(['left', 'right', 'top', 'bottom']).optional(),
   pinnedWidgetsWidthPx: z.number().min(160).max(1400).optional(),
-  pinnedWidgetsHeightPx: z.number().min(100).max(1200).optional(),
+  pinnedWidgetsHeightPx: z.number().min(300).max(1200).optional(),
+  pinnedWidgetWeights: z
+    .object({
+      metrics: z.number().min(0.05).max(100).optional(),
+      downloads: z.number().min(0.05).max(100).optional(),
+      activity: z.number().min(0.05).max(100).optional()
+    })
+    .optional(),
   colorScheme: z.enum(['violet', 'teal', 'amber', 'rose', 'sky']).optional(),
   chatMaxTokens: z.number().int().min(1).max(262_144).optional(),
   integrationListenEnabled: z.boolean().optional(),
   integrationPort: z.number().int().min(1024).max(65535).optional(),
   integrationToken: z.string().max(256).optional(),
-  wikiAutoExtract: z.boolean().optional()
+  wikiAutoExtract: z.boolean().optional(),
+  /** Bump when onboarding copy changes; user sees welcome until version matches latest in app. */
+  welcomeGuideVersion: z.number().int().min(0).max(99).optional()
 })
 
 function trainingScriptPath(): string {
@@ -171,6 +189,32 @@ export function registerIpc(ctx: IpcContext): void {
     return r.filePaths[0]
   })
 
+  const confirmDestructivePayload = z.object({
+    message: z.string().min(1).max(4000),
+    detail: z.string().max(12000).optional(),
+    confirmLabel: z.string().min(1).max(80).optional()
+  })
+
+  ipcMain.handle(IPC.APP_CONFIRM_DESTRUCTIVE, async (event, raw: unknown) => {
+    const parsed = confirmDestructivePayload.safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid confirm payload')
+    const { message, detail, confirmLabel } = parsed.data
+    const win =
+      BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined
+    const label = confirmLabel ?? 'OK'
+    const opts: MessageBoxOptions = {
+      type: 'warning',
+      buttons: ['Cancel', label],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      message,
+      detail: detail?.trim() ? detail.trim() : undefined
+    }
+    const r = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts)
+    return r.response === 1
+  })
+
   ipcMain.handle(IPC.LOG, (_e, level: string, msg: string, meta?: Record<string, unknown>) => {
     logLine(level, msg, meta)
   })
@@ -202,6 +246,7 @@ export function registerIpc(ctx: IpcContext): void {
     const revision = payload.revision || 'main'
     const localName = hfDownloadDestFileName(payload.repoId, revision, payload.filename)
     const destPath = join(destBase, localName)
+    const hfFilename = payload.filename.replace(/\\/g, '/')
     const job = {
       id: randomUUID(),
       repoId: payload.repoId,
@@ -211,15 +256,13 @@ export function registerIpc(ctx: IpcContext): void {
       progress: 0,
       bytesReceived: 0,
       bytesTotal: 0,
+      hfFilename,
       chatDisplayName:
         payload.chatDisplayName?.trim() ||
-        `${payload.repoId} · ${basename(payload.filename.replace(/\\/g, '/'))}`
+        `${payload.repoId} · ${basename(hfFilename)}`
     }
     const token = getHfToken()
-    const url = `https://huggingface.co/${payload.repoId}/resolve/${encodeURIComponent(job.revision)}/${payload.filename
-      .split('/')
-      .map((s) => encodeURIComponent(s))
-      .join('/')}`
+    const url = hfResolveDownloadUrl(payload.repoId, revision, hfFilename)
 
     startDownload(
       db,
@@ -238,7 +281,22 @@ export function registerIpc(ctx: IpcContext): void {
     return row ?? null
   })
 
-  ipcMain.handle(IPC.HF_CANCEL_DOWNLOAD, (_e, jobId: string) => cancelDownload(jobId))
+  ipcMain.handle(IPC.HF_CANCEL_DOWNLOAD, (_e, jobId: string) => {
+    if (cancelDownload(jobId)) return { ok: true as const }
+    const row = db
+      .prepare('SELECT local_path, status FROM downloads WHERE id = ?')
+      .get(jobId) as { local_path: string; status: string } | undefined
+    if (row?.status === 'downloading') {
+      db.prepare('DELETE FROM downloads WHERE id = ?').run(jobId)
+      try {
+        if (existsSync(row.local_path)) unlinkSync(row.local_path)
+      } catch {
+        /* ignore */
+      }
+      return { ok: true as const }
+    }
+    return { ok: false as const }
+  })
 
   ipcMain.handle(IPC.DOWNLOADS_LIST, () => listDownloadsWithProgress(db))
 
@@ -275,10 +333,43 @@ export function registerIpc(ctx: IpcContext): void {
     { id: 'ollama', label: 'Ollama (local daemon)' }
   ])
 
-  ipcMain.handle(IPC.RUNTIME_LIST_LOCAL_MODELS, () => {
-    const dir = modelsDir()
-    const paths = listGgufModelsInDir(dir)
-    return { modelsDir: dir, paths }
+  const listLocalModelsPayload = z.object({
+    additionalRoots: z.array(z.string().max(4096)).max(32).optional()
+  })
+
+  ipcMain.handle(IPC.RUNTIME_LIST_LOCAL_MODELS, (_e, raw?: unknown) => {
+    const parsed = listLocalModelsPayload.safeParse(raw ?? {})
+    const extraRaw = parsed.success ? (parsed.data.additionalRoots ?? []) : []
+
+    const rootSet = new Set<string>()
+    const tryAddRoot = (p: string): void => {
+      const t = p.trim()
+      if (!t) return
+      try {
+        const abs = resolve(t)
+        if (!existsSync(abs)) return
+        if (!statSync(abs).isDirectory()) return
+        rootSet.add(abs)
+      } catch {
+        /* ignore */
+      }
+    }
+
+    tryAddRoot(modelsDir())
+    for (const x of extraRaw) tryAddRoot(x)
+
+    const pathByKey = new Map<string, string>()
+    const keyOf = (p: string): string =>
+      process.platform === 'win32' ? p.replace(/\\/g, '/').toLowerCase() : p
+    for (const root of rootSet) {
+      for (const p of listGgufModelsInDir(root)) {
+        const k = keyOf(p)
+        if (!pathByKey.has(k)) pathByKey.set(k, p)
+      }
+    }
+    const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase()
+    const paths = [...pathByKey.values()].sort((a, b) => norm(a).localeCompare(norm(b)))
+    return { modelsDir: modelsDir(), paths }
   })
 
   ipcMain.handle(IPC.RUNTIME_OLLAMA_TAGS, async () => {
@@ -309,7 +400,9 @@ export function registerIpc(ctx: IpcContext): void {
     if (absN !== rootN && !absN.startsWith(`${rootN}/`)) {
       throw new Error('That file is outside your configured models folder.')
     }
-    if (!/\.gguf$/i.test(abs)) throw new Error('Only .gguf files can be deleted here.')
+    if (!/\.(gguf|safetensors|safetensor)$/i.test(abs)) {
+      throw new Error('Only .gguf, .safetensors, or .safetensor files can be deleted here.')
+    }
     if (!existsSync(abs)) throw new Error('File not found (it may already be deleted).')
     const rt = getRuntime()
     const st = rt?.getStatus()
@@ -329,7 +422,7 @@ export function registerIpc(ctx: IpcContext): void {
         error: e instanceof Error ? e.message : String(e)
       })
     }
-    logLine('info', 'deleted_local_gguf', { path: abs })
+    logLine('info', 'deleted_local_weight_file', { path: abs })
     return { ok: true as const }
   })
 
@@ -397,6 +490,7 @@ export function registerIpc(ctx: IpcContext): void {
         throw new Error('A model is already loaded. Unload it before loading another.')
       }
       await existing?.stop()
+      setRuntime(null)
       const adapter = createRuntime(opts.kind, {
         ollamaBaseUrl: (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434'
       })
@@ -408,12 +502,38 @@ export function registerIpc(ctx: IpcContext): void {
       const sendLoad = (p: { phase: string; message: string; percent?: number }): void => {
         event.sender.send(IPC.RUNTIME_LOAD_PROGRESS, p)
       }
-      await adapter.start({
-        modelPath: opts.modelPath,
-        binaryPath,
-        port: (store.get('llamaPort') as number | undefined) ?? 8080,
-        onLoadProgress: sendLoad
-      })
+      let modelPathForLoad = opts.modelPath.trim()
+      let displayModelPath: string | undefined
+      if (opts.kind === 'llamacpp' && isSafetensorsWeightFilePath(modelPathForLoad)) {
+        const binForSearch = (binaryPath ?? (configuredBin || '').trim()) || undefined
+        const r = await ensureGgufForSafetensorsModelPath({
+          weightPath: modelPathForLoad,
+          userData,
+          llamaBinaryPath: binForSearch,
+          convertScriptConfigured: store.get('llamaConvertScriptPath') as string | undefined,
+          pythonConfigured: store.get('llamaPythonPath') as string | undefined,
+          onProgress: sendLoad
+        })
+        modelPathForLoad = r.loadPath
+        displayModelPath = r.displayPath
+      }
+      try {
+        await adapter.start({
+          modelPath: modelPathForLoad,
+          displayModelPath,
+          binaryPath,
+          port: (store.get('llamaPort') as number | undefined) ?? 8080,
+          onLoadProgress: sendLoad
+        })
+      } catch (e) {
+        try {
+          await adapter.stop()
+        } catch {
+          /* ignore stop errors after failed start */
+        }
+        setRuntime(null)
+        throw e
+      }
       setRuntime(adapter)
       store.set('runtimeKind', opts.kind)
       return adapter.getStatus()
@@ -435,18 +555,32 @@ export function registerIpc(ctx: IpcContext): void {
       payload: {
         messages: { role: 'user' | 'assistant' | 'system'; content: string }[]
         requestId?: string
+        /** Optional cap for short calls (e.g. composer inline suggestion); clamped 1–128. */
+        maxTokens?: number
       }
     ) => {
       const rt = getRuntime()
       if (!rt) throw new Error('Runtime not started')
-      const rawMax = store.get('chatMaxTokens')
+      const st = rt.getStatus()
+      if (st.kind === 'llamacpp' && !st.running) {
+        throw new Error(
+          'llama-server is not running. It may have crashed while loading the model — open Run and press Start again, or verify the model file path and port.'
+        )
+      }
+      const rawOverride = payload.maxTokens
       const chatMaxTokens =
-        typeof rawMax === 'number' && Number.isFinite(rawMax)
-          ? Math.min(262_144, Math.max(1, Math.floor(rawMax)))
-          : 512
+        typeof rawOverride === 'number' && Number.isFinite(rawOverride)
+          ? Math.min(128, Math.max(1, Math.floor(rawOverride)))
+          : (() => {
+              const rawMax = store.get('chatMaxTokens')
+              return typeof rawMax === 'number' && Number.isFinite(rawMax)
+                ? Math.min(262_144, Math.max(1, Math.floor(rawMax)))
+                : 512
+            })()
       const requestId = typeof payload.requestId === 'string' ? payload.requestId : ''
       const emit = (
         data:
+          | { kind: 'started' }
           | { kind: 'token'; text: string }
           | { kind: 'error'; message: string }
           | { kind: 'usage'; promptTokens?: number; completionTokens?: number }
@@ -456,6 +590,7 @@ export function registerIpc(ctx: IpcContext): void {
       }
       const chatStarted = Date.now()
       try {
+        if (requestId) emit({ kind: 'started' })
         const reply = await rt.chat(payload.messages, {
           maxTokens: chatMaxTokens,
           ...(requestId

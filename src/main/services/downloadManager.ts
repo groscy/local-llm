@@ -8,6 +8,13 @@ import type Database from 'better-sqlite3'
 import { logLine } from '../logger'
 import type { DownloadJob } from '@shared/types'
 
+/** Build the same resolve URL as HF download IPC (revision + path segments encoded). */
+export function hfResolveDownloadUrl(repoId: string, revision: string, hfFilename: string): string {
+  const norm = hfFilename.replace(/\\/g, '/')
+  const tail = norm.split('/').map((s) => encodeURIComponent(s)).join('/')
+  return `https://huggingface.co/${repoId}/resolve/${encodeURIComponent(revision)}/${tail}`
+}
+
 type ActiveJob = {
   job: DownloadJob
   abort: AbortController
@@ -15,13 +22,19 @@ type ActiveJob = {
 
 const active = new Map<string, ActiveJob>()
 
+const MAX_REDIRECTS = 24
+
 function httpGet(
   url: string,
   headers: Record<string, string>,
   signal: AbortSignal,
-  redirectAuth?: { token?: string }
+  redirectDepth = 0
 ): Promise<{ statusCode: number; headers: NodeJS.Dict<string | string[]>; body: Readable }> {
   return new Promise((resolve, reject) => {
+    if (redirectDepth > MAX_REDIRECTS) {
+      reject(new Error('Too many redirects'))
+      return
+    }
     const u = new URL(url)
     const lib = u.protocol === 'https:' ? httpsRequest : httpRequest
     const req = lib(
@@ -33,11 +46,20 @@ function httpGet(
       (res) => {
         const code = res.statusCode ?? 0
         if (code >= 300 && code < 400 && res.headers.location) {
+          const nextAbs = new URL(res.headers.location, u.href).href
           const nextHeaders = { ...headers }
-          if (redirectAuth?.token && res.headers.location.includes('huggingface.co')) {
-            nextHeaders.Authorization = `Bearer ${redirectAuth.token}`
+          // Presigned CDN URLs (S3, CloudFront, hf.co bridges, etc.) must not receive HF Bearer —
+          // it breaks signatures and can corrupt the stream.
+          delete nextHeaders.Authorization
+          try {
+            const nextHost = new URL(nextAbs).hostname
+            if (nextHost !== u.hostname) {
+              delete nextHeaders.Range
+            }
+          } catch {
+            delete nextHeaders.Range
           }
-          httpGet(res.headers.location, nextHeaders, signal, redirectAuth).then(resolve).catch(reject)
+          httpGet(nextAbs, nextHeaders, signal, redirectDepth + 1).then(resolve).catch(reject)
           return
         }
         resolve({ statusCode: code, headers: res.headers, body: res as unknown as Readable })
@@ -52,14 +74,16 @@ function httpGet(
   })
 }
 
-/** Resolve HF LFS file download URL via redirects. */
+/** Resolve HF LFS file download URL via redirects. Supports Range resume; handles 416 when the file is already complete. */
 export async function downloadHfFile(
   url: string,
   destPath: string,
   onProgress: (received: number, total: number) => void,
   signal: AbortSignal,
-  hfToken?: string
+  hfToken?: string,
+  options?: { expectedFileBytes?: number; allow416Restart?: boolean }
 ): Promise<void> {
+  const allow416Restart = options?.allow416Restart !== false
   const dir = join(destPath, '..')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 
@@ -72,11 +96,47 @@ export async function downloadHfFile(
     }
   }
 
-  const headers: Record<string, string> = {}
+  const expected = options?.expectedFileBytes
+  if (expected != null && expected > 0 && startByte >= expected) {
+    onProgress(startByte, expected)
+    return
+  }
+
+  const headers: Record<string, string> = {
+    'Accept-Encoding': 'identity',
+    'User-Agent': 'local-llm-desktop/0.1 (HF resolve; compatible download)'
+  }
   if (startByte > 0) headers.Range = `bytes=${startByte}-`
   if (hfToken) headers.Authorization = `Bearer ${hfToken}`
 
-  const { statusCode, headers: resHeaders, body } = await httpGet(url, headers, signal, { token: hfToken })
+  const { statusCode, headers: resHeaders, body } = await httpGet(url, headers, signal)
+
+  if (statusCode === 416) {
+    if (expected != null && expected > 0 && existsSync(destPath)) {
+      try {
+        const sz = statSync(destPath).size
+        if (sz >= expected) {
+          onProgress(sz, expected)
+          return
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    if (allow416Restart && startByte > 0) {
+      try {
+        if (existsSync(destPath)) unlinkSync(destPath)
+      } catch {
+        /* ignore */
+      }
+      return downloadHfFile(url, destPath, onProgress, signal, hfToken, {
+        expectedFileBytes: expected,
+        allow416Restart: false
+      })
+    }
+    throw new Error(`HTTP ${statusCode}`)
+  }
+
   if (statusCode !== 200 && statusCode !== 206) {
     throw new Error(`HTTP ${statusCode}`)
   }
@@ -105,17 +165,20 @@ export function registerDownloadInDb(
     status: string
     bytesTotal: number
     chatDisplayName?: string
+    hfFilename?: string
   }
 ): void {
   const t = Date.now()
+  const hfFn = row.hfFilename?.trim() ? row.hfFilename.trim().replace(/\\/g, '/') : null
   db.prepare(
-    `INSERT INTO downloads (id, repo_id, revision, local_path, status, bytes_total, verified, created_at, updated_at, chat_display_name)
-     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+    `INSERT INTO downloads (id, repo_id, revision, local_path, status, bytes_total, verified, created_at, updated_at, chat_display_name, hf_filename)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        status = excluded.status,
-       bytes_total = excluded.bytes_total,
+       bytes_total = CASE WHEN excluded.bytes_total > 0 THEN excluded.bytes_total ELSE downloads.bytes_total END,
        local_path = excluded.local_path,
        chat_display_name = COALESCE(excluded.chat_display_name, downloads.chat_display_name),
+       hf_filename = COALESCE(excluded.hf_filename, downloads.hf_filename),
        updated_at = excluded.updated_at`
   ).run(
     row.id,
@@ -126,7 +189,8 @@ export function registerDownloadInDb(
     row.bytesTotal,
     t,
     t,
-    row.chatDisplayName?.trim() ? row.chatDisplayName.trim() : null
+    row.chatDisplayName?.trim() ? row.chatDisplayName.trim() : null,
+    hfFn
   )
 }
 
@@ -151,6 +215,27 @@ export function listDownloadsWithProgress(db: Database.Database): unknown[] {
         progress_percent: active.progress
       }
     }
+    if (status === 'downloading') {
+      const lp = row.local_path
+      let bytesReceived = 0
+      if (typeof lp === 'string' && existsSync(lp)) {
+        try {
+          bytesReceived = statSync(lp).size
+        } catch {
+          bytesReceived = 0
+        }
+      }
+      const btRaw = row.bytes_total
+      const bytesTotal = typeof btRaw === 'number' && btRaw > 0 ? btRaw : 0
+      const progressPercent =
+        bytesTotal > 0 ? Math.min(99, Math.round((100 * bytesReceived) / bytesTotal)) : 0
+      return {
+        ...row,
+        bytes_received: bytesReceived,
+        bytes_total: bytesTotal || row.bytes_total,
+        progress_percent: progressPercent
+      }
+    }
     return row
   })
 }
@@ -172,12 +257,31 @@ export function startDownload(
     localPath: job.destPath,
     status: 'downloading',
     bytesTotal: job.bytesTotal,
-    chatDisplayName: job.chatDisplayName
+    chatDisplayName: job.chatDisplayName,
+    hfFilename: job.hfFilename
   })
 
   ;(async () => {
+    let lastPersist = 0
+    let lastKnownTotal = job.bytesTotal
+    const persistProgress = (received: number, total: number): void => {
+      const now = Date.now()
+      const totalPositive = total > 0 ? total : 0
+      const totalBecameKnown = totalPositive > 0 && lastKnownTotal === 0
+      lastKnownTotal = totalPositive > 0 ? totalPositive : lastKnownTotal
+      if (totalBecameKnown || now - lastPersist >= 2500) {
+        lastPersist = now
+        db.prepare(`UPDATE downloads SET bytes_total = ?, updated_at = ? WHERE id = ?`).run(
+          totalPositive > 0 ? totalPositive : Math.max(0, lastKnownTotal),
+          now,
+          job.id
+        )
+      }
+    }
+
     try {
       const url = await resolveUrl()
+      const expectedBytes = job.bytesTotal > 0 ? job.bytesTotal : undefined
       await downloadHfFile(
         url,
         job.destPath,
@@ -185,10 +289,12 @@ export function startDownload(
           job.bytesReceived = received
           job.bytesTotal = total
           job.progress = total ? Math.min(99, Math.round((100 * received) / total)) : 0
+          persistProgress(received, total)
           onUpdate({ ...job })
         },
         abort.signal,
-        hfToken
+        hfToken,
+        { expectedFileBytes: expectedBytes, allow416Restart: true }
       )
       job.status = 'complete'
       job.progress = 100
@@ -245,6 +351,61 @@ export function cancelAllActiveDownloads(): number {
 
 export function getActiveDownload(jobId: string): DownloadJob | undefined {
   return active.get(jobId)?.job
+}
+
+/**
+ * Restart downloads that were in progress when the app last exited (DB status `downloading`).
+ * Requires `hf_filename` on the row (new downloads); older rows are skipped.
+ */
+export function resumeInterruptedDownloads(
+  db: Database.Database,
+  getHfToken: () => string | undefined,
+  onUpdate?: (j: DownloadJob) => void
+): void {
+  const rows = db.prepare(`SELECT * FROM downloads WHERE status = 'downloading'`).all() as Record<string, unknown>[]
+  for (const row of rows) {
+    const id = typeof row.id === 'string' ? row.id : ''
+    if (!id || active.has(id)) continue
+    const hfRaw = row.hf_filename
+    const hfFilename = typeof hfRaw === 'string' ? hfRaw.trim() : ''
+    if (!hfFilename) {
+      logLine('warn', 'download_resume_skipped', {
+        id,
+        reason: 'missing_hf_filename',
+        hint: 'Cancel the download in Models and start again to enable resume next time.'
+      })
+      continue
+    }
+    const repoId = typeof row.repo_id === 'string' ? row.repo_id : ''
+    const revision = typeof row.revision === 'string' ? row.revision : 'main'
+    const destPath = typeof row.local_path === 'string' ? row.local_path : ''
+    if (!repoId || !destPath) continue
+    const bt = typeof row.bytes_total === 'number' && row.bytes_total > 0 ? row.bytes_total : 0
+    let bytesReceived = 0
+    if (existsSync(destPath)) {
+      try {
+        bytesReceived = statSync(destPath).size
+      } catch {
+        bytesReceived = 0
+      }
+    }
+    const chatName = row.chat_display_name
+    const job: DownloadJob = {
+      id,
+      repoId,
+      revision,
+      destPath,
+      status: 'downloading',
+      progress: bt > 0 ? Math.min(99, Math.round((100 * bytesReceived) / bt)) : 0,
+      bytesReceived,
+      bytesTotal: bt,
+      chatDisplayName: typeof chatName === 'string' && chatName.trim() ? chatName.trim() : undefined,
+      hfFilename
+    }
+    const url = hfResolveDownloadUrl(repoId, revision, hfFilename)
+    logLine('info', 'download_resume', { id, path: destPath, bytesReceived, bytesTotal: bt })
+    startDownload(db, job, async () => url, onUpdate ?? (() => {}), getHfToken())
+  }
 }
 
 /** Cancel in-flight downloads, clear the download registry, and drop Hugging Face model JSON cache. Does not delete files on disk. */

@@ -10,6 +10,7 @@ import { registerIpc, type IpcContext } from './ipc/registerIpc'
 import type { RuntimeAdapter } from './services/runtime/types'
 import { ELECTRON_STORE_DEFAULTS } from './storeDefaults'
 import { stopIntegrationServer } from './services/integrationServer'
+import { resumeInterruptedDownloads } from './services/downloadManager'
 
 const store = new Store<Record<string, unknown>>({
   defaults: { ...ELECTRON_STORE_DEFAULTS }
@@ -119,6 +120,7 @@ app.whenReady().then(() => {
     setRuntime
   }
   registerIpc(ctx)
+  resumeInterruptedDownloads(db, () => hfTokenMem)
 
   createWindow()
 

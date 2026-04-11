@@ -1,9 +1,14 @@
 import { spawn, type ChildProcess } from 'child_process'
+import path from 'node:path'
 import { logLine } from '../../logger'
 import { httpPostJson, httpPostStreamingResponse, httpRequestRaw } from '../httpLocal'
 import { processRssMb } from '../processMemory'
 import type { ChatMessage, RuntimeAdapter, RuntimeLoadProgress } from './types'
 import type { RuntimeStatus } from '@shared/types'
+
+/** llama-server often does not bind until weights are loaded; fixed sleeps are not enough. */
+const LLAMA_READY_TIMEOUT_MS = 600_000
+const LLAMA_READY_POLL_MS = 900
 
 /** Buffer OpenAI-style SSE (`data: {...}\\n\\n`) and extract `delta.content` chunks. */
 class SseChatBuffer {
@@ -81,17 +86,102 @@ export class LlamaCppAdapter implements RuntimeAdapter {
   readonly kind = 'llamacpp' as const
   private proc: ChildProcess | null = null
   private port = 8080
+  /** Path passed to llama-server `-m` (may be a cached GGUF when user picked `.safetensors`). */
   private modelPath = ''
+  /** Shown in UI / status (user’s selected file when it differs from `modelPath`). */
+  private displayModelPath = ''
   private lastError?: string
+  private stderrTail = ''
+  private lastExitCode: number | null = null
+
+  private appendStderr(chunk: string): void {
+    this.stderrTail = (this.stderrTail + chunk).slice(-6000)
+  }
+
+  /** True when HTTP is accepting requests (model loaded enough for /v1/chat/completions). */
+  private async probeLlamaReady(): Promise<boolean> {
+    const base = `http://127.0.0.1:${this.port}`
+    try {
+      const { statusCode, body } = await httpRequestRaw({
+        url: `${base}/health`,
+        method: 'GET',
+        timeoutMs: 4000
+      })
+      if (statusCode === 503) return false
+      if (statusCode >= 200 && statusCode < 300) {
+        try {
+          const j = JSON.parse(body) as { status?: string }
+          if (j.status === 'loading' || j.status === 'error') return false
+          if (j.status === 'ok' || j.status == null) return true
+          return false
+        } catch {
+          return true
+        }
+      }
+    } catch {
+      /* still starting or refused */
+    }
+    try {
+      const { statusCode } = await httpRequestRaw({
+        url: `${base}/v1/models`,
+        method: 'GET',
+        timeoutMs: 4000
+      })
+      if (statusCode >= 200 && statusCode < 300) return true
+      if (statusCode === 503) return false
+    } catch {
+      /* */
+    }
+    return false
+  }
+
+  private async waitUntilLlamaReady(
+    deadline: number,
+    report?: (e: RuntimeLoadProgress) => void
+  ): Promise<void> {
+    const start = Date.now()
+    let lastProgressAt = 0
+    for (;;) {
+      if (!this.proc) {
+        const tail = this.stderrTail.trim().slice(-1200)
+        const code = this.lastExitCode
+        throw new Error(
+          `llama-server exited before the HTTP port was ready${code != null ? ` (exit ${code})` : ''}.` +
+            (tail ? ` Last output:\n${tail}` : ' Check the model path and llama-server build.')
+        )
+      }
+      if (await this.probeLlamaReady()) return
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `llama-server did not become ready within ${Math.round(LLAMA_READY_TIMEOUT_MS / 1000)}s.` +
+            (this.stderrTail.trim() ? `\nRecent stderr:\n${this.stderrTail.trim().slice(-1200)}` : '')
+        )
+      }
+      const elapsed = Date.now() - start
+      if (elapsed - lastProgressAt >= 8000) {
+        lastProgressAt = elapsed
+        const pct = Math.min(92, 28 + Math.round((elapsed / LLAMA_READY_TIMEOUT_MS) * 64))
+        report?.({
+          phase: 'load',
+          message: `Loading model — waiting for llama-server on 127.0.0.1:${this.port} (${Math.round(elapsed / 1000)}s)…`,
+          percent: pct
+        })
+      }
+      await new Promise((r) => setTimeout(r, LLAMA_READY_POLL_MS))
+    }
+  }
 
   async start(opts: {
     modelPath: string
+    /** When set, `getStatus().modelPath` reports this (e.g. original `.safetensors` path). */
+    displayModelPath?: string
     binaryPath?: string
     port?: number
     onLoadProgress?: (e: RuntimeLoadProgress) => void
   }): Promise<void> {
     await this.stop()
     this.modelPath = opts.modelPath
+    this.displayModelPath = (opts.displayModelPath?.trim() || opts.modelPath).trim()
     this.port = opts.port ?? 8080
     const report = opts.onLoadProgress
     const bin = opts.binaryPath
@@ -99,24 +189,40 @@ export class LlamaCppAdapter implements RuntimeAdapter {
       this.lastError = 'llama-server binary path not configured'
       throw new Error(this.lastError)
     }
+    this.stderrTail = ''
+    this.lastExitCode = null
     report?.({ phase: 'spawn', message: 'Starting llama-server…', percent: 5 })
     const args = ['-m', opts.modelPath, '--host', '127.0.0.1', '--port', String(this.port), '-c', '4096']
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(bin, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
+    })
     this.proc = child
-    child.stderr?.on('data', (d) => logLine('info', 'llama_stderr', { chunk: d.toString().slice(0, 200) }))
+    child.stderr?.on('data', (d) => {
+      const s = d.toString()
+      this.appendStderr(s)
+      logLine('info', 'llama_stderr', { chunk: s.slice(0, 200) })
+    })
     child.on('error', (e) => {
       this.lastError = e.message
       logLine('error', 'llama_spawn_error', { error: e.message })
     })
     child.on('exit', (code) => {
+      this.lastExitCode = code
       logLine('info', 'llama_exit', { code })
       this.proc = null
     })
-    report?.({ phase: 'load', message: 'Loading weights into memory (this can take a while)…', percent: 25 })
-    await new Promise((r) => setTimeout(r, 1500))
-    report?.({ phase: 'wait', message: `Listening on 127.0.0.1:${this.port} — finishing startup…`, percent: 85 })
-    await new Promise((r) => setTimeout(r, 500))
-    report?.({ phase: 'ready', message: 'llama-server should be ready.', percent: 100 })
+    const ext = path.extname(opts.modelPath).toLowerCase()
+    const weightKind =
+      ext === '.gguf' ? 'GGUF' : ext === '.safetensors' || ext === '.safetensor' ? 'Safetensors' : 'model'
+    report?.({
+      phase: 'load',
+      message: `Loading ${weightKind} weights into memory — server will accept chat when ready (may take several minutes for large files)…`,
+      percent: 22
+    })
+    const deadline = Date.now() + LLAMA_READY_TIMEOUT_MS
+    await this.waitUntilLlamaReady(deadline, report)
+    report?.({ phase: 'ready', message: 'llama-server is ready.', percent: 100 })
   }
 
   async stop(): Promise<void> {
@@ -131,7 +237,7 @@ export class LlamaCppAdapter implements RuntimeAdapter {
       running: !!this.proc,
       kind: 'llamacpp',
       endpoint: `http://127.0.0.1:${this.port}`,
-      modelPath: this.modelPath,
+      modelPath: this.displayModelPath || this.modelPath,
       pid: this.proc?.pid,
       lastError: this.lastError
     }
@@ -145,6 +251,11 @@ export class LlamaCppAdapter implements RuntimeAdapter {
       onStreamUsage?: (u: { promptTokens?: number; completionTokens?: number }) => void
     }
   ): Promise<string> {
+    if (!this.proc) {
+      throw new Error(
+        'llama-server is not running (the process exited or was stopped). Open Run, then Start the llama.cpp runtime again.'
+      )
+    }
     const url = `http://127.0.0.1:${this.port}/v1/chat/completions`
     const stream = Boolean(opts?.onStreamChunk)
     try {

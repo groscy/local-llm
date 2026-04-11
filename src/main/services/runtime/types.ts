@@ -12,6 +12,8 @@ export interface RuntimeAdapter {
 
   start(opts: {
     modelPath: string
+    /** llama.cpp only: status / UI path when `-m` points at a different cached file (e.g. converted GGUF). */
+    displayModelPath?: string
     binaryPath?: string
     port?: number
     onLoadProgress?: (e: RuntimeLoadProgress) => void

@@ -140,6 +140,12 @@ const MIGRATIONS: { version: number; sql: string }[] = [
     sql: `
       ALTER TABLE metrics_samples ADD COLUMN avg_prompt_to_response_ms REAL;
     `
+  },
+  {
+    version: 7,
+    sql: `
+      ALTER TABLE downloads ADD COLUMN hf_filename TEXT;
+    `
   }
 ]
 

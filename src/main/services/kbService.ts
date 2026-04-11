@@ -310,7 +310,8 @@ export function listWikiChatHighlightTerms(db: Database.Database): WikiChatHighl
   }
 
   out.sort((a, b) => b.phrase.length - a.phrase.length)
-  return out.slice(0, WIKI_HIGHLIGHT_MAX_TERMS)
+  const capped = out.slice(0, WIKI_HIGHLIGHT_MAX_TERMS)
+  return enrichWikiHighlightTermsWithKnowledgeGraph(capped, db)
 }
 
 /** Topic = source title with chunk count and kind (wiki index). */
@@ -437,6 +438,69 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
   }
 
   return { nodes, edges, truncated }
+}
+
+const KG_HIGHLIGHT_RELATED_MAX = 4
+
+/**
+ * Adds knowledge-graph context for assistant-message keyword tooltips (structured KB + relations).
+ */
+function enrichWikiHighlightTermsWithKnowledgeGraph(
+  terms: WikiChatHighlightTerm[],
+  db: Database.Database
+): WikiChatHighlightTerm[] {
+  if (terms.length === 0) return terms
+  const kg = getKnowledgeGraph(db)
+  const nodeById = new Map<string, KnowledgeGraphNode>()
+  for (const n of kg.nodes) nodeById.set(n.id, n)
+
+  const relatedBySource = new Map<string, Set<string>>()
+  for (const e of kg.edges) {
+    if (e.kind !== 'related') continue
+    const a = nodeById.get(e.from)
+    const b = nodeById.get(e.to)
+    if (a?.kind !== 'source' || b?.kind !== 'source') continue
+    if (!relatedBySource.has(e.from)) relatedBySource.set(e.from, new Set())
+    if (!relatedBySource.has(e.to)) relatedBySource.set(e.to, new Set())
+    relatedBySource.get(e.from)!.add(b.label)
+    relatedBySource.get(e.to)!.add(a.label)
+  }
+
+  const chunkCountBySource = new Map<string, number>()
+  for (const e of kg.edges) {
+    if (e.kind !== 'contains') continue
+    const ch = nodeById.get(e.to)
+    if (ch?.kind === 'chunk') {
+      chunkCountBySource.set(e.from, (chunkCountBySource.get(e.from) ?? 0) + 1)
+    }
+  }
+
+  const wikiCompiledSources = new Set<string>()
+  for (const e of kg.edges) {
+    if (e.kind === 'compiled_from') wikiCompiledSources.add(e.to)
+  }
+
+  return terms.map((t) => {
+    if (!nodeById.has(t.sourceId)) return t
+    const parts: string[] = []
+    const nCh = chunkCountBySource.get(t.sourceId) ?? 0
+    if (nCh > 0) {
+      parts.push(`${nCh} chunk${nCh === 1 ? '' : 's'} in the knowledge graph`)
+    }
+    if (wikiCompiledSources.has(t.sourceId)) {
+      parts.push('wiki article compiled from this source')
+    }
+    const rel = relatedBySource.get(t.sourceId)
+    const relList = rel ? [...rel].slice(0, KG_HIGHLIGHT_RELATED_MAX) : []
+    if (relList.length > 0) {
+      parts.push(`related: ${relList.join(' · ')}`)
+    }
+    if (kg.truncated && nCh > 0) {
+      parts.push('graph shows a subset of chunks')
+    }
+    const graphSummary = parts.length > 0 ? parts.join(' · ') : 'Linked in your knowledge graph'
+    return { ...t, graphSummary }
+  })
 }
 
 export function ensureWikiPageForSource(db: Database.Database, sourceId: string): { id: string; title: string; body: string } {

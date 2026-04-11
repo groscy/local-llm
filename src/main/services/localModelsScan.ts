@@ -1,14 +1,15 @@
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { extname, join } from 'node:path'
 
-const GGUF_EXT = '.gguf'
+const WEIGHT_EXTS = new Set(['.gguf', '.safetensors', '.safetensor'])
 
-function isGgufFile(name: string): boolean {
-  return extname(name).toLowerCase() === GGUF_EXT
+function isLocalWeightFile(name: string): boolean {
+  return WEIGHT_EXTS.has(extname(name).toLowerCase())
 }
 
 /**
- * Recursively list absolute paths to `.gguf` files under `root` (configured models / download folder).
+ * Recursively list absolute paths to loadable weight files (`.gguf`, `.safetensors`, `.safetensor`)
+ * under `root` (configured models / download folder).
  */
 export function listGgufModelsInDir(
   root: string,
@@ -33,7 +34,7 @@ export function listGgufModelsInDir(
       try {
         if (e.isDirectory()) {
           walk(p, depth + 1)
-        } else if (e.isFile() && isGgufFile(e.name)) {
+        } else if (e.isFile() && isLocalWeightFile(e.name)) {
           out.push(p)
         }
       } catch {

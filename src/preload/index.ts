@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('api', {
   clearAllCaches: () => invoke(IPC.CLEAR_ALL_CACHES),
   deleteAllModels: () => invoke(IPC.DELETE_ALL_MODELS),
   resetFactoryConfig: () => invoke(IPC.RESET_FACTORY_CONFIG),
+  confirmDestructive: (p: { message: string; detail?: string; confirmLabel?: string }) =>
+    invoke<boolean>(IPC.APP_CONFIRM_DESTRUCTIVE, p),
   hardwareSummary: (destDir?: string) => invoke(IPC.HARDWARE_SUMMARY, destDir),
   hfSearch: (q: string, limit?: number) => invoke(IPC.HF_SEARCH, q, limit),
   hfRecommended: (limit?: number) => invoke(IPC.HF_RECOMMENDED, limit),
@@ -44,7 +46,10 @@ contextBridge.exposeInMainWorld('api', {
   downloadsList: () => invoke(IPC.DOWNLOADS_LIST),
   runtimeList: () => invoke(IPC.RUNTIME_LIST),
   runtimeInstallPath: () => invoke(IPC.RUNTIME_INSTALL_PATH),
-  listLocalModelsInDownloadDir: () => invoke<{ modelsDir: string; paths: string[] }>(IPC.RUNTIME_LIST_LOCAL_MODELS),
+  listLocalModelsInDownloadDir: (additionalRoots?: string[]) =>
+    invoke<{ modelsDir: string; paths: string[] }>(IPC.RUNTIME_LIST_LOCAL_MODELS, {
+      additionalRoots: additionalRoots?.length ? additionalRoots : undefined
+    }),
   installOllama: () => invoke(IPC.RUNTIME_INSTALL_OLLAMA),
   onOllamaInstallProgress: (callback: (payload: { message: string }) => void) => {
     const channel = IPC.RUNTIME_INSTALL_OLLAMA_PROGRESS
@@ -85,8 +90,11 @@ contextBridge.exposeInMainWorld('api', {
   },
   deleteLocalGgufModel: (absolutePath: string) => invoke<{ ok: true }>(IPC.RUNTIME_DELETE_LOCAL_GGUF, absolutePath),
   deleteOllamaModel: (modelName: string) => invoke<{ ok: true }>(IPC.RUNTIME_DELETE_OLLAMA_MODEL, modelName),
-  runtimeChat: (messages: { role: string; content: string }[], requestId: string) =>
-    invoke(IPC.RUNTIME_CHAT, { messages, requestId }),
+  runtimeChat: (
+    messages: { role: string; content: string }[],
+    requestId: string,
+    opts?: { maxTokens?: number }
+  ) => invoke(IPC.RUNTIME_CHAT, { messages, requestId, ...opts }),
   conversationsList: () => invoke(IPC.CONVERSATIONS_LIST),
   conversationCreate: (title?: string) => invoke(IPC.CONVERSATION_CREATE, title),
   conversationMessages: (id: string) => invoke(IPC.CONVERSATION_MESSAGES, id),

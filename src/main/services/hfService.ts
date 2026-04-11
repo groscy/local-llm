@@ -5,6 +5,41 @@ import { logLine } from '../logger'
 
 const CACHE_TTL_MS = 1000 * 60 * 30
 
+/**
+ * When `listFiles` from @huggingface/hub returns nothing (Electron/network quirks), fall back to the
+ * public `GET /api/models/{repo}` payload (includes `siblings[].rfilename`).
+ */
+async function fetchSiblingsViaHfModelsApi(
+  repoId: string,
+  token?: string
+): Promise<{ path: string; size?: number }[]> {
+  const pathEnc = repoId
+    .split('/')
+    .map((s) => encodeURIComponent(s))
+    .join('/')
+  const url = `https://huggingface.co/api/models/${pathEnc}`
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'User-Agent': 'local-llm-desktop/0.1 (HF siblings fallback)'
+  }
+  if (token) headers.Authorization = `Bearer ${token}`
+
+  const res = await fetch(url, { headers })
+  if (!res.ok) {
+    logLine('warn', 'hf_models_api_siblings_http', { repoId, status: res.status })
+    return []
+  }
+  const j = (await res.json()) as {
+    siblings?: { rfilename: string; size?: number }[]
+    safetensors?: { total?: number }
+  }
+  const out = (j.siblings ?? []).map((s) => ({
+    path: s.rfilename,
+    size: typeof s.size === 'number' && s.size > 0 ? s.size : undefined
+  }))
+  return out
+}
+
 /** Ollama registry tags for known Hub GGUF repos (library install when backend is Ollama). */
 const HF_REPO_OLLAMA_LIBRARY: Record<string, string> = {
   'meta-llama/Meta-Llama-3.1-8B-Instruct-GGUF': 'llama3.1:8b',
@@ -223,8 +258,25 @@ export async function hfModelDetail(
     logLine('warn', 'hf_list_files_failed', { repoId, error: String(e) })
   }
 
+  if (siblings.length === 0) {
+    try {
+      const fromApi = await fetchSiblingsViaHfModelsApi(repoId, token)
+      for (const s of fromApi) siblings.push(s)
+      if (fromApi.length > 0) {
+        logLine('info', 'hf_siblings_from_models_api', { repoId, count: fromApi.length })
+      }
+    } catch (e) {
+      logLine('warn', 'hf_models_api_siblings_failed', { repoId, error: String(e) })
+    }
+  }
+
   const card = 'cardData' in info ? (info as { cardData?: { license?: string; description?: string } }).cardData : undefined
-  const totalSizeBytes = siblings.reduce((a, s) => a + (s.size ?? 0), 0)
+  let totalSizeBytes = siblings.reduce((a, s) => a + (s.size ?? 0), 0)
+  if (totalSizeBytes <= 0 && 'safetensors' in info) {
+    const st = (info as { safetensors?: { total?: number } }).safetensors
+    const t = st?.total
+    if (typeof t === 'number' && t > 0) totalSizeBytes = t
+  }
 
   const ollamaLibraryName = HF_REPO_OLLAMA_LIBRARY[repoId]
 

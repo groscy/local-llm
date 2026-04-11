@@ -195,7 +195,13 @@ export class OllamaAdapter implements RuntimeAdapter {
     this.modelName = ''
   }
 
-  async start(opts: { modelPath: string; onLoadProgress?: (e: RuntimeLoadProgress) => void }): Promise<void> {
+  async start(opts: {
+    modelPath: string
+    displayModelPath?: string
+    binaryPath?: string
+    port?: number
+    onLoadProgress?: (e: RuntimeLoadProgress) => void
+  }): Promise<void> {
     const trimmed = opts.modelPath.trim()
     if (!trimmed) throw new Error('Ollama model name is required (for example: llama3.2)')
     const asPath = path.resolve(trimmed.replace(/^file:\/\//i, ''))
@@ -205,6 +211,10 @@ export class OllamaAdapter implements RuntimeAdapter {
         logLine('info', 'ollama_use_local_gguf', { path: asPath })
         report?.({ phase: 'prepare', message: 'Importing local GGUF into Ollama…' })
         await this.ensureLocalGgufModel(asPath, report)
+      } else if (existsSync(asPath) && /\.safetensors?$/i.test(asPath)) {
+        throw new Error(
+          'Ollama cannot import raw .safetensors files from disk (only .gguf). Switch to llama.cpp in the top bar to auto-convert a full HF folder to GGUF, convert offline, or type an Ollama model name to pull instead.'
+        )
       } else {
         this.modelName = trimmed
         logLine('info', 'ollama_use_model', { model: this.modelName })

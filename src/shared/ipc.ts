@@ -10,6 +10,8 @@ export const IPC = {
   CLEAR_ALL_CACHES: 'app:clearAllCaches',
   DELETE_ALL_MODELS: 'app:deleteAllModels',
   RESET_FACTORY_CONFIG: 'app:resetFactoryConfig',
+  /** Native warning dialog; returns true if user chose the confirm action (second button). */
+  APP_CONFIRM_DESTRUCTIVE: 'app:confirmDestructive',
   HARDWARE_SUMMARY: 'app:hardwareSummary',
   LOG: 'app:log',
 
@@ -42,7 +44,7 @@ export const IPC = {
   RUNTIME_OLLAMA_PULL: 'runtime:ollamaPull',
   /** Main → renderer: progress during `RUNTIME_OLLAMA_PULL`. */
   OLLAMA_PULL_PROGRESS: 'runtime:ollamaPullProgress',
-  /** Delete one `.gguf` under the configured models directory (must unload if active). */
+  /** Delete one local weight file (`.gguf` / `.safetensors` / `.safetensor`) under the models directory (must unload if active). */
   RUNTIME_DELETE_LOCAL_GGUF: 'runtime:deleteLocalGguf',
   /** Remove one model from the Ollama daemon (`/api/delete`). */
   RUNTIME_DELETE_OLLAMA_MODEL: 'runtime:deleteOllamaModel',
