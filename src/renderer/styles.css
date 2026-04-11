@@ -906,7 +906,8 @@ html {
 
 .pinned-widget-slot > .metrics-pinned-widget,
 .pinned-widget-slot > .downloads-pinned-widget,
-.pinned-widget-slot > .activity-pinned-widget {
+.pinned-widget-slot > .activity-pinned-widget,
+.pinned-widget-slot > .issues-pinned-widget {
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -960,9 +961,11 @@ html {
 .shell-content--pinned-top .pinned-widgets-aside-body .pinned-widget-slot > .metrics-pinned-widget,
 .shell-content--pinned-top .pinned-widgets-aside-body .pinned-widget-slot > .downloads-pinned-widget,
 .shell-content--pinned-top .pinned-widgets-aside-body .pinned-widget-slot > .activity-pinned-widget,
+.shell-content--pinned-top .pinned-widgets-aside-body .pinned-widget-slot > .issues-pinned-widget,
 .shell-content--pinned-bottom .pinned-widgets-aside-body .pinned-widget-slot > .metrics-pinned-widget,
 .shell-content--pinned-bottom .pinned-widgets-aside-body .pinned-widget-slot > .downloads-pinned-widget,
-.shell-content--pinned-bottom .pinned-widgets-aside-body .pinned-widget-slot > .activity-pinned-widget {
+.shell-content--pinned-bottom .pinned-widgets-aside-body .pinned-widget-slot > .activity-pinned-widget,
+.shell-content--pinned-bottom .pinned-widgets-aside-body .pinned-widget-slot > .issues-pinned-widget {
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -982,7 +985,9 @@ html {
 .shell-content--pinned-left .pinned-widgets-aside-body .pinned-widget-slot > .downloads-pinned-widget,
 .shell-content--pinned-right .pinned-widgets-aside-body .pinned-widget-slot > .downloads-pinned-widget,
 .shell-content--pinned-left .pinned-widgets-aside-body .pinned-widget-slot > .activity-pinned-widget,
-.shell-content--pinned-right .pinned-widgets-aside-body .pinned-widget-slot > .activity-pinned-widget {
+.shell-content--pinned-right .pinned-widgets-aside-body .pinned-widget-slot > .activity-pinned-widget,
+.shell-content--pinned-left .pinned-widgets-aside-body .pinned-widget-slot > .issues-pinned-widget,
+.shell-content--pinned-right .pinned-widgets-aside-body .pinned-widget-slot > .issues-pinned-widget {
   flex: 1;
   min-height: 0;
 }
@@ -1016,7 +1021,9 @@ html {
   .shell-content--pinned-left .pinned-widgets-aside-body .pinned-widget-slot > .downloads-pinned-widget,
   .shell-content--pinned-right .pinned-widgets-aside-body .pinned-widget-slot > .downloads-pinned-widget,
   .shell-content--pinned-left .pinned-widgets-aside-body .pinned-widget-slot > .activity-pinned-widget,
-  .shell-content--pinned-right .pinned-widgets-aside-body .pinned-widget-slot > .activity-pinned-widget {
+  .shell-content--pinned-right .pinned-widgets-aside-body .pinned-widget-slot > .activity-pinned-widget,
+  .shell-content--pinned-left .pinned-widgets-aside-body .pinned-widget-slot > .issues-pinned-widget,
+  .shell-content--pinned-right .pinned-widgets-aside-body .pinned-widget-slot > .issues-pinned-widget {
     flex: 1 1 auto;
     min-height: 120px;
     max-height: 220px;
@@ -6014,6 +6021,134 @@ select.select optgroup {
     padding: 3px 8px;
     font-size: 10px;
   }
+}
+
+/* Pinned issues widget (blocking warnings / errors) */
+.issues-pinned-widget {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  background: var(--surface-elevated);
+  overflow: hidden;
+}
+
+.issues-pinned-widget-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.issues-pinned-widget-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.issues-pinned-widget-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex: 1;
+  min-width: 120px;
+}
+
+.issues-pinned-widget-count--ok {
+  color: var(--accent, #6b5bb3);
+}
+
+.issues-pinned-widget-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.issues-pinned-widget-link,
+.issues-pinned-widget-unpin {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.issues-pinned-widget-unpin {
+  border-color: transparent;
+  opacity: 0.75;
+}
+
+.issues-pinned-widget-link:hover,
+.issues-pinned-widget-unpin:hover {
+  opacity: 1;
+  border-color: var(--border);
+}
+
+.issues-pinned-widget-empty {
+  margin: 0;
+  padding: 14px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.issues-pinned-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.issues-pinned-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  border-bottom: 1px solid var(--border);
+}
+
+.issues-pinned-item:last-child {
+  border-bottom: none;
+}
+
+.issues-pinned-item-badge {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.issues-pinned-item-badge .fa-solid {
+  line-height: 1;
+}
+
+.issues-pinned-item--error .issues-pinned-item-badge {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger-text);
+}
+
+.issues-pinned-item--warning .issues-pinned-item-badge {
+  background: color-mix(in srgb, var(--warning) 22%, transparent);
+  color: var(--warning-bright);
+}
+
+.issues-pinned-item-message {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
 }
 
 /* Floating dots (generation / wait) */

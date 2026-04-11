@@ -10,6 +10,7 @@ import {
   type MouseEvent,
   type ReactElement
 } from 'react'
+import type { AppBlockingIssue } from '@shared/appBlockingIssues'
 import type {
   DownloadRow,
   HardwareSummary,
@@ -54,6 +55,7 @@ import { DownloadsPinnedWidget } from './DownloadsPinnedWidget'
 import { FloatingDots } from './FloatingDots'
 import { ModelPresenceBackdrop } from './ModelPresenceBackdrop'
 import { MetricsTimeSeries } from './MetricsTimeSeries'
+import { IssuesPinnedWidget } from './IssuesPinnedWidget'
 import { MetricsPinnedWidget } from './MetricsPinnedWidget'
 import { KnowledgeGraphView } from './KnowledgeGraphView'
 import { buildWikiTocGroupsFromRoot, WikiArticleTocNav, type WikiTocGroup } from './WikiArticleToc'
@@ -465,12 +467,13 @@ function parsePinnedWidgetsSide(raw: unknown): PinnedWidgetsSide {
   return 'left'
 }
 
-type PinnedWidgetKind = 'metrics' | 'downloads' | 'activity'
+type PinnedWidgetKind = 'metrics' | 'downloads' | 'activity' | 'issues'
 
 const PINNED_WIDGET_WEIGHT_DEFAULT: Record<PinnedWidgetKind, number> = {
   metrics: 1,
   downloads: 1,
-  activity: 1
+  activity: 1,
+  issues: 1
 }
 
 function clampPinnedWidgetWeights(raw: unknown): Record<PinnedWidgetKind, number> {
@@ -484,7 +487,8 @@ function clampPinnedWidgetWeights(raw: unknown): Record<PinnedWidgetKind, number
   return {
     metrics: one(o.metrics),
     downloads: one(o.downloads),
-    activity: one(o.activity)
+    activity: one(o.activity),
+    issues: one(o.issues)
   }
 }
 
@@ -1453,6 +1457,7 @@ export default function App(): React.ReactElement {
   const [metricsPinned, setMetricsPinned] = useState(false)
   const [downloadsPinned, setDownloadsPinned] = useState(false)
   const [activityPinned, setActivityPinned] = useState(false)
+  const [issuesPinned, setIssuesPinned] = useState(false)
   const [runtimeLoadProgress, setRuntimeLoadProgress] = useState<RuntimeLoadProgress | null>(null)
   const [runtimeStarting, setRuntimeStarting] = useState(false)
   const [chatSending, setChatSending] = useState(false)
@@ -2134,6 +2139,7 @@ export default function App(): React.ReactElement {
       if (typeof c.metricsPinned === 'boolean') setMetricsPinned(c.metricsPinned)
       if (typeof c.downloadsPinned === 'boolean') setDownloadsPinned(c.downloadsPinned)
       if (typeof c.activityPinned === 'boolean') setActivityPinned(c.activityPinned)
+      if (typeof c.issuesPinned === 'boolean') setIssuesPinned(c.issuesPinned)
       setPinnedWidgetsSide(parsePinnedWidgetsSide(c.pinnedWidgetsSide))
       if (typeof c.pinnedWidgetsWidthPx === 'number') {
         setPinnedWidgetsWidthPx(clampPinnedWidth(c.pinnedWidgetsWidthPx))
@@ -2319,6 +2325,7 @@ export default function App(): React.ReactElement {
       metricsPinned?: boolean
       downloadsPinned?: boolean
       activityPinned?: boolean
+      issuesPinned?: boolean
       metricsRefreshMs?: number
       pinnedWidgetsSide?: PinnedWidgetsSide
       pinnedWidgetWeights?: Record<PinnedWidgetKind, number>
@@ -2327,6 +2334,7 @@ export default function App(): React.ReactElement {
       if (patch.metricsPinned !== undefined) body.metricsPinned = patch.metricsPinned
       if (patch.downloadsPinned !== undefined) body.downloadsPinned = patch.downloadsPinned
       if (patch.activityPinned !== undefined) body.activityPinned = patch.activityPinned
+      if (patch.issuesPinned !== undefined) body.issuesPinned = patch.issuesPinned
       if (patch.metricsRefreshMs !== undefined) body.metricsRefreshMs = clampMetricsRefreshMs(patch.metricsRefreshMs)
       if (patch.pinnedWidgetsSide !== undefined) body.pinnedWidgetsSide = patch.pinnedWidgetsSide
       if (patch.pinnedWidgetWeights !== undefined) {
@@ -2471,6 +2479,44 @@ export default function App(): React.ReactElement {
     }
   }, [downloadsPinned])
 
+  const appBlockingIssues = useMemo((): AppBlockingIssue[] => {
+    const out: AppBlockingIssue[] = []
+    if (runtimeKind === 'ollama') {
+      if (ollamaHost && !ollamaHost.reachable) {
+        out.push({
+          id: 'ollama-host',
+          severity: 'error',
+          message: `Ollama is not reachable at ${ollamaHost.baseUrl}. Start the Ollama app or change the base URL in Settings.`
+        })
+      }
+      if (ollamaChatTagsErr?.trim()) {
+        out.push({ id: 'ollama-list', severity: 'error', message: ollamaChatTagsErr.trim() })
+      }
+    }
+    if (
+      runtimeKind === 'ollama' &&
+      ollamaHost?.reachable &&
+      !runtimeOn &&
+      !ollamaChatTagsLoading &&
+      !ollamaChatTagsErr &&
+      ollamaChatTags.length === 0
+    ) {
+      out.push({
+        id: 'ollama-no-models',
+        severity: 'warning',
+        message: 'No models are in your Ollama library yet. Pull one from Run or the Models hub.'
+      })
+    }
+    return out
+  }, [
+    ollamaChatTags,
+    ollamaChatTagsErr,
+    ollamaChatTagsLoading,
+    ollamaHost,
+    runtimeKind,
+    runtimeOn
+  ])
+
   const metricsWidgetControls = (
     <div className="drawer-section">
       <h3 className="settings-section-title">
@@ -2520,6 +2566,21 @@ export default function App(): React.ReactElement {
         <span>
           <i className="fa-solid fa-bars-staggered" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
           Show model load and reply progress in the Pinned widgets panel
+        </span>
+      </label>
+      <label className="metrics-widget-check" style={{ marginTop: 14 }}>
+        <input
+          type="checkbox"
+          checked={issuesPinned}
+          onChange={(e) => {
+            const v = e.target.checked
+            setIssuesPinned(v)
+            void saveMetricsWidgetConfig({ issuesPinned: v })
+          }}
+        />
+        <span>
+          <i className="fa-solid fa-triangle-exclamation" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
+          Show blocking issues and warnings in the Pinned widgets panel
         </span>
       </label>
       <label style={{ display: 'block', marginTop: 16 }}>
@@ -4103,6 +4164,24 @@ export default function App(): React.ReactElement {
                     <i className="fa-solid fa-bolt" />
                   </span>
                 </button>
+                <button
+                  type="button"
+                  className={`pinned-widgets-pin ${issuesPinned ? 'active' : ''}`}
+                  title={issuesPinned ? 'Unpin issues' : 'Pin blocking issues and warnings here'}
+                  aria-label={
+                    issuesPinned ? 'Unpin issues' : 'Pin blocking issues and warnings to this panel'
+                  }
+                  aria-pressed={issuesPinned}
+                  onClick={() => {
+                    const next = !issuesPinned
+                    setIssuesPinned(next)
+                    void saveMetricsWidgetConfig({ issuesPinned: next })
+                  }}
+                >
+                  <span className="pinned-widgets-pin-icon" aria-hidden>
+                    <i className="fa-solid fa-triangle-exclamation" />
+                  </span>
+                </button>
               </div>
               <div className="pinned-widgets-dock-symbols" role="group" aria-label="Widget bar position">
                 {(
@@ -4135,18 +4214,20 @@ export default function App(): React.ReactElement {
             ref={pinnedWidgetsBodyRef}
             className={[
               'pinned-widgets-aside-body',
-              !metricsPinned && !downloadsPinned && !activityPinned ? 'pinned-widgets-aside-body--empty' : '',
-              (metricsPinned && downloadsPinned) ||
-              (metricsPinned && activityPinned) ||
-              (downloadsPinned && activityPinned)
+              !metricsPinned && !downloadsPinned && !activityPinned && !issuesPinned
+                ? 'pinned-widgets-aside-body--empty'
+                : '',
+              [metricsPinned, downloadsPinned, activityPinned, issuesPinned].filter(Boolean).length >= 2
                 ? 'pinned-widgets-aside-body--split'
                 : ''
             ]
               .filter(Boolean)
               .join(' ')}
           >
-            {!metricsPinned && !downloadsPinned && !activityPinned ? (
-              <p className="pinned-widgets-aside-empty muted">Pin metrics, downloads, or activity using the buttons above.</p>
+            {!metricsPinned && !downloadsPinned && !activityPinned && !issuesPinned ? (
+              <p className="pinned-widgets-aside-empty muted">
+                Pin metrics, downloads, activity, or issues using the buttons above.
+              </p>
             ) : null}
             {(() => {
               const items: { kind: PinnedWidgetKind; node: ReactElement }[] = []
@@ -4208,6 +4289,21 @@ export default function App(): React.ReactElement {
                         setMobileConvOpen(false)
                         setMobileKbOpen(false)
                       }}
+                    />
+                  )
+                })
+              }
+              if (issuesPinned) {
+                items.push({
+                  kind: 'issues',
+                  node: (
+                    <IssuesPinnedWidget
+                      issues={appBlockingIssues}
+                      onUnpin={() => {
+                        setIssuesPinned(false)
+                        void saveMetricsWidgetConfig({ issuesPinned: false })
+                      }}
+                      onOpenRun={() => setDrawer('runtime')}
                     />
                   )
                 })

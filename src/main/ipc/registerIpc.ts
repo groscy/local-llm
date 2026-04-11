@@ -66,6 +66,7 @@ const configSchema = z.object({
   metricsRefreshMs: z.number().min(500).max(3_600_000).optional(),
   downloadsPinned: z.boolean().optional(),
   activityPinned: z.boolean().optional(),
+  issuesPinned: z.boolean().optional(),
   pinnedWidgetsSide: z.enum(['left', 'right', 'top', 'bottom']).optional(),
   pinnedWidgetsWidthPx: z.number().min(160).max(1400).optional(),
   pinnedWidgetsHeightPx: z.number().min(300).max(1200).optional(),
@@ -73,7 +74,8 @@ const configSchema = z.object({
     .object({
       metrics: z.number().min(0.05).max(100).optional(),
       downloads: z.number().min(0.05).max(100).optional(),
-      activity: z.number().min(0.05).max(100).optional()
+      activity: z.number().min(0.05).max(100).optional(),
+      issues: z.number().min(0.05).max(100).optional()
     })
     .optional(),
   colorScheme: z.enum(['violet', 'teal', 'amber', 'rose', 'sky']).optional(),
