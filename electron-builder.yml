@@ -1,7 +1,7 @@
 # electron-builder config (used by npm run dist:zip)
 appId: com.localllm.desktop
 productName: Local LLM Desktop
-copyright: Copyright © 2026
+copyright: Copyright © 2026 Cyril Grossenbacher
 
 directories:
   output: release
@@ -52,7 +52,7 @@ mac:
 
 linux:
   icon: build/icon.png
-  maintainer: Local <noreply@local.invalid>
+  maintainer: Cyril Grossenbacher <noreply@local.invalid>
   target:
     - target: zip
       arch:
@@ -78,6 +78,7 @@ linux:
 
 # Windows setup wizard (built with `npm run dist:installer` on Windows)
 nsis:
+  license: LICENSE
   oneClick: false
   allowToChangeInstallationDirectory: true
   allowElevation: true

@@ -1,7 +1,8 @@
 {
   "name": "local-llm-desktop",
   "version": "0.1.0",
-  "author": "Local",
+  "author": "Cyril Grossenbacher",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "homepage": "https://github.com/localllm/local-llm-desktop",
   "description": "Local LLM desktop app with Hugging Face, RAG wiki, and optional LoRA training",
   "main": "out/main/index.js",
