@@ -28,6 +28,7 @@ import type {
   WikiTopic
 } from '@shared/types'
 import { hfResolveRevision, pickPrimaryHubWeightFile } from '@shared/hfGgufPick'
+import { hubWeightDownloadPathSet } from '@shared/hfDownloadBundle'
 import { evaluateModelForHardware } from '@shared/modelHardwareFit'
 import type { ColorSchemeId } from '@shared/colorScheme'
 import { COLOR_SCHEME_IDS, COLOR_SCHEME_LABELS, DEFAULT_COLOR_SCHEME, parseColorScheme } from '@shared/colorScheme'
@@ -2846,24 +2847,43 @@ export default function App(): React.ReactElement {
 
       if (filePath) {
         const revision = hfResolveRevision(d, 'main')
-        const j = (await window.api.hfDownload({
-          repoId,
-          revision,
-          filename: filePath,
-          destDir: destDir.trim() || undefined,
-          chatDisplayName: repoId
-        })) as { id: string; progress?: number; bytesReceived?: number; bytesTotal?: number; status?: string }
-        void refreshDownloadsList()
-        setHfDownloadJobs((prev) => ({
-          ...prev,
-          [repoId]: {
-            jobId: j.id,
-            progress: typeof j.progress === 'number' ? j.progress : 0,
-            bytesReceived: typeof j.bytesReceived === 'number' ? j.bytesReceived : 0,
-            bytesTotal: typeof j.bytesTotal === 'number' ? j.bytesTotal : 0,
-            status: typeof j.status === 'string' ? j.status : 'downloading'
+        const paths = hubWeightDownloadPathSet(d.siblings ?? [], filePath)
+        let lastJob: {
+          id: string
+          progress?: number
+          bytesReceived?: number
+          bytesTotal?: number
+          status?: string
+        } | null = null
+        for (const filename of paths) {
+          const j = (await window.api.hfDownload({
+            repoId,
+            revision,
+            filename,
+            destDir: destDir.trim() || undefined,
+            chatDisplayName: repoId
+          })) as {
+            id: string
+            progress?: number
+            bytesReceived?: number
+            bytesTotal?: number
+            status?: string
           }
-        }))
+          lastJob = j
+          void refreshDownloadsList()
+        }
+        if (lastJob) {
+          setHfDownloadJobs((prev) => ({
+            ...prev,
+            [repoId]: {
+              jobId: lastJob!.id,
+              progress: typeof lastJob!.progress === 'number' ? lastJob!.progress : 0,
+              bytesReceived: typeof lastJob!.bytesReceived === 'number' ? lastJob!.bytesReceived : 0,
+              bytesTotal: typeof lastJob!.bytesTotal === 'number' ? lastJob!.bytesTotal : 0,
+              status: typeof lastJob!.status === 'string' ? lastJob!.status : 'downloading'
+            }
+          }))
+        }
         return
       }
 
@@ -3114,7 +3134,7 @@ export default function App(): React.ReactElement {
                 type="button"
                 className="btn-secondary hf-model-table-action-btn"
                 disabled={rowInstallBusy}
-                title="Downloads the main GGUF or Safetensors file from Hugging Face when available; if the repo has no such file but maps to an Ollama library model and the top bar is set to Ollama, pulls that image instead."
+                title="Downloads files needed for llama.cpp: for GGUF, the main file plus mmproj (vision) or split GGUF parts when listed; for Safetensors, weights under the same folder tree, index JSON, config, and tokenizer files. If the repo has no suitable file but maps to an Ollama library model and the top bar is Ollama, pulls that image instead."
                 onClick={(e) => {
                   e.stopPropagation()
                   void installHubModelFromBrowse(m.id)

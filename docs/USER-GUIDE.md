@@ -1,6 +1,6 @@
 # User Guide — Local LLM Desktop
 
-This guide explains how to install, configure, and run **Local LLM Desktop**: browse Hugging Face models, download files locally, chat with a local inference runtime, and optionally use the knowledge base, metrics, and training tools.
+This guide explains how to install, configure, and run **Local LLM Desktop**: use the **Models** hub for Hugging Face search and installs (GGUF or Safetensors with sidecars into a per-repo folder), chat through **Ollama** or **llama.cpp** (`llama-server`) selected from the top bar as **Ollama** vs **Files on my PC**, and optionally use the knowledge base, wiki highlights, pinned metrics/downloads/activity widgets, and training tools.
 
 ---
 
@@ -95,17 +95,17 @@ Output appears under `release/` or, if that folder is locked on Windows, under `
 
 ## 3. First launch and navigation
 
-- The main window is a **single desktop app** with a **sidebar** and **slide-over** panels for tools on narrower layouts. You can **resize** panel widths and choose which **screen edge** the chat list and knowledge panel slide in from; those choices are remembered in the browser storage for that window.
+- The main window is a **single desktop app** with a **sidebar** and **slide-over** drawers. You can **resize** panel widths and choose which **screen edge** the chat list and knowledge panel slide in from; those choices are remembered for that window.
 - Use the **navigation buttons** to open:
-  - **Hugging Face** — search models, open details, download `.gguf` (or other) files.
-  - **Runtime** — choose Ollama or llama.cpp, start/stop inference, see status.
+  - **Models** (drawer title *Browse models*) — Hugging Face recommendations or search, sortable/filterable cards, expandable rows, hardware hints where available, **Download** (GGUF preferred, else Safetensors + config/tokenizer/shards into a per-repo subfolder), or mapped **Ollama pull** when the top bar is on Ollama.
+  - **Your AI (Run)** — start/stop inference, install helpers, download registry, model path picker.
   - **Training** — optional LoRA job launcher (requires Python).
-  - **Metrics** — charts in a **two-column** layout for throughput, context usage, **process CPU and resident memory** (working set), and optional **GPU** memory when `nvidia-smi` is available.
-  - **Settings** — models folder, appearance, widgets, inference limits, IDE bridge, maintenance, Hugging Face token.
+  - **Metrics** — time-series charts (RSS, CPU, GPU when `nvidia-smi` exists, tokens, context, latency, etc.) in a responsive grid; content can be **pinned** to a dock edge.
+  - **Settings** — models folder, **Appearance** (accent presets: violet, teal, amber, rose, sky), pinned widgets, inference limits, llama binary and **Safetensors→GGUF** script paths, IDE bridge, maintenance, Hugging Face token.
 
-The header shows a **runtime pill** (“Runtime on” / “Runtime off”); click it to jump to the Runtime panel.
+The **top bar** (separate from the sidebar) sets the backend: **Ollama** or **Files on my PC** (llama.cpp `llama-server`). The header shows a **runtime** status; you can use it to jump to **Run**.
 
-**Look and feel:** Accent presets and **rounded scrollbars** use the app’s theme tokens so the UI stays consistent in light and dark modes.
+**Look and feel:** Dark **glass** UI with shared theme tokens, selectable **accent** schemes, and capsule scrollbars.
 
 ---
 
@@ -115,7 +115,7 @@ Many public models work **without** a token; some repos are **gated** or **rate-
 
 1. Open **Settings**.
 2. Paste your Hugging Face **access token** and save (the app stores it securely when the OS supports it).
-3. Return to **Hugging Face** in the app to search, open model pages, and download.
+3. Return to **Models** in the app to search, open model pages, and download.
 
 If downloads fail with permission errors, verify the model’s page on the Hub and your token scope.
 
@@ -123,38 +123,39 @@ If downloads fail with permission errors, verify the model’s page on the Hub a
 
 ## 5. Inference runtime (required for chat)
 
-The app does **not** replace Ollama or llama.cpp; it **talks to** whichever backend you choose.
+The app does **not** replace Ollama or llama.cpp; it **talks to** whichever backend you choose from the **top bar**.
 
 ### 5.1 Option A — Ollama
 
 1. Install Ollama from [https://ollama.com/](https://ollama.com/) and ensure it is running (default API: `http://127.0.0.1:11434`).
-2. In the app, open **Runtime**, select **Ollama**.
+2. Set the top bar to **Ollama**.
 3. In **Settings**, confirm **Ollama base URL** if you use a non-default host/port (default is `http://127.0.0.1:11434`).
-4. **Pull models with Ollama** outside the app, e.g. `ollama pull llama3.2`, then enter that **model tag** (e.g. `llama3.2`) in the Runtime **Model** field.
+4. **Pull models with Ollama** outside the app, e.g. `ollama pull llama3.2`, then enter that **model tag** (e.g. `llama3.2`) in the **Run** drawer **Model** field. You can also pull some models from the **Models** hub when the card maps to a known Ollama library name.
 5. Click **Start**. Status should show **Running** and the endpoint.
 
-Hub downloads in this app are **files on disk**; Ollama uses its **own** model store unless you integrate via custom workflows. For `.gguf` files downloaded through the app, prefer **llama.cpp** (below).
+Ollama keeps weights in **its own** store. **GGUF** files downloaded through the **Models** hub land under your **models directory**; to run those with `llama-server`, switch the top bar to **Files on my PC** (below).
 
-### 5.2 Option B — llama.cpp server
+### 5.2 Option B — Files on my PC (llama.cpp server)
 
-1. Install a build that includes `**llama-server`** (see [llama.cpp releases](https://github.com/ggerganov/llama.cpp/releases) and [server documentation](https://github.com/ggerganov/llama.cpp/blob/master/tools/server/README.md)).
+1. Install a build that includes **`llama-server`** (see [llama.cpp releases](https://github.com/ggerganov/llama.cpp/releases) and [server documentation](https://github.com/ggerganov/llama.cpp/blob/master/tools/server/README.md)).
 2. Either put `llama-server` on your **PATH**, or note the **full path** to the executable.
-3. In **Runtime**, select **llama.cpp server**. If the app says **llama-server not detected**, use the **Binary** field to paste the full path, then **Start**.
-4. For **Model**, use the **full path to a `.gguf` file**. You can download `.gguf` files from the **Hugging Face** panel; completed downloads are listed in Runtime for quick reference.
+3. Set the top bar to **Files on my PC**. Open **Your AI (Run)**; if **llama-server** is not detected, set the **Binary** path in **Settings**, then **Start**.
+4. For **Model**, use the **full path to a `.gguf` file**. Download **GGUF** (or Safetensors bundles) from **Models**; installs use a **per-repo subfolder** with Hub-relative paths so `config.json` sits next to weights when the Hub listing includes it. For **`.safetensors`** inference, configure **`convert_hf_to_gguf.py`** (and Python) in **Settings → AI engine** so the app can build a cached GGUF once.
 
 Default HTTP port for the spawned server is **8080** unless you change **llama port** in Settings.
 
 ### 5.3 Stopping the runtime
 
-Use **Stop** in the Runtime panel. For llama.cpp, the app manages the child process; for Ollama, the app stops **its use** of the API (Ollama itself may keep running as a system service).
+Use **Stop** in the **Run** drawer. For llama.cpp, the app manages the child process; for Ollama, the app stops **its use** of the API (Ollama itself may keep running as a system service).
 
 ---
 
 ## 6. Models directory
 
-- Downloaded files go under your **models directory**. Default location is inside app **user data** (shown in Settings as the default path).
-- You can **change** the models folder in **Settings** (pick another directory on disk). The app will create it if possible.
-- **Deleting all models** is a destructive action in Settings: it removes files under the **current** models directory after confirmation.
+- Hub installs go under your **models directory** inside a folder named from **repo + revision** (shortened), with **original relative paths** preserved inside it (e.g. `config.json` and weight files as on the Hub). Default models location is under app **user data** (shown in Settings).
+- You can **change** the models folder in **Settings**. The app will create it if possible.
+- **Deleting all models** is a destructive action in Settings: it removes files under the **current** models directory after a **system confirmation** dialog.
+- **Download resume** after an app restart uses the stored Hub file path on each download row; stale or pre-layout migrations may need you to clear the download row and download again.
 
 ---
 
@@ -173,6 +174,7 @@ Use **Stop** in the Runtime panel. For llama.cpp, the app manages the child proc
 - You can **ingest** text, files, or content from a conversation into the **knowledge base** (see Knowledge-related actions in the UI).
 - The app **chunks** text, indexes it for **search**, and can surface **wiki-style** topics and pages for browsing.
 - In **Knowledge wiki**, use the **Knowledge graph** tab for a visual map of **sources** (ingested topics), their **chunks**, and **wiki pages**, including how pages link to chunks and weak **related** links between sources with similar titles. Click a **source** or **chunk** to jump back to the **Read** tab for that topic. Large libraries are **sampled** in the graph so the view stays responsive; use **Refresh** after adding documents.
+- **Wiki-linked terms** can appear as **inline highlights** in assistant messages (hover for a snippet, click to open the wiki article) when those terms are configured for the session.
 - With the runtime running, **Settings → Chat generation → Auto-extract wiki notes after each reply** (on by default) runs a **second, short** local completion after every assistant message to distill **bullet notes** into the knowledge base. The model may answer **(skip)** when there is nothing worth saving. Extracted sources are tied to the **conversation** like “save chat to knowledge base” content, so they can be bulk-removed when you delete that chat (if you choose the option to remove linked knowledge). Disable the toggle to avoid the extra pass and token use.
 - How strongly retrieval affects a reply depends on how the app **composes** the user turn (including retrieved snippets) before sending it to the model; keep the runtime on while experimenting.
 
@@ -190,9 +192,17 @@ The shipped `**train_lora.py`** script is a **minimal stub**: it writes a small 
 
 ---
 
-## 9. Metrics and pinned activity
+## 9. Metrics, downloads, and pinned widgets
 
-Open **Metrics** for the full drawer with **charts in a grid**. You can **pin** a compact **activity** strip (throughput, context, CPU, **resident memory**, GPU when available) to any **dock edge** and **resize** its thickness or length; dock side and dimensions are saved in app settings. Adjust the **metrics refresh interval** in **Settings** if you want calmer updates or quicker feedback.
+Open **Metrics** for the full drawer: time-series charts (process **RSS**, **CPU**, optional **NVIDIA** GPU memory, runtime **tokens**, **context**, rolling **prompt→reply** latency, etc.) in a **responsive grid** (including a denser layout when the pinned surface is wide).
+
+You can **pin** separate widgets to any **dock edge**:
+
+- **Metrics** — compact stat grid and charts.
+- **Downloads** — active Hub transfer progress.
+- **Activity** — token send/receive bar chart for recent chat rounds.
+
+Resize strip thickness/length, set **refresh interval**, and tune **flex weights** when multiple widgets stack. Preferences are stored in app settings.
 
 ---
 
@@ -200,13 +210,15 @@ Open **Metrics** for the full drawer with **charts in a grid**. You can **pin** 
 
 Beyond the table below, **Settings** includes:
 
-- **Appearance** — accent / color scheme.
+- **Appearance** — accent preset (violet, teal, amber, rose, sky).
 - **Chat generation** — **max response tokens** for completions.
+- **AI engine** — `llama-server` path, **optional** `convert_hf_to_gguf.py` and Python executable for Safetensors→GGUF.
 - **IDE integration (localhost)** — optional **HTTP bridge** on **127.0.0.1** for editor plugins (port, optional bearer token); see [IntelliJ / IDE integration](./intellij-integration.md).
-- **Pinned widgets** — which metrics appear on the pinned strip, dock edge, refresh interval, and bar size.
+- **Pinned widgets** — enable **metrics**, **downloads**, and/or **activity** pins; dock edge; refresh interval; strip size; relative weights when stacked.
 
 Slide-over **panel widths and edges** for chat/knowledge are stored separately in the window (not in this reset table).
 
+**Destructive confirmations** (delete models, clear caches, factory reset, etc.) use the **operating system’s** message box so they layer above drawers and other UI.
 
 | Action                     | What it does                                                                                                                                                                                                                                                                                           |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -224,8 +236,9 @@ Slide-over **panel widths and edges** for chat/knowledge are stored separately i
 | Problem                                            | Things to try                                                                                                                                                                                                                       |
 | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Runtime won’t start (Ollama)**                   | Confirm Ollama is installed and listening (browser or `curl` to your base URL). Check **Settings → Ollama base URL**. Use a model tag you already pulled (`ollama list`).                                                           |
-| **Runtime won’t start (llama.cpp)**                | Verify `llama-server` path, `.gguf` path, and port **8080** (or your configured port) not in use by another program.                                                                                                                |
-| **HF search/download errors**                      | Add or refresh **HF token**; check model is public or your account has access; check disk space and models folder permissions.                                                                                                      |
+| **Runtime won’t start (Files on my PC / llama.cpp)** | Verify top bar is **Files on my PC**, `llama-server` path, `.gguf` path, and port **8080** (or your configured port) not in use by another program.                                                                                    |
+| **HF search/download errors**                      | Add or refresh **HF token**; check model is public or your account has access; check disk space and models folder permissions. For **404** on resolve, ensure the app refreshed model metadata (cached entries without a commit `sha` are refetched). For **Safetensors**, confirm `config.json` and tokenizer files were listed on the Hub and downloaded into the same per-repo folder.                                                                                                      |
+| **Safetensors won’t run**                          | `llama-server` needs **GGUF**. Set **convert_hf_to_gguf.py** and Python in Settings, or download a **GGUF** repo when available.                                                                                                                |
 | **Packaging failed on Windows**                    | Close File Explorer windows pointing at `release\`, exit any running copy of the app, then run `npm run dist:zip` or `npm run dist:installer` again. The script may write to `release-builds/<timestamp>/` if `release/` is locked. |
 | **SQLite / native module errors after `git pull`** | Run `npm install` again so `better-sqlite3` rebuilds for the current Electron version.                                                                                                                                              |
 
@@ -236,11 +249,13 @@ The app writes logs under your **user data** directory, in a `**logs`** subfolde
 
 ---
 
-## 12. Privacy and data location
+## 12. Privacy, data location, and license
 
 - **Chats, knowledge, wiki, metrics history, and download registry** live in a **local SQLite database** under user data.
-- **Models** live in your chosen **models directory**.
+- **Models** live in your chosen **models directory** (Hub installs use per-repo subfolders with preserved paths).
 - **Hugging Face token** is stored locally; **factory reset** removes it from app storage as described in the UI.
+
+**License:** The project is distributed under the **PolyForm Noncommercial License 1.0.0** with additional terms (copyright **Cyril Grossenbacher**, commercial licensing, modifications, and risk). See the **`LICENSE`** file in the repository and the website **License** page. Noncommercial use is covered by PolyForm; **commercial use requires a separate agreement**.
 
 ---
 
@@ -248,8 +263,8 @@ The app writes logs under your **user data** directory, in a `**logs`** subfolde
 
 1. Install the app (zip or `npm run dev`).
 2. (Optional) Add **Hugging Face token** in Settings.
-3. Install **Ollama** *or* `**llama-server`**, then configure **Runtime** and **Start**.
-4. Download a `**.gguf`** (llama.cpp) or `**ollama pull`** a model (Ollama) and point the app at the right path or tag.
+3. Install **Ollama** *or* **`llama-server`**, set the top bar to **Ollama** or **Files on my PC**, open **Your AI (Run)**, and **Start** with a model tag or `.gguf` path.
+4. From **Models**, **Download** a Hub model (GGUF preferred) or use **`ollama pull`** when on Ollama with a mapped card.
 5. Open **Chat** and send a message.
 
 For architecture and technical detail, see the [arc42 architecture index](./architecture-arc42/README.md).

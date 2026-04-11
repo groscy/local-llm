@@ -6,13 +6,12 @@ import { logLine } from '../logger'
 const CACHE_TTL_MS = 1000 * 60 * 30
 
 /**
- * When `listFiles` from @huggingface/hub returns nothing (Electron/network quirks), fall back to the
- * public `GET /api/models/{repo}` payload (includes `siblings[].rfilename`).
+ * Public `GET /api/models/{repo}` — siblings, sizes, and default commit `sha` (for `/resolve/` URLs).
  */
-async function fetchSiblingsViaHfModelsApi(
+async function fetchModelsApiPayload(
   repoId: string,
   token?: string
-): Promise<{ path: string; size?: number }[]> {
+): Promise<{ siblings: { path: string; size?: number }[]; sha?: string }> {
   const pathEnc = repoId
     .split('/')
     .map((s) => encodeURIComponent(s))
@@ -20,24 +19,27 @@ async function fetchSiblingsViaHfModelsApi(
   const url = `https://huggingface.co/api/models/${pathEnc}`
   const headers: Record<string, string> = {
     Accept: 'application/json',
-    'User-Agent': 'local-llm-desktop/0.1 (HF siblings fallback)'
+    'User-Agent': 'local-llm-desktop/0.1 (HF models API)'
   }
   if (token) headers.Authorization = `Bearer ${token}`
 
   const res = await fetch(url, { headers })
   if (!res.ok) {
-    logLine('warn', 'hf_models_api_siblings_http', { repoId, status: res.status })
-    return []
+    logLine('warn', 'hf_models_api_http', { repoId, status: res.status })
+    return { siblings: [] }
   }
   const j = (await res.json()) as {
     siblings?: { rfilename: string; size?: number }[]
     safetensors?: { total?: number }
+    sha?: string
   }
-  const out = (j.siblings ?? []).map((s) => ({
+  const rawSha = typeof j.sha === 'string' ? j.sha.trim() : ''
+  const sha = /^[0-9a-f]{7,40}$/i.test(rawSha) ? rawSha : undefined
+  const siblings = (j.siblings ?? []).map((s) => ({
     path: s.rfilename,
     size: typeof s.size === 'number' && s.size > 0 ? s.size : undefined
   }))
-  return out
+  return { siblings, sha }
 }
 
 /** Ollama registry tags for known Hub GGUF repos (library install when backend is Ollama). */
@@ -231,8 +233,12 @@ export async function hfModelDetail(
     | undefined
   if (cached && now - cached.fetched_at < CACHE_TTL_MS) {
     const parsed = JSON.parse(cached.payload) as HfModelDetail
-    const mapped = HF_REPO_OLLAMA_LIBRARY[repoId]
-    return { ...parsed, ...(mapped ? { ollamaLibraryName: mapped } : {}) }
+    const shaOk = typeof parsed.sha === 'string' && /^[0-9a-f]{7,40}$/i.test(parsed.sha.trim())
+    const sibOk = (parsed.siblings?.length ?? 0) > 0
+    if (shaOk && sibOk) {
+      const mapped = HF_REPO_OLLAMA_LIBRARY[repoId]
+      return { ...parsed, ...(mapped ? { ollamaLibraryName: mapped } : {}) }
+    }
   }
 
   const info = await modelInfo({
@@ -240,6 +246,9 @@ export async function hfModelDetail(
     additionalFields: ['tags', 'sha', 'cardData', 'author', 'safetensors'],
     credentials: token ? { accessToken: token } : undefined
   })
+
+  let shaFromInfo = 'sha' in info ? (info as { sha?: string }).sha?.trim() : undefined
+  if (shaFromInfo && !/^[0-9a-f]{7,40}$/i.test(shaFromInfo)) shaFromInfo = undefined
 
   const siblings: { path: string; size?: number }[] = []
   try {
@@ -258,15 +267,21 @@ export async function hfModelDetail(
     logLine('warn', 'hf_list_files_failed', { repoId, error: String(e) })
   }
 
-  if (siblings.length === 0) {
+  if (siblings.length === 0 || !shaFromInfo) {
     try {
-      const fromApi = await fetchSiblingsViaHfModelsApi(repoId, token)
-      for (const s of fromApi) siblings.push(s)
-      if (fromApi.length > 0) {
-        logLine('info', 'hf_siblings_from_models_api', { repoId, count: fromApi.length })
+      const api = await fetchModelsApiPayload(repoId, token)
+      if (siblings.length === 0) {
+        for (const s of api.siblings) siblings.push(s)
+        if (api.siblings.length > 0) {
+          logLine('info', 'hf_siblings_from_models_api', { repoId, count: api.siblings.length })
+        }
+      }
+      if (!shaFromInfo && api.sha) {
+        shaFromInfo = api.sha
+        logLine('info', 'hf_sha_from_models_api', { repoId })
       }
     } catch (e) {
-      logLine('warn', 'hf_models_api_siblings_failed', { repoId, error: String(e) })
+      logLine('warn', 'hf_models_api_payload_failed', { repoId, error: String(e) })
     }
   }
 
@@ -293,7 +308,7 @@ export async function hfModelDetail(
     siblings,
     totalSizeBytes,
     license: card?.license,
-    sha: 'sha' in info ? (info as { sha?: string }).sha : undefined,
+    sha: shaFromInfo,
     ...(ollamaLibraryName ? { ollamaLibraryName } : {})
   }
 

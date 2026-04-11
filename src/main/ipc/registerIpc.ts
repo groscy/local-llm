@@ -44,7 +44,7 @@ import { resetElectronStoreToFactory } from '../storeDefaults'
 import { configureIntegrationServer } from '../services/integrationServer'
 import { getPluginReportHistory } from '../services/pluginIntegrationHub'
 import { listGgufModelsInDir } from '../services/localModelsScan'
-import { hfDownloadDestFileName } from '../services/hfDownloadNaming'
+import { hfDownloadAbsolutePath } from '../services/hfDownloadNaming'
 import {
   ensureGgufForSafetensorsModelPath,
   isSafetensorsWeightFilePath
@@ -244,8 +244,7 @@ export function registerIpc(ctx: IpcContext): void {
     const destBase = payload.destDir ?? modelsDir()
     if (!existsSync(destBase)) mkdirSync(destBase, { recursive: true })
     const revision = payload.revision || 'main'
-    const localName = hfDownloadDestFileName(payload.repoId, revision, payload.filename)
-    const destPath = join(destBase, localName)
+    const destPath = hfDownloadAbsolutePath(destBase, payload.repoId, revision, payload.filename)
     const hfFilename = payload.filename.replace(/\\/g, '/')
     const job = {
       id: randomUUID(),
