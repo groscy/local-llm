@@ -101,6 +101,16 @@ export interface ConversationRow {
   updatedAt: number
 }
 
+/** Topic cluster inferred from user chat prompts (keyword overlap; merged / split heuristically). */
+export interface PromptDomainRow {
+  id: string
+  title: string
+  keywords: string[]
+  createdAt: number
+  updatedAt: number
+  messageCount: number
+}
+
 export interface MessageRow {
   id: string
   conversationId: string

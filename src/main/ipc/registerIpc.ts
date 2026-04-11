@@ -27,6 +27,7 @@ import {
   probeOllamaReachable
 } from '../services/runtime/ollamaAdapter'
 import * as chatService from '../services/chatService'
+import { assignUserMessageToPromptDomains, listPromptDomains } from '../services/promptDomainService'
 import { recordChatRoundtripMs } from '../services/chatLatencyStats'
 import * as kbService from '../services/kbService'
 import {
@@ -645,8 +646,22 @@ export function registerIpc(ctx: IpcContext): void {
         promptIsEstimate?: boolean
         completionIsEstimate?: boolean
       }
-    ) => chatService.appendMessage(db, cid, role, content, modelId, usage)
+    ) => {
+      const row = chatService.appendMessage(db, cid, role, content, modelId, usage)
+      if (role === 'user') {
+        try {
+          assignUserMessageToPromptDomains(db, row.id, content)
+        } catch (e) {
+          logLine('warn', 'prompt_domains_assign_failed', {
+            message: e instanceof Error ? e.message : String(e)
+          })
+        }
+      }
+      return row
+    }
   )
+
+  ipcMain.handle(IPC.PROMPT_DOMAINS_LIST, () => listPromptDomains(db))
 
   ipcMain.handle(
     IPC.CONVERSATION_DELETE,

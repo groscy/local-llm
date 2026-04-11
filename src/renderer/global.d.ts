@@ -11,7 +11,8 @@ import type {
   WikiChatHighlightTerm,
   WikiExportZipResult,
   WikiPagePayload,
-  WikiTopic
+  WikiTopic,
+  PromptDomainRow
 } from '@shared/types'
 
 export {}
@@ -124,6 +125,7 @@ type Api = {
       completionIsEstimate?: boolean
     }
   ) => Promise<unknown>
+  promptDomainsList: () => Promise<PromptDomainRow[]>
   kbIngestText: (title: string, uri: string, body: string) => Promise<unknown>
   kbIngestConversation: (conversationId: string) => Promise<unknown>
   kbIngestFile: () => Promise<unknown>

@@ -114,6 +114,7 @@ contextBridge.exposeInMainWorld('api', {
       completionIsEstimate?: boolean
     }
   ) => invoke(IPC.MESSAGE_APPEND, cid, role, content, modelId, usage),
+  promptDomainsList: () => invoke(IPC.PROMPT_DOMAINS_LIST),
   kbIngestText: (title: string, uri: string, body: string) => invoke(IPC.KB_INGEST_TEXT, title, uri, body),
   kbIngestConversation: (conversationId: string) => invoke(IPC.KB_INGEST_CONVERSATION, conversationId),
   kbIngestFile: () => invoke(IPC.KB_INGEST_FILE),

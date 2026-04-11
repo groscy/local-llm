@@ -26,7 +26,8 @@ import type {
   WikiGlossaryEntry,
   WikiRelatedSource,
   WikiSourceKind,
-  WikiTopic
+  WikiTopic,
+  PromptDomainRow
 } from '@shared/types'
 import { hfResolveRevision, pickPrimaryHubWeightFile } from '@shared/hfGgufPick'
 import { hubWeightDownloadPathSet } from '@shared/hfDownloadBundle'
@@ -1134,6 +1135,7 @@ export default function App(): React.ReactElement {
   const composerMirrorInnerRef = useRef<HTMLDivElement | null>(null)
 
   const [wikiTopics, setWikiTopics] = useState<WikiTopic[]>([])
+  const [promptDomains, setPromptDomains] = useState<PromptDomainRow[]>([])
   const [wikiHighlightTerms, setWikiHighlightTerms] = useState<WikiChatHighlightTerm[]>([])
   const [wikiBody, setWikiBody] = useState('')
   const [wikiTitle, setWikiTitle] = useState('')
@@ -1617,6 +1619,11 @@ export default function App(): React.ReactElement {
       setWikiHighlightTerms(await window.api.kbWikiHighlightTerms())
     } catch {
       setWikiHighlightTerms([])
+    }
+    try {
+      setPromptDomains(await window.api.promptDomainsList())
+    } catch {
+      setPromptDomains([])
     }
   }, [])
 
@@ -3583,6 +3590,7 @@ export default function App(): React.ReactElement {
     setDraft('')
     const userSentAt = Date.now()
     await window.api.messageAppend(convId, 'user', userText)
+    void window.api.promptDomainsList().then(setPromptDomains).catch(() => {})
     setMessages((prev) => [...prev, { role: 'user', content: userText, createdAt: userSentAt }])
     let context = userText
     if (ragSnippets.length) {
@@ -5239,6 +5247,31 @@ export default function App(): React.ReactElement {
                       {wikiExportBusy ? 'Exporting…' : 'Export wiki (ZIP)'}
                     </button>
                   </div>
+                </div>
+                <div className="wiki-prompt-domains">
+                  <h4 className="wiki-prompt-domains-title">Chat prompt domains</h4>
+                  <p className="wiki-prompt-domains-hint muted">
+                    Topic clusters inferred from your user prompts (keyword overlap). Send a chat message to update this
+                    list.
+                  </p>
+                  {promptDomains.length === 0 ? (
+                    <p className="wiki-prompt-domains-empty muted">No domains yet.</p>
+                  ) : (
+                    <ul className="wiki-prompt-domains-list">
+                      {promptDomains.map((d) => (
+                        <li key={d.id}>
+                          <span className="wiki-prompt-domains-name">{d.title}</span>
+                          <span className="muted"> · {d.messageCount} prompts</span>
+                          {d.keywords.length > 0 ? (
+                            <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                              {d.keywords.slice(0, 8).join(', ')}
+                              {d.keywords.length > 8 ? '…' : ''}
+                            </div>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
                 <div className="wiki-topic-list">
                   {wikiTopics.length === 0 && (

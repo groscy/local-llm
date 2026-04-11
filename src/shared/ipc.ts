@@ -60,6 +60,8 @@ export const IPC = {
   CONVERSATION_RENAME: 'chat:conversationRename',
   MESSAGE_APPEND: 'chat:messageAppend',
   CONVERSATION_DELETE: 'chat:conversationDelete',
+  /** Keyword-based domains learned from user prompts (see `promptDomainService`). */
+  PROMPT_DOMAINS_LIST: 'chat:promptDomainsList',
 
   // Knowledge / RAG
   KB_INGEST_TEXT: 'kb:ingestText',

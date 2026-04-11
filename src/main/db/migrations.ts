@@ -146,6 +146,29 @@ const MIGRATIONS: { version: number; sql: string }[] = [
     sql: `
       ALTER TABLE downloads ADD COLUMN hf_filename TEXT;
     `
+  },
+  {
+    version: 8,
+    sql: `
+      CREATE TABLE IF NOT EXISTS prompt_domains (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        keywords_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_prompt_domains_updated ON prompt_domains(updated_at);
+
+      CREATE TABLE IF NOT EXISTS message_prompt_domains (
+        message_id TEXT NOT NULL,
+        domain_id TEXT NOT NULL,
+        weight REAL NOT NULL DEFAULT 1.0,
+        PRIMARY KEY (message_id, domain_id),
+        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+        FOREIGN KEY (domain_id) REFERENCES prompt_domains(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_prompt_domains_domain ON message_prompt_domains(domain_id);
+    `
   }
 ]
 
