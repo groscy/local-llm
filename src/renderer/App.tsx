@@ -29,6 +29,7 @@ import type {
 } from '@shared/types'
 import { hfResolveRevision, pickPrimaryHubWeightFile } from '@shared/hfGgufPick'
 import { hubWeightDownloadPathSet } from '@shared/hfDownloadBundle'
+import { DEFAULT_OLLAMA_MODEL_TAG } from '@shared/defaultRuntimeModel'
 import { evaluateModelForHardware } from '@shared/modelHardwareFit'
 import type { ColorSchemeId } from '@shared/colorScheme'
 import { COLOR_SCHEME_IDS, COLOR_SCHEME_LABELS, DEFAULT_COLOR_SCHEME, parseColorScheme } from '@shared/colorScheme'
@@ -920,7 +921,7 @@ export default function App(): React.ReactElement {
   const [welcomeModalOpen, setWelcomeModalOpen] = useState(false)
 
   const [runtimeKind, setRuntimeKind] = useState<'llamacpp' | 'ollama'>('ollama')
-  const [modelPath, setModelPath] = useState('llama3.2')
+  const [modelPath, setModelPath] = useState(DEFAULT_OLLAMA_MODEL_TAG)
   const [llamaBin, setLlamaBin] = useState('')
   const [llamaConvertScriptPath, setLlamaConvertScriptPath] = useState('')
   const [llamaPythonPath, setLlamaPythonPath] = useState('')
@@ -970,7 +971,7 @@ export default function App(): React.ReactElement {
     winPlatform
   ])
 
-  /** Include the loaded Ollama tag when it isn’t returned by list yet. */
+  /** Include the loaded Ollama tag when it isn’t returned by list yet, and the draft tag (e.g. default fallback). */
   const topBarOllamaModelOptions = useMemo(() => {
     const base = ollamaChatTags
     const loaded =
@@ -980,10 +981,20 @@ export default function App(): React.ReactElement {
       runtimeStatus.modelPath?.trim()
         ? runtimeStatus.modelPath.trim()
         : ''
-    if (!loaded) return base
-    if (base.includes(loaded)) return base
-    return [loaded, ...base]
-  }, [ollamaChatTags, runtimeStatus?.running, runtimeStatus?.kind, runtimeStatus?.modelPath, runtimeKind])
+    const draft =
+      !runtimeStatus?.running && runtimeKind === 'ollama' && modelPath.trim() ? modelPath.trim() : ''
+    let out = base
+    if (loaded && !out.includes(loaded)) out = [loaded, ...out]
+    if (draft && !out.includes(draft)) out = [draft, ...out]
+    return out
+  }, [
+    modelPath,
+    ollamaChatTags,
+    runtimeKind,
+    runtimeStatus?.kind,
+    runtimeStatus?.modelPath,
+    runtimeStatus?.running
+  ])
 
   const runtimeOn = Boolean(runtimeStatus?.running)
 
@@ -1003,17 +1014,17 @@ export default function App(): React.ReactElement {
       if (runtimeOn && runtimeStatus?.modelPath?.trim()) {
         return runtimeStatus.modelPath.trim()
       }
-      return cur && ollamaChatTags.includes(cur) ? cur : ''
+      return cur && topBarOllamaModelOptions.includes(cur) ? cur : ''
     }
     return ''
   }, [
     runtimeKind,
     matchedLocalModelPath,
     modelPath,
-    ollamaChatTags,
     runtimeOn,
     runtimeStatus?.modelPath,
     topBarLlamaModelPathOptions,
+    topBarOllamaModelOptions,
     winPlatform
   ])
 
@@ -1063,7 +1074,7 @@ export default function App(): React.ReactElement {
     const loaded = runtimeStatus?.running ? runtimeStatus.modelPath?.trim() ?? '' : ''
 
     if (tags.length === 0) {
-      if (!runtimeStatus?.running && cur) setModelPath('')
+      if (!runtimeStatus?.running && !cur) setModelPath(DEFAULT_OLLAMA_MODEL_TAG)
       return
     }
 
@@ -4289,8 +4300,8 @@ export default function App(): React.ReactElement {
                 disabled={runtimeStarting || runtimeOn}
                 onChange={(e) => setRuntimeKind(e.target.value as 'llamacpp' | 'ollama')}
               >
-                <option value="ollama">Ollama (easiest)</option>
-                <option value="llamacpp">Files on my PC (advanced)</option>
+                <option value="ollama">Ollama</option>
+                <option value="llamacpp">Files on my PC</option>
               </select>
               <select
                 id="top-bar-runtime-model-select"
@@ -4459,7 +4470,7 @@ export default function App(): React.ReactElement {
               </p>
               <ol className="welcome-modal-steps">
                 <li>
-                  <strong>Keep “Ollama (easiest)”</strong> in the top bar unless you already use downloaded model files.
+                  <strong>Keep Ollama</strong> in the top bar unless you already use downloaded model files.
                 </li>
                 <li>
                   <strong>Open Run</strong> in the sidebar. If Ollama is missing, install it from there (or ollama.com).
@@ -5686,7 +5697,7 @@ export default function App(): React.ReactElement {
                   <div className="drawer-section runtime-load-card">
                     <h3 className="runtime-load-card-title">Get your AI running</h3>
                     <p className="muted runtime-load-card-lead">
-                      <strong>Easiest:</strong> leave the top bar on <strong>Ollama (easiest)</strong>, install Ollama if needed
+                      <strong>Easiest:</strong> leave the top bar on <strong>Ollama</strong>, install Ollama if needed
                       below, pick a model, then press <strong>play</strong> in the top bar. <strong>Advanced:</strong> switch
                       to files on your PC if you use downloaded{' '}
                       <code className="inline-code">.gguf</code> or a full Hugging Face folder with{' '}

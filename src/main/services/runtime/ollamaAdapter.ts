@@ -9,6 +9,7 @@ import {
   httpRequestRaw
 } from '../httpLocal'
 import type { ChatMessage, RuntimeAdapter, RuntimeLoadProgress } from './types'
+import { DEFAULT_OLLAMA_MODEL_TAG } from '@shared/defaultRuntimeModel'
 import type { RuntimeStatus } from '@shared/types'
 
 const PULL_TIMEOUT_MS = 3_600_000
@@ -81,7 +82,8 @@ export async function ensureOllamaModelInLibrary(
   report?: (e: RuntimeLoadProgress) => void
 ): Promise<void> {
   const trimmed = modelName.trim()
-  if (!trimmed) throw new Error('Ollama model name is required (for example: llama3.2).')
+  if (!trimmed)
+    throw new Error(`Ollama model name is required (for example: ${DEFAULT_OLLAMA_MODEL_TAG}).`)
 
   const first = await fetchOllamaModelTags(baseUrl)
   if (first.error) throw new Error(first.error)
@@ -203,7 +205,8 @@ export class OllamaAdapter implements RuntimeAdapter {
     onLoadProgress?: (e: RuntimeLoadProgress) => void
   }): Promise<void> {
     const trimmed = opts.modelPath.trim()
-    if (!trimmed) throw new Error('Ollama model name is required (for example: llama3.2)')
+    if (!trimmed)
+      throw new Error(`Ollama model name is required (for example: ${DEFAULT_OLLAMA_MODEL_TAG})`)
     const asPath = path.resolve(trimmed.replace(/^file:\/\//i, ''))
     const report = opts.onLoadProgress
     try {
