@@ -2710,7 +2710,9 @@ html {
 
 .wiki-graph-section {
   flex: 1 1 40%;
-  min-height: min(300px, 38vh);
+  min-width: 0;
+  /* min-height:0 so this flex child can shrink and .wiki-graph-panel-wrap can scroll */
+  min-height: 0;
   display: flex;
   flex-direction: column;
   padding: 18px 28px 28px;
@@ -2729,9 +2731,12 @@ html {
 
 .wiki-graph-panel-wrap {
   flex: 1;
-  min-height: 200px;
+  min-height: 0;
   min-width: 0;
-  overflow: auto;
+  /* Clip to flex height so .kg-svg-wrap can scroll the graph internally */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 @media (max-width: 900px) {
@@ -2829,7 +2834,7 @@ html {
 
   .wiki-graph-section {
     flex: 1 1 auto;
-    min-height: 260px;
+    min-height: 0;
     max-height: 50vh;
     padding-left: 16px;
     padding-right: 16px;
@@ -3542,7 +3547,12 @@ html {
 
 /* —— Knowledge graph —— */
 .kg-panel {
-  min-height: 240px;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .kg-toolbar {
@@ -3552,6 +3562,7 @@ html {
   gap: 12px;
   margin-bottom: 16px;
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 .kg-toolbar--embedded {
@@ -3586,19 +3597,24 @@ html {
   padding: 24px 0;
   max-width: 520px;
   line-height: 1.6;
+  flex-shrink: 0;
 }
 
 .kg-svg-wrap {
   width: 100%;
-  overflow-x: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: color-mix(in srgb, var(--surface) 92%, var(--wiki-accent));
+  -webkit-overflow-scrolling: touch;
 }
 
 .kg-graph-svg {
   display: block;
   min-width: 280px;
+  max-width: none;
 }
 
 .kg-graph-svg .kg-edge {
@@ -3666,7 +3682,7 @@ html {
 }
 
 .kg-graph-svg .kg-label--sm {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 500;
 }
 
@@ -3679,6 +3695,7 @@ html {
   gap: 12px 18px;
   font-size: 11px;
   color: var(--text-secondary);
+  flex-shrink: 0;
 }
 
 .kg-legend li {

@@ -6,9 +6,22 @@ type Box = { x: number; y: number; w: number; h: number }
 
 function layoutGraph(
   data: KnowledgeGraphPayload,
-  width: number
-): { positions: Map<string, Pos>; boxes: Map<string, Box>; height: number } {
-  const pad = 28
+  containerWidth: number
+): { positions: Map<string, Pos>; boxes: Map<string, Box>; width: number; height: number } {
+  const pad = 32
+  const wikiBoxW = 124
+  const wikiBoxH = 38
+  const wikiGapX = 20
+  const wikiRowGap = 28
+  const sourceR = 24
+  const sourceBoxW = 132
+  const sourceBoxH = sourceR * 2
+  const chunkW = 96
+  const chunkH = 26
+  const chunkGap = 12
+  const minSourceTrack = 148
+  const colGap = 16
+
   const sources = data.nodes.filter((n) => n.kind === 'source')
   const wikis = data.nodes.filter((n) => n.kind === 'wiki')
   const chunksBySource = new Map<string, KnowledgeGraphNode[]>()
@@ -23,53 +36,73 @@ function layoutGraph(
   const positions = new Map<string, Pos>()
   const boxes = new Map<string, Box>()
 
+  const innerFromContainer = Math.max(containerWidth - pad * 2, 200)
+  const nCol = Math.max(sources.length, 1)
+  const minInnerForSources = nCol * minSourceTrack + (nCol - 1) * colGap
+  const innerW = Math.max(innerFromContainer, minInnerForSources)
+  const layoutWidth = innerW + pad * 2
+
   let yTop = pad
-  const wikiRowH = 48
-  const sourceR = 22
-  const chunkH = 22
-  const chunkGap = 5
 
   if (wikis.length > 0) {
-    const inner = Math.max(width - pad * 2, 120)
-    const step = inner / (wikis.length + 1)
-    for (let i = 0; i < wikis.length; i++) {
-      const w = wikis[i]
-      const x = pad + step * (i + 1)
-      const y = yTop + wikiRowH / 2
-      positions.set(w.id, { x, y })
-      boxes.set(w.id, { x: x - 56, y: y - 17, w: 112, h: 34 })
+    const wikiSlot = wikiBoxW + wikiGapX
+    const wikisPerRow = Math.max(1, Math.floor((innerW + wikiGapX) / wikiSlot))
+    for (let rowStart = 0; rowStart < wikis.length; rowStart += wikisPerRow) {
+      const row = wikis.slice(rowStart, rowStart + wikisPerRow)
+      const n = row.length
+      const rowContentW = n * wikiBoxW + (n - 1) * wikiGapX
+      const x0 = pad + Math.max(0, (innerW - rowContentW) / 2)
+      for (let i = 0; i < n; i++) {
+        const w = row[i]!
+        const cx = x0 + wikiBoxW / 2 + i * (wikiBoxW + wikiGapX)
+        const cy = yTop + wikiBoxH / 2
+        positions.set(w.id, { x: cx, y: cy })
+        boxes.set(w.id, {
+          x: cx - wikiBoxW / 2,
+          y: cy - wikiBoxH / 2,
+          w: wikiBoxW,
+          h: wikiBoxH
+        })
+      }
+      yTop += wikiBoxH + wikiRowGap
     }
-    yTop += wikiRowH + 28
+    yTop += 8
   } else {
-    yTop += 4
+    yTop += 6
   }
 
-  const nCol = Math.max(sources.length, 1)
-  const colGap = 12
-  const innerW = Math.max(width - pad * 2, 200)
   const colW = (innerW - colGap * (nCol - 1)) / nCol
-  const ySource = yTop + sourceR + 6
+  const ySource = yTop + sourceR + 8
 
-  let deepest = ySource
+  let deepest = ySource + sourceR
 
   sources.forEach((s, i) => {
     const x = pad + colW * i + colGap * i + colW / 2
     positions.set(s.id, { x, y: ySource })
-    boxes.set(s.id, { x: x - 62, y: ySource - sourceR, w: 124, h: sourceR * 2 })
+    boxes.set(s.id, {
+      x: x - sourceBoxW / 2,
+      y: ySource - sourceR,
+      w: sourceBoxW,
+      h: sourceBoxH
+    })
 
     const chunks = chunksBySource.get(s.id) ?? []
-    let y = ySource + sourceR + 18
+    let y = ySource + sourceR + 22
     for (const ch of chunks) {
-      y += chunkH / 2
       positions.set(ch.id, { x, y })
-      boxes.set(ch.id, { x: x - 42, y: y - chunkH / 2, w: 84, h: chunkH })
-      y += chunkH / 2 + chunkGap
+      boxes.set(ch.id, {
+        x: x - chunkW / 2,
+        y: y - chunkH / 2,
+        w: chunkW,
+        h: chunkH
+      })
+      deepest = Math.max(deepest, y + chunkH / 2)
+      y += chunkH + chunkGap
     }
-    deepest = Math.max(deepest, y)
   })
 
-  const height = Math.max(280, deepest + 72)
-  return { positions, boxes, height }
+  const height = Math.max(320, deepest + pad + 56)
+  return { positions, boxes, width: layoutWidth, height }
 }
 
 function edgePath(
@@ -190,7 +223,7 @@ export function KnowledgeGraphView(props: {
 
   if (!layout) return null
 
-  const { positions, boxes, height } = layout
+  const { positions, boxes, width: layoutWidth, height } = layout
 
   return (
     <div className="kg-panel">
@@ -207,9 +240,9 @@ export function KnowledgeGraphView(props: {
       <div ref={wrapRef} className="kg-svg-wrap">
         <svg
           className="kg-graph-svg"
-          width={w}
+          width={layoutWidth}
           height={height}
-          viewBox={`0 0 ${w} ${height}`}
+          viewBox={`0 0 ${layoutWidth} ${height}`}
           role="img"
           aria-label="Knowledge base structure: sources, indexed chunks, and wiki pages"
         >
@@ -238,7 +271,7 @@ export function KnowledgeGraphView(props: {
               const b = boxes.get(n.id)
               if (!p || !b) return null
               const hi = hoverId === n.id
-              const label = truncate(n.label, n.kind === 'chunk' ? 14 : 22)
+              const label = truncate(n.label, n.kind === 'chunk' ? 18 : 24)
               if (n.kind === 'wiki') {
                 return (
                   <g
