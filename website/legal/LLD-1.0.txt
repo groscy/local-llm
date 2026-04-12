@@ -2,6 +2,35 @@ Local LLM Desktop
 
 Required Notice: Copyright (c) Cyril Grossenbacher. All rights reserved.
 
+Reservation of rights; prohibition on unlicensed use
+
+The Software (this application, its source and object code, documentation,
+assets, build tooling, and any accompanying materials) is protected by
+copyright and may be protected by other intellectual property laws. Cyril
+Grossenbacher ("Licensor") reserves all rights in and to the Software that are
+not expressly granted in this file.
+
+No license is granted to you except as expressly set forth in (i) the PolyForm
+Noncommercial License 1.0.0 reproduced below, or (ii) a separate written
+agreement executed by Licensor. Without such an express grant, you are not
+permitted to, and you must not, in whole or in part: copy, reproduce,
+distribute, publish, display, perform, transmit, modify, adapt, translate,
+prepare derivative works from, reverse engineer, decompile, or disassemble the
+Software (except and only to the extent mandatory applicable law permits,
+notwithstanding this sentence), merge it with other software, incorporate it
+into a product or service, sublicense, rent, lease, loan, sell, offer for sale,
+or otherwise exploit the Software. Any such act without a valid license
+infringes Licensor's intellectual property rights and may subject you to civil
+and, where provided by law, criminal sanctions.
+
+Misappropriation of the Software is strictly prohibited. Without limiting the
+foregoing, misappropriation includes use beyond the scope of a license actually
+granted to you; removal or alteration of copyright or proprietary notices
+without authorization; and misrepresentation of ownership or authorship.
+
+Nothing in this section limits rights that mandatory applicable law confers on
+you and that cannot validly be waived by contract.
+
 Additional terms (read together with the PolyForm Noncommercial License 1.0.0 below):
 
 1) Ownership. The software and accompanying documentation are owned by Cyril
