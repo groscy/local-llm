@@ -1,6 +1,20 @@
 import { ipcMain, dialog, safeStorage, BrowserWindow, shell, type MessageBoxOptions } from 'electron'
 import { randomUUID } from 'crypto'
 import { basename, join, resolve } from 'path'
+
+function llamaPathsDiffer(a: string, b: string): boolean {
+  try {
+    const na = resolve(a.replace(/^file:\/\//i, ''))
+      .replace(/\\/g, '/')
+      .toLowerCase()
+    const nb = resolve(b.replace(/^file:\/\//i, ''))
+      .replace(/\\/g, '/')
+      .toLowerCase()
+    return na !== nb
+  } catch {
+    return a.trim() !== b.trim()
+  }
+}
 import { existsSync, mkdirSync, statSync, unlinkSync } from 'fs'
 import type Store from 'electron-store'
 import { z } from 'zod'
@@ -507,11 +521,17 @@ export function registerIpc(ctx: IpcContext): void {
       let modelPathForLoad = opts.modelPath.trim()
       let displayModelPath: string | undefined
       if (opts.kind === 'llamacpp' && isSafetensorsWeightFilePath(modelPathForLoad)) {
-        const binForSearch = (binaryPath ?? (configuredBin || '').trim()) || undefined
+        const configuredTrim = (typeof configuredBin === 'string' ? configuredBin : '').trim()
+        const primaryBin = (binaryPath ?? configuredTrim) || undefined
+        const alternateBins: string[] = []
+        if (configuredTrim && primaryBin && llamaPathsDiffer(configuredTrim, primaryBin)) {
+          alternateBins.push(configuredTrim)
+        }
         const r = await ensureGgufForSafetensorsModelPath({
           weightPath: modelPathForLoad,
           userData,
-          llamaBinaryPath: binForSearch,
+          llamaBinaryPath: primaryBin,
+          llamaBinaryAlternatePaths: alternateBins.length ? alternateBins : undefined,
           convertScriptConfigured: store.get('llamaConvertScriptPath') as string | undefined,
           pythonConfigured: store.get('llamaPythonPath') as string | undefined,
           onProgress: sendLoad

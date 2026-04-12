@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { spawn } from 'child_process'
 import { logLine } from '../logger'
@@ -37,11 +37,36 @@ export function resolveHfModelRootDirForSafetensorsWeight(
   return null
 }
 
+/** Known locations inside a llama.cpp checkout (repo root may add more over time). */
+function convertScriptCandidatesInDir(dir: string): string[] {
+  return [join(dir, 'convert_hf_to_gguf.py'), join(dir, 'tools', 'convert_hf_to_gguf.py')]
+}
+
+function firstExistingScriptInDir(dir: string): string | null {
+  for (const c of convertScriptCandidatesInDir(dir)) {
+    if (existsSync(c)) return c
+  }
+  return null
+}
+
+/**
+ * Directory containing the real llama-server binary. Resolves symlinks so walking upward
+ * reaches the llama.cpp tree when the binary is linked from e.g. /usr/local/bin.
+ */
+function llamaBinaryParentDirResolved(llamaBinaryPath: string): string {
+  const raw = resolve(llamaBinaryPath.replace(/^file:\/\//i, ''))
+  try {
+    return dirname(realpathSync(raw))
+  } catch {
+    return dirname(raw)
+  }
+}
+
 function walkUpForConvertScript(startDir: string, maxHops: number): string | null {
   let dir = resolve(startDir)
   for (let i = 0; i < maxHops; i++) {
-    const c = join(dir, 'convert_hf_to_gguf.py')
-    if (existsSync(c)) return c
+    const hit = firstExistingScriptInDir(dir)
+    if (hit) return hit
     const p = dirname(dir)
     if (p === dir) break
     dir = p
@@ -49,26 +74,80 @@ function walkUpForConvertScript(startDir: string, maxHops: number): string | nul
   return null
 }
 
+function uniqueLlamaBinaryHints(paths: (string | undefined)[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const p of paths) {
+    const t = p?.trim().replace(/^file:\/\//i, '')
+    if (!t) continue
+    let key: string
+    try {
+      key = resolve(t).replace(/\\/g, '/').toLowerCase()
+    } catch {
+      continue
+    }
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(t)
+  }
+  return out
+}
+
+function findConvertScriptByWalkingLlamaBins(hints: string[]): string | null {
+  for (const raw of hints) {
+    let abs: string
+    try {
+      abs = resolve(raw)
+    } catch {
+      continue
+    }
+    if (!existsSync(abs)) continue
+    const hit = walkUpForConvertScript(llamaBinaryParentDirResolved(abs), 28)
+    if (hit) return hit
+  }
+  return null
+}
+
 export function resolveConvertScriptPath(opts: {
   llamaBinaryPath?: string
+  /** When the active binary came from PATH, still try walking from these paths (e.g. Settings value). */
+  llamaBinaryAlternatePaths?: string[]
   configuredScriptPath?: string
 }): string {
   const cfg = opts.configuredScriptPath?.trim()
   if (cfg) {
     const r = resolve(cfg.replace(/^file:\/\//i, ''))
     if (existsSync(r)) return r
+    try {
+      const rp = realpathSync(r)
+      if (existsSync(rp)) return rp
+    } catch {
+      /* unresolved */
+    }
     throw new Error(`llama.cpp convert script not found at the path in Settings: ${cfg}`)
   }
-  const bin = opts.llamaBinaryPath?.trim().replace(/^file:\/\//i, '')
-  if (!bin) {
+
+  const envRoot = (process.env.LLAMA_CPP_ROOT || process.env.LLAMA_CPP_HOME || '')
+    .trim()
+    .replace(/^file:\/\//i, '')
+  if (envRoot) {
+    const hit = firstExistingScriptInDir(resolve(envRoot))
+    if (hit) return hit
+  }
+
+  const hints = uniqueLlamaBinaryHints([
+    opts.llamaBinaryPath,
+    ...(opts.llamaBinaryAlternatePaths ?? [])
+  ])
+  if (hints.length === 0) {
     throw new Error(
-      'To run .safetensors locally, clone https://github.com/ggml-org/llama.cpp , install Python dependencies (pip install -r requirements.txt), and set the path to convert_hf_to_gguf.py in Settings → AI engine. Saving your llama-server binary path also lets the app search parent folders for that script.'
+      'To run .safetensors locally, install a llama.cpp checkout with convert_hf_to_gguf.py, set the path to that script (or set LLAMA_CPP_ROOT to the repo root) under Settings → AI engine, and point llama-server at your build (or leave it on PATH if that binary lives inside the clone). Python deps: pip install -r requirements.txt in the llama.cpp folder.'
     )
   }
-  const found = walkUpForConvertScript(dirname(resolve(bin)), 14)
+  const found = findConvertScriptByWalkingLlamaBins(hints)
   if (!found) {
     throw new Error(
-      'Could not find convert_hf_to_gguf.py near llama-server. Point Settings → AI engine at the script inside your llama.cpp checkout (same tree you built the server from).'
+      'Could not find convert_hf_to_gguf.py near llama-server. Fix: (1) Settings → AI engine → set the full path to convert_hf_to_gguf.py inside your llama.cpp clone, or (2) set environment variable LLAMA_CPP_ROOT to that clone’s root, or (3) point llama-server at the executable inside your checkout (build folder), not only a standalone copy on PATH. The app follows symlinks to the real binary. If you use a prebuilt llama-server with no source tree, you must set the convert script path or LLAMA_CPP_ROOT explicitly.'
     )
   }
   return found
@@ -133,6 +212,7 @@ export async function ensureGgufForSafetensorsModelPath(opts: {
   weightPath: string
   userData: string
   llamaBinaryPath?: string
+  llamaBinaryAlternatePaths?: string[]
   convertScriptConfigured?: string
   pythonConfigured?: string
   onProgress?: (e: { phase: string; message: string; percent?: number }) => void
@@ -151,6 +231,7 @@ export async function ensureGgufForSafetensorsModelPath(opts: {
   }
   const script = resolveConvertScriptPath({
     llamaBinaryPath: opts.llamaBinaryPath,
+    llamaBinaryAlternatePaths: opts.llamaBinaryAlternatePaths,
     configuredScriptPath: opts.convertScriptConfigured
   })
   const python = resolvePythonExe(opts.pythonConfigured)
