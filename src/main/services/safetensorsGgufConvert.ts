@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { spawn } from 'child_process'
+import { is } from '@electron-toolkit/utils'
 import { logLine } from '../logger'
 
 const ST_EXT = /\.safetensors?$/i
@@ -108,6 +109,30 @@ function findConvertScriptByWalkingLlamaBins(hints: string[]): string | null {
   return null
 }
 
+/** Root folder containing convert_hf_to_gguf.py and gguf-py/ (vendored from llama.cpp). */
+function bundledLlamaConvertRoot(): string {
+  return is.dev
+    ? join(process.cwd(), 'vendor', 'llama-hf-to-gguf')
+    : join(process.resourcesPath, 'llama-hf-to-gguf')
+}
+
+/**
+ * Script shipped with the app so users need not clone llama.cpp. Still requires Python +
+ * PyTorch/Transformers (see requirements-convert.txt next to the script).
+ */
+export function resolveBundledConvertScriptPath(): string | undefined {
+  const root = bundledLlamaConvertRoot()
+  const script = join(root, 'convert_hf_to_gguf.py')
+  if (!existsSync(script)) return undefined
+  if (!existsSync(join(root, 'gguf-py', 'gguf', '__init__.py'))) return undefined
+  return script
+}
+
+export function bundledConvertRequirementsPath(): string | undefined {
+  const f = join(bundledLlamaConvertRoot(), 'requirements-convert.txt')
+  return existsSync(f) ? f : undefined
+}
+
 export function resolveConvertScriptPath(opts: {
   llamaBinaryPath?: string
   /** When the active binary came from PATH, still try walking from these paths (e.g. Settings value). */
@@ -127,6 +152,9 @@ export function resolveConvertScriptPath(opts: {
     throw new Error(`llama.cpp convert script not found at the path in Settings: ${cfg}`)
   }
 
+  const bundled = resolveBundledConvertScriptPath()
+  if (bundled) return bundled
+
   const envRoot = (process.env.LLAMA_CPP_ROOT || process.env.LLAMA_CPP_HOME || '')
     .trim()
     .replace(/^file:\/\//i, '')
@@ -140,14 +168,18 @@ export function resolveConvertScriptPath(opts: {
     ...(opts.llamaBinaryAlternatePaths ?? [])
   ])
   if (hints.length === 0) {
+    const req = bundledConvertRequirementsPath()
+    const pip = req ? ` Then run: pip install -r "${req}"` : ''
     throw new Error(
-      'To run .safetensors locally, install a llama.cpp checkout with convert_hf_to_gguf.py, set the path to that script (or set LLAMA_CPP_ROOT to the repo root) under Settings → AI engine, and point llama-server at your build (or leave it on PATH if that binary lives inside the clone). Python deps: pip install -r requirements.txt in the llama.cpp folder.'
+      `No llama-server path is set and the bundled convert_hf_to_gguf.py was not found (incomplete install). Set the llama-server binary under Settings → AI engine, or install Python dependencies for conversion${pip}.`
     )
   }
   const found = findConvertScriptByWalkingLlamaBins(hints)
   if (!found) {
+    const req = bundledConvertRequirementsPath()
+    const pip = req ? ` For the bundled script, run: pip install -r "${req}".` : ''
     throw new Error(
-      'Could not find convert_hf_to_gguf.py near llama-server. Fix: (1) Settings → AI engine → set the full path to convert_hf_to_gguf.py inside your llama.cpp clone, or (2) set environment variable LLAMA_CPP_ROOT to that clone’s root, or (3) point llama-server at the executable inside your checkout (build folder), not only a standalone copy on PATH. The app follows symlinks to the real binary. If you use a prebuilt llama-server with no source tree, you must set the convert script path or LLAMA_CPP_ROOT explicitly.'
+      `Could not find convert_hf_to_gguf.py near llama-server and no bundled copy is available.${pip} Or set Settings → AI engine → path to convert_hf_to_gguf.py, or LLAMA_CPP_ROOT to a llama.cpp checkout. Point llama-server at a binary inside that checkout when possible.`
     )
   }
   return found
@@ -283,9 +315,14 @@ export async function ensureGgufForSafetensorsModelPath(opts: {
         promiseResolve()
         return
       }
+      const req = bundledConvertRequirementsPath()
+      const pip =
+        req && existsSync(req)
+          ? ` If imports failed, install Python deps: pip install -r "${req}"`
+          : ''
       promiseReject(
         new Error(
-          `convert_hf_to_gguf.py failed (exit ${code ?? '?'}). ${errTail.trim().slice(-1800) || 'No output.'}`
+          `convert_hf_to_gguf.py failed (exit ${code ?? '?'}). ${errTail.trim().slice(-1800) || 'No output.'}${pip}`
         )
       )
     })

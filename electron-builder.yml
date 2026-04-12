@@ -23,6 +23,10 @@ extraResources:
     to: training
     filter:
       - "**/*"
+  - from: vendor/llama-hf-to-gguf
+    to: llama-hf-to-gguf
+    filter:
+      - "**/*"
 
 win:
   icon: build/icon.ico

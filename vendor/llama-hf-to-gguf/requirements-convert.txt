@@ -1,0 +1,14 @@
+# Python dependencies for the vendored llama.cpp convert_hf_to_gguf.py (ships with this app).
+# Install once, then Safetensors → GGUF conversion works without cloning llama.cpp.
+#
+#   pip install -r requirements-convert.txt
+#
+# PyTorch: pick a wheel matching your OS from https://pytorch.org/ if the generic install fails.
+
+numpy>=1.17
+tqdm>=4.27
+PyYAML>=5.1
+requests>=2.25
+sentencepiece>=0.1.98,<0.3.0
+torch
+transformers

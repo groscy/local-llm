@@ -5830,9 +5830,9 @@ export default function App(): React.ReactElement {
                       below, pick a model, then press <strong>play</strong> in the top bar. <strong>Advanced:</strong> switch
                       to files on your PC if you use downloaded{' '}
                       <code className="inline-code">.gguf</code> or a full Hugging Face folder with{' '}
-                      <code className="inline-code">.safetensors</code> (the app converts those to GGUF once using
-                      llama.cpp’s <code className="inline-code">convert_hf_to_gguf.py</code> — set paths under Settings →
-                      AI engine if needed).
+                      <code className="inline-code">.safetensors</code> (the app ships{' '}
+                      <code className="inline-code">convert_hf_to_gguf.py</code> and converts once you install Python
+                      with PyTorch and Transformers — see Settings → AI engine).
                     </p>
                     <div className="runtime-ollama-probe" role="status">
                       <div className="runtime-ollama-probe-row">
@@ -6791,7 +6791,8 @@ export default function App(): React.ReactElement {
                           ) : null}
                           <label style={{ display: 'block', marginTop: 18 }}>
                             <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                              Path to <code className="inline-code">convert_hf_to_gguf.py</code> (optional — for{' '}
+                              Path to <code className="inline-code">convert_hf_to_gguf.py</code> (optional — leave empty
+                              to use the <strong>bundled</strong> script from the app for{' '}
                               <code className="inline-code">.safetensors</code>)
                             </span>
                             <input
@@ -6802,9 +6803,16 @@ export default function App(): React.ReactElement {
                               onBlur={() =>
                                 void window.api.setConfig({ llamaConvertScriptPath: llamaConvertScriptPath.trim() })
                               }
-                              placeholder="e.g. C:\src\llama.cpp\convert_hf_to_gguf.py"
+                              placeholder="Leave empty for bundled converter, or set a custom script path"
                             />
                           </label>
+                          <p className="muted" style={{ marginTop: 8, marginBottom: 0, fontSize: 12, maxWidth: 640 }}>
+                            One-time Python setup for conversion: run{' '}
+                            <code className="inline-code">pip install -r requirements-convert.txt</code> inside{' '}
+                            <code className="inline-code">vendor/llama-hf-to-gguf</code> (dev) or{' '}
+                            <code className="inline-code">resources/llama-hf-to-gguf</code> next to the installed app
+                            (the app shows the full path in errors if a package is missing).
+                          </p>
                           <label style={{ display: 'block', marginTop: 14 }}>
                             <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
                               Python for conversion (optional — default <code className="inline-code">python</code> on
