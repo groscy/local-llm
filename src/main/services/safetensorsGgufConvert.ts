@@ -1,6 +1,6 @@
 import { createHash } from 'crypto'
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from 'fs'
-import { dirname, join, resolve } from 'path'
+import { delimiter, dirname, join, resolve } from 'path'
 import { spawn } from 'child_process'
 import { is } from '@electron-toolkit/utils'
 import { logLine } from '../logger'
@@ -133,6 +133,22 @@ export function bundledConvertRequirementsPath(): string | undefined {
   return existsSync(f) ? f : undefined
 }
 
+/** Vendored `gguf-py` so `import gguf` works when the convert script lives in a llama binary zip (no local gguf-py). */
+function bundledGgufPyDir(): string | undefined {
+  const p = join(bundledLlamaConvertRoot(), 'gguf-py')
+  return existsSync(join(p, 'gguf', '__init__.py')) ? p : undefined
+}
+
+function envWithBundledGgufOnPythonPath(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const ggufPy = bundledGgufPyDir()
+  if (!ggufPy) return base
+  const prev = base.PYTHONPATH?.trim()
+  return {
+    ...base,
+    PYTHONPATH: prev ? `${ggufPy}${delimiter}${prev}` : ggufPy
+  }
+}
+
 export function resolveConvertScriptPath(opts: {
   llamaBinaryPath?: string
   /** When the active binary came from PATH, still try walking from these paths (e.g. Settings value). */
@@ -247,7 +263,7 @@ export async function ensureGgufForSafetensorsModelPath(opts: {
   llamaBinaryAlternatePaths?: string[]
   convertScriptConfigured?: string
   pythonConfigured?: string
-  onProgress?: (e: { phase: string; message: string; percent?: number }) => void
+  onProgress?: (e: { phase: string; message: string; percent?: number; detail?: string }) => void
 }): Promise<{ loadPath: string; displayPath: string }> {
   const raw = opts.weightPath.trim().replace(/^file:\/\//i, '')
   const absWeight = resolve(raw)
@@ -277,12 +293,13 @@ export async function ensureGgufForSafetensorsModelPath(opts: {
     })
     return { loadPath: out, displayPath }
   }
-  opts.onProgress?.({
-    phase: 'convert',
-    message:
-      'Converting Safetensors → GGUF with convert_hf_to_gguf.py (first run may take several minutes)…',
-    percent: 8
-  })
+    opts.onProgress?.({
+      phase: 'convert',
+      message:
+        'Converting Safetensors → GGUF with convert_hf_to_gguf.py (first run may take several minutes)…',
+      percent: 8,
+      detail: `Input folder:\n${modelDir}\nOutput:\n${out}`
+    })
   mkdirSync(dirname(out), { recursive: true })
   const args = [script, modelDir, '--outfile', out, '--outtype', 'f16']
   logLine('info', 'safetensors_gguf_convert_spawn', { python, modelDir, out })
@@ -291,19 +308,33 @@ export async function ensureGgufForSafetensorsModelPath(opts: {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       cwd: dirname(script),
-      env: { ...process.env, PYTHONUNBUFFERED: '1' }
+      env: { ...envWithBundledGgufOnPythonPath(process.env), PYTHONUNBUFFERED: '1' }
     })
     let errTail = ''
+    let lastDetailAt = 0
     const onOut = (buf: Buffer): void => {
       const s = buf.toString()
       errTail = (errTail + s).slice(-8000)
       const parts = s.split(/\n/).filter((x) => x.trim())
       const line = parts[parts.length - 1]
       if (line?.trim()) {
+        const now = Date.now()
+        const detail =
+          now - lastDetailAt >= 700
+            ? errTail
+                .trim()
+                .split(/\r?\n/)
+                .filter((x) => x.trim())
+                .slice(-10)
+                .join('\n')
+                .slice(-1200)
+            : undefined
+        if (detail) lastDetailAt = now
         opts.onProgress?.({
           phase: 'convert',
           message: line.trim().slice(0, 220),
-          percent: 12
+          percent: 12,
+          ...(detail ? { detail } : {})
         })
       }
     }
