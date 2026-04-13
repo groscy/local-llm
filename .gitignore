@@ -9,3 +9,5 @@ release-builds/
 .DS_Store
 .env
 *.local
+__pycache__/
+*.py[cod]
