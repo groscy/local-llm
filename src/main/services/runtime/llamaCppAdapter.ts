@@ -6,8 +6,8 @@ import { processRssMb } from '../processMemory'
 import type { ChatMessage, RuntimeAdapter, RuntimeLoadProgress } from './types'
 import type { RuntimeStatus } from '@shared/types'
 
-/** llama-server often does not bind until weights are loaded; fixed sleeps are not enough. */
-const LLAMA_READY_TIMEOUT_MS = 600_000
+/** llama-server often does not bind until weights are loaded; large GGUF / first load can exceed 10+ minutes. */
+const LLAMA_READY_TIMEOUT_MS = 3_600_000
 const LLAMA_READY_POLL_MS = 900
 
 /** Buffer OpenAI-style SSE (`data: {...}\\n\\n`) and extract `delta.content` chunks. */
@@ -95,31 +95,72 @@ export class LlamaCppAdapter implements RuntimeAdapter {
   private lastExitCode: number | null = null
 
   private appendStderr(chunk: string): void {
-    this.stderrTail = (this.stderrTail + chunk).slice(-6000)
+    this.stderrTail = (this.stderrTail + chunk).slice(-12000)
   }
 
-  /** True when HTTP is accepting requests (model loaded enough for /v1/chat/completions). */
-  private async probeLlamaReady(): Promise<boolean> {
+  private stripAnsi(s: string): string {
+    return s.replace(/\x1b\[[0-9;]*m/g, '')
+  }
+
+  /** Last few stderr lines for the load UI (llama-server logs tensor / layer progress here). */
+  private stderrDetailLines(maxLen = 640): string {
+    const raw = this.stripAnsi(this.stderrTail).trim()
+    if (!raw) return ''
+    const lines = raw
+      .split(/\r?\n/)
+      .map((l) => l.trimEnd())
+      .filter((l) => l.length > 0)
+    const pick = lines.slice(-8)
+    const tail = pick.join('\n')
+    return tail.length > maxLen ? tail.slice(-maxLen) : tail
+  }
+
+  /**
+   * Whether the OpenAI-compatible API is ready, plus a short caption from `/health` JSON when present
+   * (`status`, slot counts, errors).
+   */
+  private async pollHealth(): Promise<{ ready: boolean; info: string }> {
     const base = `http://127.0.0.1:${this.port}`
+    const interpretHealthBody = (
+      body: string,
+      httpOk: boolean
+    ): { ready: boolean; caption: string } | null => {
+      try {
+        const j = JSON.parse(body) as Record<string, unknown>
+        const bits: string[] = []
+        if (typeof j.status === 'string') bits.push(`status=${j.status}`)
+        for (const k of ['slots_idle', 'slots_processing', 'slots_deferred'] as const) {
+          if (typeof j[k] === 'number') bits.push(`${k}=${j[k]}`)
+        }
+        const err = j.error
+        if (typeof err === 'string' && err.trim()) bits.push(err.trim().slice(0, 180))
+        const caption = bits.join(' · ')
+        const st = j.status
+        if (st === 'loading' || st === 'error') return { ready: false, caption }
+        if (st === 'ok' || st == null) return { ready: true, caption }
+        return { ready: false, caption }
+      } catch {
+        return httpOk ? { ready: true, caption: '' } : null
+      }
+    }
+
     try {
       const { statusCode, body } = await httpRequestRaw({
         url: `${base}/health`,
         method: 'GET',
         timeoutMs: 4000
       })
-      if (statusCode === 503) return false
+      if (statusCode === 503) {
+        const s = interpretHealthBody(body, false)
+        return { ready: false, info: s?.caption || 'HTTP 503 (server busy or still loading)' }
+      }
       if (statusCode >= 200 && statusCode < 300) {
-        try {
-          const j = JSON.parse(body) as { status?: string }
-          if (j.status === 'loading' || j.status === 'error') return false
-          if (j.status === 'ok' || j.status == null) return true
-          return false
-        } catch {
-          return true
-        }
+        const s = interpretHealthBody(body, true)
+        if (s) return { ready: s.ready, info: s.caption }
+        return { ready: true, info: '' }
       }
     } catch {
-      /* still starting or refused */
+      /* still starting or connection refused */
     }
     try {
       const { statusCode } = await httpRequestRaw({
@@ -127,12 +168,18 @@ export class LlamaCppAdapter implements RuntimeAdapter {
         method: 'GET',
         timeoutMs: 4000
       })
-      if (statusCode >= 200 && statusCode < 300) return true
-      if (statusCode === 503) return false
+      if (statusCode >= 200 && statusCode < 300) return { ready: true, info: 'Chat API reachable' }
+      if (statusCode === 503) return { ready: false, info: '/v1/models: HTTP 503' }
     } catch {
       /* */
     }
-    return false
+    return { ready: false, info: '' }
+  }
+
+  /** True when HTTP is accepting requests (model loaded enough for /v1/chat/completions). */
+  private async probeLlamaReady(): Promise<boolean> {
+    const { ready } = await this.pollHealth()
+    return ready
   }
 
   private async waitUntilLlamaReady(
@@ -140,7 +187,9 @@ export class LlamaCppAdapter implements RuntimeAdapter {
     report?: (e: RuntimeLoadProgress) => void
   ): Promise<void> {
     const start = Date.now()
-    let lastProgressAt = 0
+    let lastEmitAt = 0
+    /** Force first poll to publish so the UI updates immediately after spawn. */
+    let lastDetailKey = '\x00'
     for (;;) {
       if (!this.proc) {
         const tail = this.stderrTail.trim().slice(-1200)
@@ -150,7 +199,8 @@ export class LlamaCppAdapter implements RuntimeAdapter {
             (tail ? ` Last output:\n${tail}` : ' Check the model path and llama-server build.')
         )
       }
-      if (await this.probeLlamaReady()) return
+      const { ready, info } = await this.pollHealth()
+      if (ready) return
       if (Date.now() >= deadline) {
         throw new Error(
           `llama-server did not become ready within ${Math.round(LLAMA_READY_TIMEOUT_MS / 1000)}s.` +
@@ -158,13 +208,24 @@ export class LlamaCppAdapter implements RuntimeAdapter {
         )
       }
       const elapsed = Date.now() - start
-      if (elapsed - lastProgressAt >= 8000) {
-        lastProgressAt = elapsed
-        const pct = Math.min(92, 28 + Math.round((elapsed / LLAMA_READY_TIMEOUT_MS) * 64))
+      const pct = Math.min(92, 28 + Math.round((elapsed / LLAMA_READY_TIMEOUT_MS) * 64))
+      const stderrBit = this.stderrDetailLines()
+      const detailParts = [
+        info ? `Server: ${info}` : '',
+        stderrBit ? `llama-server:\n${stderrBit}` : ''
+      ].filter(Boolean)
+      const detail = detailParts.join('\n\n').slice(0, 1400)
+      const detailKey = `${info}|${stderrBit}`
+      const now = Date.now()
+      if (detailKey !== lastDetailKey || now - lastEmitAt >= 2800) {
+        lastDetailKey = detailKey
+        lastEmitAt = now
+        const hint = info || `waiting for 127.0.0.1:${this.port}`
         report?.({
           phase: 'load',
-          message: `Loading model — waiting for llama-server on 127.0.0.1:${this.port} (${Math.round(elapsed / 1000)}s)…`,
-          percent: pct
+          message: `Loading weights — ${hint} · ${Math.round(elapsed / 1000)}s elapsed`,
+          percent: pct,
+          detail: detail || undefined
         })
       }
       await new Promise((r) => setTimeout(r, LLAMA_READY_POLL_MS))
@@ -218,7 +279,8 @@ export class LlamaCppAdapter implements RuntimeAdapter {
     report?.({
       phase: 'load',
       message: `Loading ${weightKind} weights into memory — server will accept chat when ready (may take several minutes for large files)…`,
-      percent: 22
+      percent: 22,
+      detail: `Model file:\n${this.displayModelPath || opts.modelPath}`
     })
     const deadline = Date.now() + LLAMA_READY_TIMEOUT_MS
     await this.waitUntilLlamaReady(deadline, report)

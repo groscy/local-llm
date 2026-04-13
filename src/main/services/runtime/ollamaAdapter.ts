@@ -58,11 +58,16 @@ export async function pullOllamaModelStream(
       const completed = typeof obj.completed === 'number' ? obj.completed : 0
       const pct =
         total > 0 && completed >= 0 ? Math.min(100, Math.round((100 * completed) / total)) : undefined
+      const digest = typeof obj.digest === 'string' && obj.digest.trim() ? obj.digest.trim().slice(0, 96) : ''
+      const detailParts: string[] = []
+      if (digest) detailParts.push(digest)
+      if (total > 0) detailParts.push(`progress ${completed}/${total}`)
       if (status || pct != null) {
         report?.({
           phase: 'pull',
           message: status || `Pulling “${trimmed}”…`,
-          percent: pct
+          percent: pct,
+          detail: detailParts.length > 0 ? detailParts.join(' · ') : undefined
         })
       }
     }
