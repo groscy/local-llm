@@ -41,6 +41,10 @@ object LocalLlmSystemPrompts {
         appendLine()
         appendLine("You may mix patches and file blocks for different paths. Add a short explanation outside the blocks.")
         appendLine("Do not emit these blocks unless the user wants real file changes.")
+        appendLine("When you do emit them, the IDE applies them to disk immediately and opens the affected files in editors.")
+        appendLine()
+        appendLine("Alternatively you may use a markdown code block whose first line is exactly // File: relative/path.ext")
+        appendLine("(or # File: for Python) so the IDE can still write the file if you omit the LOCAL_LLM_* delimiters.")
         appendLine()
         if (knowledgeGraphText.isNotBlank()) {
             appendLine("--- Begin knowledge graph ---")

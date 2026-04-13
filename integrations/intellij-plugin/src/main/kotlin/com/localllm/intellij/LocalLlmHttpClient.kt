@@ -1,5 +1,14 @@
 package com.localllm.intellij
 
+/**
+ * HTTP client for the Local LLM Desktop **localhost-only** integration bridge.
+ *
+ * Contract (must stay aligned with [src/main/services/integrationServer.ts] in the desktop app):
+ * - [fetchHealth]: `GET /health` — no auth; reachability + `runtimeRunning` / `runtimeKind` snapshot.
+ * - [chat]: `POST /v1/chat` — optional `Authorization: Bearer <token>` when the app has a token set.
+ * - [postPluginReport]: `POST /v1/plugin/report` — same auth as chat; `kind` must match the desktop Zod enum (see [PluginReportKind]).
+ * - [fetchRuntimeStatus]: `GET /v1/runtime/status` — same auth as chat; optional richer model info for the IDE UI.
+ */
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -22,6 +31,16 @@ object LocalLlmHttpClient {
         val reply: String,
         val promptTokens: Int? = null,
         val completionTokens: Int? = null
+    )
+
+    /** Result of GET /v1/runtime/status (authenticated like /v1/chat). */
+    data class RuntimeStatus(
+        val httpStatus: Int,
+        val running: Boolean?,
+        val kind: String?,
+        val modelPath: String?,
+        val endpoint: String?,
+        val errorHint: String?
     )
 
     /** Result of GET /health on the desktop app integration server. */
@@ -77,6 +96,96 @@ object LocalLlmHttpClient {
             runtimeKind = null,
             errorHint = hint.ifBlank { "Cannot reach 127.0.0.1:$port" }
         )
+    }
+
+    fun fetchRuntimeStatus(port: Int, token: String): RuntimeStatus {
+        val uri = URI.create("http://127.0.0.1:$port/v1/runtime/status")
+        val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build()
+        val rb = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(5)).GET()
+        if (token.isNotBlank()) {
+            rb.header("Authorization", "Bearer $token")
+        }
+        val req = rb.build()
+        return try {
+            val res = client.send(req, HttpResponse.BodyHandlers.ofString())
+            val body = res.body()
+            if (res.statusCode() == 200) {
+                RuntimeStatus(
+                    httpStatus = 200,
+                    running = Regex(""""running"\s*:\s*(true|false)""").find(body)?.groupValues?.get(1) == "true",
+                    kind = Regex(""""kind"\s*:\s*"([^"]*)"""").find(body)?.groupValues?.getOrNull(1)?.ifBlank { null },
+                    modelPath = extractJsonStringField(body, "modelPath"),
+                    endpoint = extractJsonStringField(body, "endpoint"),
+                    errorHint = null
+                )
+            } else {
+                RuntimeStatus(
+                    httpStatus = res.statusCode(),
+                    running = null,
+                    kind = null,
+                    modelPath = null,
+                    endpoint = null,
+                    errorHint = body.trim().take(240).ifBlank { "HTTP ${res.statusCode()}" }
+                )
+            }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            RuntimeStatus(0, null, null, null, null, e.message?.take(200))
+        } catch (e: Exception) {
+            RuntimeStatus(0, null, null, null, null, e.message?.take(200))
+        }
+    }
+
+    private fun extractJsonStringField(json: String, field: String): String? {
+        val m = Regex(""""$field"\s*:\s*"((?:[^"\\]|\\.)*)"""").find(json) ?: return null
+        return unescapeJsonString(m.groupValues[1]).ifBlank { null }
+    }
+
+    private fun unescapeJsonString(s: String): String {
+        val out = StringBuilder()
+        var i = 0
+        while (i < s.length) {
+            if (s[i] == '\\' && i + 1 < s.length) {
+                when (s[i + 1]) {
+                    'n' -> {
+                        out.append('\n')
+                        i += 2
+                    }
+                    'r' -> {
+                        out.append('\r')
+                        i += 2
+                    }
+                    't' -> {
+                        out.append('\t')
+                        i += 2
+                    }
+                    '"' -> {
+                        out.append('"')
+                        i += 2
+                    }
+                    '\\' -> {
+                        out.append('\\')
+                        i += 2
+                    }
+                    'u' -> {
+                        if (i + 6 <= s.length) {
+                            out.append(s.substring(i + 2, i + 6).toInt(16).toChar())
+                            i += 6
+                        } else {
+                            i++
+                        }
+                    }
+                    else -> {
+                        out.append(s[i + 1])
+                        i += 2
+                    }
+                }
+            } else {
+                out.append(s[i])
+                i++
+            }
+        }
+        return out.toString()
     }
 
     private fun parseHealthJson(json: String): BridgeHealth {
