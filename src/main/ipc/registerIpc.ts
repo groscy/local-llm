@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, statSync, unlinkSync } from 'fs'
 import type Store from 'electron-store'
 import { z } from 'zod'
 import type Database from 'better-sqlite3'
+import { isValidStoredColorScheme } from '@shared/colorScheme'
 import type { RuntimeLoadProgress } from '@shared/types'
 import { is } from '@electron-toolkit/utils'
 import { IPC } from '@shared/ipc'
@@ -64,6 +65,10 @@ import {
   ensureGgufForSafetensorsModelPath,
   isSafetensorsWeightFilePath
 } from '../services/safetensorsGgufConvert'
+import {
+  ensureAutoDetectedPythonInStore,
+  resetPythonAutoDetectSession
+} from '../services/pythonDetect'
 
 const configSchema = z.object({
   /** Set to `null` to clear and use the app default under user data. */
@@ -93,7 +98,12 @@ const configSchema = z.object({
       issues: z.number().min(0.05).max(100).optional()
     })
     .optional(),
-  colorScheme: z.enum(['violet', 'teal', 'amber', 'rose', 'sky']).optional(),
+  colorScheme: z
+    .string()
+    .optional()
+    .refine((s) => s == null || s === '' || isValidStoredColorScheme(s), {
+      message: 'Unknown color scheme id'
+    }),
   chatMaxTokens: z.number().int().min(1).max(262_144).optional(),
   integrationListenEnabled: z.boolean().optional(),
   integrationPort: z.number().int().min(1024).max(65535).optional(),
@@ -172,10 +182,13 @@ export function registerIpc(ctx: IpcContext): void {
     return collectHardwareSummary(diskPath)
   })
 
-  ipcMain.handle(IPC.GET_CONFIG, () => ({
-    ...store.store,
-    hfTokenSet: !!getHfToken()
-  }))
+  ipcMain.handle(IPC.GET_CONFIG, async () => {
+    await ensureAutoDetectedPythonInStore(store)
+    return {
+      ...store.store,
+      hfTokenSet: !!getHfToken()
+    }
+  })
 
   ipcMain.handle(IPC.SET_CONFIG, (_e, raw: unknown) => {
     const parsed = configSchema.partial().safeParse(raw)
@@ -185,6 +198,9 @@ export function registerIpc(ctx: IpcContext): void {
     )
     Object.entries(parsed.data).forEach(([k, v]) => {
       if (v === undefined || k === 'hfTokenEncrypted') return
+      if (k === 'llamaPythonPath' && typeof v === 'string' && !v.trim()) {
+        resetPythonAutoDetectSession()
+      }
       if (k === 'modelsDir' && v === null) {
         store.delete('modelsDir')
         return
@@ -339,6 +355,7 @@ export function registerIpc(ctx: IpcContext): void {
     setRuntime(null)
     cancelAllActiveDownloads()
     resetElectronStoreToFactory(store)
+    resetPythonAutoDetectSession()
     setHfToken(undefined)
     logLine('info', 'factory_config_reset')
     return { ok: true as const }
@@ -515,12 +532,13 @@ export function registerIpc(ctx: IpcContext): void {
         opts.kind === 'llamacpp'
           ? resolveLlamaBinary(typeof configuredBin === 'string' ? configuredBin : undefined)
           : undefined
-      const sendLoad = (p: { phase: string; message: string; percent?: number }): void => {
+      const sendLoad = (p: RuntimeLoadProgress): void => {
         event.sender.send(IPC.RUNTIME_LOAD_PROGRESS, p)
       }
       let modelPathForLoad = opts.modelPath.trim()
       let displayModelPath: string | undefined
       if (opts.kind === 'llamacpp' && isSafetensorsWeightFilePath(modelPathForLoad)) {
+        await ensureAutoDetectedPythonInStore(store)
         const configuredTrim = (typeof configuredBin === 'string' ? configuredBin : '').trim()
         const primaryBin = (binaryPath ?? configuredTrim) || undefined
         const alternateBins: string[] = []
