@@ -113,6 +113,9 @@ export function ActivityPinnedWidget(props: {
                 </div>
               )}
               <p className="activity-pinned-message">{modelLoad.message}</p>
+              {modelLoad.detail?.trim() ? (
+                <pre className="activity-pinned-load-detail">{modelLoad.detail.trim()}</pre>
+              ) : null}
             </div>
           ) : null}
           {chatSending && chatTokens ? (

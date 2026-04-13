@@ -34,7 +34,12 @@ import { hubWeightDownloadPathSet } from '@shared/hfDownloadBundle'
 import { DEFAULT_OLLAMA_MODEL_TAG } from '@shared/defaultRuntimeModel'
 import { evaluateModelForHardware } from '@shared/modelHardwareFit'
 import type { ColorSchemeId } from '@shared/colorScheme'
-import { COLOR_SCHEME_IDS, COLOR_SCHEME_LABELS, DEFAULT_COLOR_SCHEME, parseColorScheme } from '@shared/colorScheme'
+import {
+  COLOR_SCHEME_IDS,
+  COLOR_SCHEME_LABELS,
+  DEFAULT_COLOR_SCHEME,
+  parseColorScheme
+} from '@shared/colorScheme'
 import {
   appendJournalTexts,
   defaultModelProfile,
@@ -644,6 +649,27 @@ function ollamaInstalledTagMatch(tags: readonly string[], preset: string): strin
 
 const HF_HUB_PAGE_SIZE = 12
 
+const HF_DOWNLOAD_LABEL_MAX = 240
+
+function clampDownloadDisplayLabel(s: string): string {
+  const t = s.trim()
+  if (t.length <= HF_DOWNLOAD_LABEL_MAX) return t
+  return `${t.slice(0, HF_DOWNLOAD_LABEL_MAX - 1)}…`
+}
+
+/** Stored as `chat_display_name` / `chatDisplayName` so the UI can show repo + file, not only the local filename. */
+function hubWeightDownloadDisplayName(d: HfModelDetail, hfFilename: string): string {
+  const repo = d.id.trim() || 'model'
+  const fileSeg = hfFilename.replace(/\\/g, '/').trim() || 'weights'
+  let out = `${repo} · ${fileSeg}`
+  const pipe = d.pipeline_tag?.trim()
+  if (pipe) {
+    const extra = ` (${pipe})`
+    if (out.length + extra.length <= HF_DOWNLOAD_LABEL_MAX) out += extra
+  }
+  return out
+}
+
 function hfSummaryFormatLabel(m: HfModelSummary): string {
   const tags = m.tags ?? []
   if (tags.some((t) => t.toLowerCase() === 'gguf')) return 'GGUF'
@@ -753,6 +779,21 @@ function chatAuthorLabelForModelPath(
   return null
 }
 
+/** Top-bar / lists: prefer saved Hub label for this file path when the download registry has a row. */
+function localModelOptionLabel(
+  absPath: string,
+  downloads: readonly DownloadRow[],
+  winPlatform: boolean
+): string {
+  const base = fileNameFromPath(absPath)
+  for (const d of downloads) {
+    if (!localModelPathsEqual(d.local_path, absPath, winPlatform)) continue
+    const dn = d.chat_display_name?.trim()
+    if (dn) return dn
+  }
+  return base
+}
+
 function downloadStatusClass(status: string): string {
   switch (status) {
     case 'complete':
@@ -775,6 +816,8 @@ type HfCardDownloadState = {
   bytesReceived: number
   bytesTotal: number
   status: string
+  /** Same label persisted as `chat_display_name` for this job. */
+  displayName?: string
 }
 
 function parseHfDownloadStatus(raw: unknown): HfCardDownloadState | null {
@@ -796,7 +839,10 @@ function parseHfDownloadStatus(raw: unknown): HfCardDownloadState | null {
   if (progress === 0 && bytesTotal > 0 && bytesReceived > 0) {
     progress = Math.min(99, Math.round((100 * bytesReceived) / bytesTotal))
   }
-  return { jobId: id, progress, bytesReceived, bytesTotal, status }
+  const displayRaw = o.chatDisplayName ?? o.chat_display_name
+  const displayName =
+    typeof displayRaw === 'string' && displayRaw.trim() ? displayRaw.trim() : undefined
+  return { jobId: id, progress, bytesReceived, bytesTotal, status, displayName }
 }
 
 function hfCardProgressPct(job: HfCardDownloadState): number | null {
@@ -1777,6 +1823,12 @@ export default function App(): React.ReactElement {
     }
   }, [paths?.modelsDefault, destDir, winPlatform])
 
+  /** Top-bar “Files on my PC” list used to refresh only when Run was opened; load once paths (models dir) are known. */
+  useEffect(() => {
+    if (!paths) return
+    void refreshLocalModelFiles()
+  }, [paths, destDir, refreshLocalModelFiles])
+
   const refreshRunDrawer = useCallback(async () => {
     await refreshRunDrawerQuick()
     await refreshLocalModelFiles()
@@ -2262,18 +2314,21 @@ export default function App(): React.ReactElement {
             changed = true
             continue
           }
+          const mergedDisplay = st.displayName ?? cur.displayName
           if (
             cur.progress !== st.progress ||
             cur.bytesReceived !== st.bytesReceived ||
             cur.bytesTotal !== st.bytesTotal ||
-            cur.status !== st.status
+            cur.status !== st.status ||
+            cur.displayName !== mergedDisplay
           ) {
             next[repoId] = {
               jobId: cur.jobId,
               progress: st.progress,
               bytesReceived: st.bytesReceived,
               bytesTotal: st.bytesTotal,
-              status: st.status
+              status: st.status,
+              displayName: mergedDisplay
             }
             changed = true
           }
@@ -2927,39 +2982,32 @@ export default function App(): React.ReactElement {
       if (filePath) {
         const revision = hfResolveRevision(d, 'main')
         const paths = hubWeightDownloadPathSet(d.siblings ?? [], filePath)
-        let lastJob: {
-          id: string
-          progress?: number
-          bytesReceived?: number
-          bytesTotal?: number
-          status?: string
-        } | null = null
         for (const filename of paths) {
+          const displayName = clampDownloadDisplayLabel(hubWeightDownloadDisplayName(d, filename))
           const j = (await window.api.hfDownload({
             repoId,
             revision,
             filename,
             destDir: destDir.trim() || undefined,
-            chatDisplayName: repoId
+            chatDisplayName: displayName
           })) as {
             id: string
             progress?: number
             bytesReceived?: number
             bytesTotal?: number
             status?: string
+            chatDisplayName?: string
           }
-          lastJob = j
           void refreshDownloadsList()
-        }
-        if (lastJob) {
           setHfDownloadJobs((prev) => ({
             ...prev,
             [repoId]: {
-              jobId: lastJob!.id,
-              progress: typeof lastJob!.progress === 'number' ? lastJob!.progress : 0,
-              bytesReceived: typeof lastJob!.bytesReceived === 'number' ? lastJob!.bytesReceived : 0,
-              bytesTotal: typeof lastJob!.bytesTotal === 'number' ? lastJob!.bytesTotal : 0,
-              status: typeof lastJob!.status === 'string' ? lastJob!.status : 'downloading'
+              jobId: j.id,
+              progress: typeof j.progress === 'number' ? j.progress : 0,
+              bytesReceived: typeof j.bytesReceived === 'number' ? j.bytesReceived : 0,
+              bytesTotal: typeof j.bytesTotal === 'number' ? j.bytesTotal : 0,
+              status: typeof j.status === 'string' ? j.status : 'downloading',
+              displayName: j.chatDisplayName?.trim() || displayName
             }
           }))
         }
@@ -3233,6 +3281,11 @@ export default function App(): React.ReactElement {
                   <DownloadProgressBar compact pct={oPullPct} meta={oPullMeta} />
                 ) : hfJob ? (
                   <>
+                    {hfJob.displayName ? (
+                      <div className="muted hf-model-table-dl-label" style={{ marginBottom: 6, fontSize: 12 }}>
+                        {hfJob.displayName}
+                      </div>
+                    ) : null}
                     <DownloadProgressBar compact pct={hfPct} meta={hfMeta} />
                     <button
                       type="button"
@@ -4439,7 +4492,7 @@ export default function App(): React.ReactElement {
                         !localModelFilePaths.some((q) => localModelPathsEqual(q, loadedMp, winPlatform))
                       return (
                         <option key={p} value={p} title={p}>
-                          {fileNameFromPath(p)}
+                          {localModelOptionLabel(p, localDownloads, winPlatform)}
                           {loadedOnly ? ' · loaded' : ''}
                         </option>
                       )
@@ -4498,6 +4551,9 @@ export default function App(): React.ReactElement {
                 <span className="top-bar-runtime-progress-msg">
                   {runtimeLoadProgress?.message ?? 'Starting…'}
                 </span>
+                {runtimeLoadProgress?.detail?.trim() ? (
+                  <pre className="top-bar-runtime-progress-detail">{runtimeLoadProgress.detail.trim()}</pre>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -6091,7 +6147,9 @@ export default function App(): React.ReactElement {
                                 className={`runtime-download-row ${r.status === 'complete' ? '' : 'runtime-download-row-dim'}`}
                               >
                                 <div className="runtime-download-row-head">
-                                  <span className="runtime-download-row-title">{fileNameFromPath(r.local_path)}</span>
+                                  <span className="runtime-download-row-title">
+                                    {r.chat_display_name?.trim() || fileNameFromPath(r.local_path)}
+                                  </span>
                                   <div className="runtime-download-row-actions">
                                     <span className={downloadStatusClass(r.status)}>{r.status}</span>
                                     {showDlBar ? (
@@ -6382,8 +6440,8 @@ export default function App(): React.ReactElement {
                             Color scheme
                           </h3>
                           <p className="muted" style={{ marginTop: 0 }}>
-                            Accent palette for buttons, highlights, and chat accents. Secondary panels use a light glass treatment so the backdrop shows
-                            through.
+                            Each option is a coordinated palette (backgrounds, text, accents, chat bubbles, and status colors).
+                            Light themes use a bright base; CVD themes avoid confusing red–green or blue–yellow pairs for key states.
                           </p>
                           <label style={{ display: 'block', marginTop: 12 }}>
                             <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
@@ -6392,7 +6450,7 @@ export default function App(): React.ReactElement {
                             </span>
                             <select
                               className="select"
-                              style={{ width: '100%', maxWidth: 320 }}
+                              style={{ width: '100%', maxWidth: 420 }}
                               value={colorScheme}
                               onChange={(e) => void saveColorScheme(parseColorScheme(e.target.value))}
                             >
@@ -6815,8 +6873,9 @@ export default function App(): React.ReactElement {
                           </p>
                           <label style={{ display: 'block', marginTop: 14 }}>
                             <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                              Python for conversion (optional — default <code className="inline-code">python</code> on
-                              Windows, <code className="inline-code">python3</code> elsewhere)
+                              Python for conversion (the app picks a working interpreter on PATH when this is empty —
+                              try <code className="inline-code">py -3</code>, <code className="inline-code">python</code>,
+                              then <code className="inline-code">python3</code>; override with a full path if needed)
                             </span>
                             <input
                               className="input"
@@ -6824,7 +6883,7 @@ export default function App(): React.ReactElement {
                               value={llamaPythonPath}
                               onChange={(e) => setLlamaPythonPath(e.target.value)}
                               onBlur={() => void window.api.setConfig({ llamaPythonPath: llamaPythonPath.trim() })}
-                              placeholder="python3 or full path to python.exe"
+                              placeholder="Leave empty for auto-detect, or e.g. python3 / full path to python.exe"
                             />
                           </label>
                         </div>

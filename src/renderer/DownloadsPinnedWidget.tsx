@@ -41,11 +41,13 @@ export function DownloadsPinnedWidget(props: {
                       : ''
                   }`
                 : 'Starting…'
+            const fileLabel = fileNameFromPath(r.local_path)
+            const primary = r.chat_display_name?.trim() || fileLabel
             return (
               <li key={r.id} className="downloads-pinned-item">
                 <div className="downloads-pinned-item-head">
-                  <span className="downloads-pinned-item-name" title={r.repo_id}>
-                    {fileNameFromPath(r.local_path)}
+                  <span className="downloads-pinned-item-name" title={`${primary}\n${r.local_path}`}>
+                    {primary}
                   </span>
                   <button type="button" className="btn-ghost-sm" onClick={() => void onCancelJob(r.id)}>
                     Cancel

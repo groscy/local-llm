@@ -1,0 +1,481 @@
+/* Coordinated palettes (Settings → Appearance). Default “violet” lives on :root in styles.css — no attribute. */
+
+html[data-color-scheme='dark-charcoal-teal'] {
+  color-scheme: dark;
+  --bg-deep: #0a0e11;
+  --bg: rgba(14, 18, 24, 0.78);
+  --surface: rgba(20, 26, 34, 0.55);
+  --surface-elevated: rgba(26, 32, 42, 0.58);
+  --surface-hover: rgba(34, 42, 54, 0.65);
+  --border: rgba(200, 220, 235, 0.08);
+  --border-strong: rgba(200, 220, 235, 0.16);
+  --text: #e8eef5;
+  --text-secondary: #8fa3b8;
+  --text-tertiary: #5d6f82;
+  --accent: #2ec4b6;
+  --accent-bright: #6ef3e6;
+  --accent-dim: color-mix(in srgb, var(--accent) 15%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent) 35%, transparent);
+  --accent-ring-soft: color-mix(in srgb, var(--accent) 35%, transparent);
+  --accent-ring-strong: color-mix(in srgb, var(--accent) 55%, transparent);
+  --wiki-accent: #56b4f5;
+  --wiki-dim: color-mix(in srgb, var(--wiki-accent) 12%, transparent);
+  --wiki-ring: color-mix(in srgb, var(--wiki-accent) 35%, transparent);
+  --success: #5ce0b8;
+  --success-bright: #8cf5d8;
+  --warning: #e6b565;
+  --warning-bright: #f0d080;
+  --danger: #f08090;
+  --danger-text: #ffd0d8;
+  --neutral-indicator: #7a8a9c;
+  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
+  --gradient-danger: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--danger) 45%, #301018) 0%,
+    var(--danger) 100%
+  );
+  --chart-line-memory: var(--accent);
+  --chart-line-cpu: var(--wiki-accent);
+  --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 35%, #7eb8ff);
+  --chart-line-gpu-util: color-mix(in srgb, var(--accent) 45%, var(--wiki-accent));
+  --chart-line-model: color-mix(in srgb, var(--wiki-accent) 35%, #e8a8d8);
+  --chart-line-tok: var(--warning);
+  --chart-line-ctx: color-mix(in srgb, var(--warning) 42%, var(--wiki-accent));
+  --chart-line-latency: color-mix(in srgb, var(--wiki-accent) 38%, var(--accent-bright));
+  --user-bubble: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 28%, rgba(18, 24, 32, 0.92)) 0%,
+    color-mix(in srgb, var(--wiki-accent) 12%, rgba(12, 16, 24, 0.9)) 100%
+  );
+  --assistant-bubble: rgba(20, 26, 34, 0.58);
+  --chrome-rgb: 14, 18, 26;
+  --panel-rgb: 20, 26, 36;
+  --chip-rgb: 28, 34, 46;
+  --scrollbar-track: rgba(255, 255, 255, 0.035);
+  --scrollbar-track-edge: rgba(255, 255, 255, 0.06);
+}
+
+html[data-color-scheme='black-oled-blue'] {
+  color-scheme: dark;
+  --bg-deep: #000000;
+  --bg: rgba(6, 8, 12, 0.94);
+  --surface: rgba(10, 12, 18, 0.62);
+  --surface-elevated: rgba(14, 16, 24, 0.68);
+  --surface-hover: rgba(22, 24, 34, 0.75);
+  --border: rgba(180, 210, 255, 0.065);
+  --border-strong: rgba(180, 210, 255, 0.12);
+  --text: #e8f0ff;
+  --text-secondary: #8ca0c4;
+  --text-tertiary: #5a6b8a;
+  --accent: #4fc3f7;
+  --accent-bright: #9ee7ff;
+  --accent-dim: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent) 32%, transparent);
+  --accent-ring-soft: color-mix(in srgb, var(--accent) 32%, transparent);
+  --accent-ring-strong: color-mix(in srgb, var(--accent) 52%, transparent);
+  --wiki-accent: #26c6da;
+  --wiki-dim: color-mix(in srgb, var(--wiki-accent) 12%, transparent);
+  --wiki-ring: color-mix(in srgb, var(--wiki-accent) 32%, transparent);
+  --success: #69f0ae;
+  --success-bright: #b9ffd4;
+  --warning: #ffca28;
+  --warning-bright: #ffe082;
+  --danger: #ff8a80;
+  --danger-text: #ffd4d0;
+  --neutral-indicator: #78909c;
+  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
+  --gradient-danger: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--danger) 40%, #280808) 0%,
+    var(--danger) 100%
+  );
+  --chart-line-memory: var(--accent);
+  --chart-line-cpu: var(--wiki-accent);
+  --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 40%, #90caf9);
+  --chart-line-gpu-util: color-mix(in srgb, var(--accent) 45%, var(--wiki-accent));
+  --chart-line-model: color-mix(in srgb, var(--wiki-accent) 35%, #b39ddb);
+  --chart-line-tok: var(--warning);
+  --chart-line-ctx: color-mix(in srgb, var(--warning) 40%, var(--wiki-accent));
+  --chart-line-latency: color-mix(in srgb, var(--wiki-accent) 35%, #80deea);
+  --user-bubble: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 26%, rgba(8, 10, 18, 0.95)) 0%,
+    color-mix(in srgb, var(--wiki-accent) 10%, rgba(4, 6, 12, 0.92)) 100%
+  );
+  --assistant-bubble: rgba(12, 14, 22, 0.62);
+  --chrome-rgb: 6, 8, 14;
+  --panel-rgb: 10, 12, 20;
+  --chip-rgb: 16, 18, 28;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.65);
+  --shadow-lg: 0 24px 48px rgba(0, 0, 0, 0.72);
+  --scrollbar-track: rgba(255, 255, 255, 0.03);
+  --scrollbar-track-edge: rgba(255, 255, 255, 0.055);
+}
+
+html[data-color-scheme='light-warm-slate'] {
+  color-scheme: light;
+  --bg-deep: #e8e4dc;
+  --bg: rgba(255, 252, 248, 0.94);
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-elevated: rgba(255, 255, 255, 0.88);
+  --surface-hover: rgba(248, 246, 242, 0.95);
+  --border: rgba(30, 40, 55, 0.1);
+  --border-strong: rgba(30, 40, 55, 0.16);
+  --text: #1a2233;
+  --text-secondary: #4a5568;
+  --text-tertiary: #6b7280;
+  --accent: #3d5a80;
+  --accent-bright: #5a7ab8;
+  --accent-dim: color-mix(in srgb, var(--accent) 12%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent) 22%, transparent);
+  --accent-ring-soft: color-mix(in srgb, var(--accent) 28%, transparent);
+  --accent-ring-strong: color-mix(in srgb, var(--accent) 45%, transparent);
+  --wiki-accent: #2a9d8f;
+  --wiki-dim: color-mix(in srgb, var(--wiki-accent) 10%, transparent);
+  --wiki-ring: color-mix(in srgb, var(--wiki-accent) 28%, transparent);
+  --success: #2d8659;
+  --success-bright: #3cb371;
+  --warning: #b8860b;
+  --warning-bright: #daa520;
+  --danger: #b83232;
+  --danger-text: #7f1d1d;
+  --neutral-indicator: #64748b;
+  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
+  --gradient-danger: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--danger) 35%, #fde8e8) 0%,
+    var(--danger) 100%
+  );
+  --chart-line-memory: var(--accent);
+  --chart-line-cpu: var(--wiki-accent);
+  --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 45%, #5b8fc7);
+  --chart-line-gpu-util: color-mix(in srgb, var(--accent) 40%, var(--wiki-accent));
+  --chart-line-model: color-mix(in srgb, var(--wiki-accent) 40%, #5c7cfa);
+  --chart-line-tok: var(--warning);
+  --chart-line-ctx: color-mix(in srgb, var(--warning) 45%, var(--wiki-accent));
+  --chart-line-latency: color-mix(in srgb, var(--wiki-accent) 35%, #4a6fa5);
+  --user-bubble: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 18%, rgba(255, 255, 255, 0.92)) 0%,
+    color-mix(in srgb, var(--wiki-accent) 12%, rgba(255, 252, 248, 0.9)) 100%
+  );
+  --assistant-bubble: rgba(255, 255, 255, 0.55);
+  --chrome-rgb: 245, 242, 236;
+  --panel-rgb: 252, 250, 246;
+  --chip-rgb: 248, 246, 242;
+  --nav-chrome-a: 0.78;
+  --pinned-chrome-a: 0.74;
+  --topbar-chrome-a: 0.55;
+  --chip-secondary-a: 0.72;
+  --drawer-panel-a: 0.88;
+  --drawer-header-a: 0.62;
+  --input-fill-a: 0.82;
+  --backdrop-tint-rgb: 20, 28, 40;
+  --backdrop-dim-a: 0.28;
+  --sidebar-secondary-a: 0.76;
+  --snippet-fill-a: 0.85;
+  --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  --glass-edge-glow: 0 0 0 1px rgba(30, 40, 55, 0.06);
+  --shadow-rgb: 15, 25, 40;
+  --shadow-sm: 0 1px 2px rgba(var(--shadow-rgb), 0.08);
+  --shadow-lg: 0 24px 48px rgba(var(--shadow-rgb), 0.14);
+  --shadow-keyboard: 0 1px 3px rgba(var(--shadow-rgb), 0.1);
+  --shadow-popover: 0 10px 28px rgba(var(--shadow-rgb), 0.12);
+  --shadow-dropdown: 0 14px 36px rgba(var(--shadow-rgb), 0.14);
+  --shadow-modal-deep: 0 24px 56px rgba(var(--shadow-rgb), 0.16);
+  --shadow-drawer-deep: 0 24px 80px rgba(var(--shadow-rgb), 0.18);
+  --shadow-slide-panel: 12px 0 40px rgba(var(--shadow-rgb), 0.12);
+  --shadow-slide-panel-mirror: -12px 0 40px rgba(var(--shadow-rgb), 0.12);
+  --shadow-slide-kick: -6px 0 24px rgba(var(--shadow-rgb), 0.08);
+  --shadow-thumb-press: 0 1px 4px rgba(var(--shadow-rgb), 0.18);
+  --modal-scrim-bg: rgba(var(--shadow-rgb), 0.28);
+  --modal-panel-bg: color-mix(in srgb, var(--surface-elevated) 88%, rgba(255, 255, 255, 0.55));
+  --hairline-04: rgb(26 34 51 / 0.06);
+  --hairline-05: rgb(26 34 51 / 0.07);
+  --hairline-06: rgb(26 34 51 / 0.08);
+  --hairline-07: rgb(26 34 51 / 0.09);
+  --hairline-08: rgb(26 34 51 / 0.1);
+  --hairline-09: rgb(26 34 51 / 0.11);
+  --hairline-10: rgb(26 34 51 / 0.12);
+  --hairline-11: rgb(26 34 51 / 0.14);
+  --rich-code-bg: rgba(0, 0, 0, 0.06);
+  --rich-code-bg-user: rgba(0, 0, 0, 0.05);
+  --rich-pre-bg: rgba(0, 0, 0, 0.075);
+  --rich-th-bg: rgba(0, 0, 0, 0.055);
+  --nested-panel-bg: rgba(0, 0, 0, 0.055);
+  --hf-filter-well-bg: rgba(0, 0, 0, 0.045);
+  --metric-chart-surface: rgba(0, 0, 0, 0.04);
+  --scrollbar-track: rgba(0, 0, 0, 0.04);
+  --scrollbar-track-edge: rgba(0, 0, 0, 0.07);
+  --scrollbar-thumb: color-mix(in srgb, var(--text-secondary) 28%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--accent) 35%, rgba(0, 0, 0, 0.08));
+  --scrollbar-thumb-active: color-mix(in srgb, var(--accent-bright) 32%, rgba(0, 0, 0, 0.1));
+}
+
+html[data-color-scheme='solarized-light'] {
+  color-scheme: light;
+  --bg-deep: #fdf6e3;
+  --bg: rgba(253, 246, 227, 0.96);
+  --surface: rgba(238, 232, 213, 0.85);
+  --surface-elevated: rgba(253, 246, 227, 0.92);
+  --surface-hover: rgba(238, 232, 213, 0.95);
+  --border: rgba(88, 110, 117, 0.18);
+  --border-strong: rgba(88, 110, 117, 0.28);
+  --text: #586e75;
+  --text-secondary: #657b83;
+  --text-tertiary: #93a1a1;
+  --accent: #268bd2;
+  --accent-bright: #2aa198;
+  --accent-dim: color-mix(in srgb, var(--accent) 12%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent) 22%, transparent);
+  --accent-ring-soft: color-mix(in srgb, var(--accent) 26%, transparent);
+  --accent-ring-strong: color-mix(in srgb, var(--accent) 42%, transparent);
+  --wiki-accent: #2aa198;
+  --wiki-dim: color-mix(in srgb, var(--wiki-accent) 10%, transparent);
+  --wiki-ring: color-mix(in srgb, var(--wiki-accent) 26%, transparent);
+  --success: #859900;
+  --success-bright: #a3bd00;
+  --warning: #b58900;
+  --warning-bright: #cb4b16;
+  --danger: #dc322f;
+  --danger-text: #9b1c1c;
+  --neutral-indicator: #839496;
+  --gradient-cta: linear-gradient(135deg, var(--accent) 0%, #2aa198 100%);
+  --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
+  --gradient-danger: linear-gradient(135deg, color-mix(in srgb, var(--danger) 30%, #fff5f5) 0%, var(--danger) 100%);
+  --chart-line-memory: var(--accent);
+  --chart-line-cpu: var(--wiki-accent);
+  --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 40%, #6c71c4);
+  --chart-line-gpu-util: color-mix(in srgb, var(--accent) 38%, var(--wiki-accent));
+  --chart-line-model: color-mix(in srgb, var(--wiki-accent) 35%, #d33682);
+  --chart-line-tok: var(--warning);
+  --chart-line-ctx: color-mix(in srgb, var(--warning) 40%, var(--wiki-accent));
+  --chart-line-latency: color-mix(in srgb, var(--wiki-accent) 35%, #268bd2);
+  --user-bubble: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 16%, rgba(253, 246, 227, 0.95)) 0%,
+    color-mix(in srgb, var(--wiki-accent) 12%, rgba(238, 232, 213, 0.9)) 100%
+  );
+  --assistant-bubble: rgba(238, 232, 213, 0.75);
+  --chrome-rgb: 253, 246, 227;
+  --panel-rgb: 238, 232, 213;
+  --chip-rgb: 240, 235, 220;
+  --nav-chrome-a: 0.82;
+  --pinned-chrome-a: 0.78;
+  --topbar-chrome-a: 0.58;
+  --chip-secondary-a: 0.76;
+  --drawer-panel-a: 0.9;
+  --drawer-header-a: 0.65;
+  --input-fill-a: 0.85;
+  --backdrop-tint-rgb: 0, 43, 54;
+  --backdrop-dim-a: 0.2;
+  --sidebar-secondary-a: 0.8;
+  --snippet-fill-a: 0.88;
+  --glass-inset-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+  --glass-edge-glow: 0 0 0 1px rgba(88, 110, 117, 0.1);
+  --shadow-rgb: 0, 43, 54;
+  --shadow-sm: 0 1px 2px rgba(var(--shadow-rgb), 0.06);
+  --shadow-lg: 0 24px 48px rgba(var(--shadow-rgb), 0.12);
+  --shadow-keyboard: 0 1px 3px rgba(var(--shadow-rgb), 0.08);
+  --shadow-popover: 0 10px 28px rgba(var(--shadow-rgb), 0.1);
+  --shadow-dropdown: 0 14px 36px rgba(var(--shadow-rgb), 0.12);
+  --shadow-modal-deep: 0 24px 56px rgba(var(--shadow-rgb), 0.14);
+  --shadow-drawer-deep: 0 24px 80px rgba(var(--shadow-rgb), 0.16);
+  --shadow-slide-panel: 12px 0 40px rgba(var(--shadow-rgb), 0.1);
+  --shadow-slide-panel-mirror: -12px 0 40px rgba(var(--shadow-rgb), 0.1);
+  --shadow-slide-kick: -6px 0 24px rgba(var(--shadow-rgb), 0.07);
+  --shadow-thumb-press: 0 1px 4px rgba(var(--shadow-rgb), 0.14);
+  --modal-scrim-bg: rgba(var(--shadow-rgb), 0.22);
+  --modal-panel-bg: color-mix(in srgb, var(--surface-elevated) 86%, rgba(253, 246, 227, 0.5));
+  --hairline-04: rgb(88 110 117 / 0.08);
+  --hairline-05: rgb(88 110 117 / 0.09);
+  --hairline-06: rgb(88 110 117 / 0.1);
+  --hairline-07: rgb(88 110 117 / 0.11);
+  --hairline-08: rgb(88 110 117 / 0.12);
+  --hairline-09: rgb(88 110 117 / 0.13);
+  --hairline-10: rgb(88 110 117 / 0.15);
+  --hairline-11: rgb(88 110 117 / 0.17);
+  --rich-code-bg: rgba(0, 43, 54, 0.06);
+  --rich-code-bg-user: rgba(0, 43, 54, 0.05);
+  --rich-pre-bg: rgba(0, 43, 54, 0.08);
+  --rich-th-bg: rgba(0, 43, 54, 0.055);
+  --nested-panel-bg: rgba(0, 43, 54, 0.05);
+  --hf-filter-well-bg: rgba(0, 43, 54, 0.04);
+  --metric-chart-surface: rgba(0, 43, 54, 0.035);
+  --scrollbar-track: rgba(0, 43, 54, 0.04);
+  --scrollbar-track-edge: rgba(0, 43, 54, 0.07);
+  --scrollbar-thumb: color-mix(in srgb, var(--text-secondary) 30%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--accent) 32%, rgba(0, 0, 0, 0.06));
+  --scrollbar-thumb-active: color-mix(in srgb, var(--accent-bright) 28%, rgba(0, 0, 0, 0.08));
+}
+
+html[data-color-scheme='solarized-dark'] {
+  color-scheme: dark;
+  --bg-deep: #002b36;
+  --bg: rgba(7, 54, 66, 0.72);
+  --surface: rgba(7, 54, 66, 0.55);
+  --surface-elevated: rgba(0, 43, 54, 0.62);
+  --surface-hover: rgba(88, 110, 117, 0.18);
+  --border: rgba(147, 161, 161, 0.12);
+  --border-strong: rgba(147, 161, 161, 0.22);
+  --text: #eee8d5;
+  --text-secondary: #93a1a1;
+  --text-tertiary: #657b83;
+  --accent: #268bd2;
+  --accent-bright: #2aa198;
+  --accent-dim: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent) 30%, transparent);
+  --accent-ring-soft: color-mix(in srgb, var(--accent) 32%, transparent);
+  --accent-ring-strong: color-mix(in srgb, var(--accent) 50%, transparent);
+  --wiki-accent: #b58900;
+  --wiki-dim: color-mix(in srgb, var(--wiki-accent) 12%, transparent);
+  --wiki-ring: color-mix(in srgb, var(--wiki-accent) 32%, transparent);
+  --success: #859900;
+  --success-bright: #b5bd00;
+  --warning: #cb4b16;
+  --warning-bright: #ff8c69;
+  --danger: #dc322f;
+  --danger-text: #ffb4b0;
+  --neutral-indicator: #839496;
+  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
+  --gradient-danger: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--danger) 45%, #3b0a0a) 0%,
+    var(--danger) 100%
+  );
+  --chart-line-memory: var(--accent);
+  --chart-line-cpu: var(--wiki-accent);
+  --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 38%, #6c71c4);
+  --chart-line-gpu-util: color-mix(in srgb, var(--accent) 42%, var(--wiki-accent));
+  --chart-line-model: color-mix(in srgb, var(--wiki-accent) 40%, #d33682);
+  --chart-line-tok: var(--warning);
+  --chart-line-ctx: color-mix(in srgb, var(--warning) 38%, var(--wiki-accent));
+  --chart-line-latency: color-mix(in srgb, var(--wiki-accent) 35%, #2aa198);
+  --user-bubble: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 24%, rgba(7, 54, 66, 0.9)) 0%,
+    color-mix(in srgb, var(--wiki-accent) 14%, rgba(0, 43, 54, 0.88)) 100%
+  );
+  --assistant-bubble: rgba(7, 54, 66, 0.58);
+  --chrome-rgb: 0, 43, 54;
+  --panel-rgb: 7, 54, 66;
+  --chip-rgb: 12, 58, 70;
+  --scrollbar-track: rgba(255, 255, 255, 0.04);
+  --scrollbar-track-edge: rgba(255, 255, 255, 0.07);
+}
+
+html[data-color-scheme='cvd-rg-blue-amber'] {
+  color-scheme: dark;
+  --bg-deep: #0d1118;
+  --bg: rgba(16, 22, 32, 0.82);
+  --surface: rgba(22, 30, 44, 0.58);
+  --surface-elevated: rgba(28, 38, 54, 0.62);
+  --surface-hover: rgba(36, 48, 68, 0.68);
+  --border: rgba(200, 210, 240, 0.08);
+  --border-strong: rgba(200, 210, 240, 0.15);
+  --text: #e9eef8;
+  --text-secondary: #9aaccc;
+  --text-tertiary: #6b7a9a;
+  --accent: #4dabf7;
+  --accent-bright: #a5d8ff;
+  --accent-dim: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent) 32%, transparent);
+  --accent-ring-soft: color-mix(in srgb, var(--accent) 32%, transparent);
+  --accent-ring-strong: color-mix(in srgb, var(--accent) 52%, transparent);
+  --wiki-accent: #ffc947;
+  --wiki-dim: color-mix(in srgb, var(--wiki-accent) 12%, transparent);
+  --wiki-ring: color-mix(in srgb, var(--wiki-accent) 32%, transparent);
+  --success: #4dabf7;
+  --success-bright: #91caff;
+  --warning: #ffc947;
+  --warning-bright: #ffe066;
+  --danger: #da77f2;
+  --danger-text: #eebefa;
+  --neutral-indicator: #8a9ab8;
+  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
+  --gradient-danger: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--danger) 40%, #2d1048) 0%,
+    var(--danger) 100%
+  );
+  --chart-line-memory: var(--accent);
+  --chart-line-cpu: var(--wiki-accent);
+  --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 35%, #9775fa);
+  --chart-line-gpu-util: color-mix(in srgb, var(--accent) 42%, var(--wiki-accent));
+  --chart-line-model: color-mix(in srgb, var(--wiki-accent) 38%, #cc5de8);
+  --chart-line-tok: var(--warning);
+  --chart-line-ctx: color-mix(in srgb, var(--warning) 42%, var(--wiki-accent));
+  --chart-line-latency: color-mix(in srgb, var(--wiki-accent) 35%, var(--accent-bright));
+  --user-bubble: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 26%, rgba(18, 24, 36, 0.92)) 0%,
+    color-mix(in srgb, var(--wiki-accent) 14%, rgba(14, 18, 28, 0.9)) 100%
+  );
+  --assistant-bubble: rgba(22, 30, 44, 0.58);
+  --chrome-rgb: 16, 22, 34;
+  --panel-rgb: 22, 30, 44;
+  --chip-rgb: 30, 40, 58;
+  --scrollbar-track: rgba(255, 255, 255, 0.035);
+  --scrollbar-track-edge: rgba(255, 255, 255, 0.06);
+}
+
+html[data-color-scheme='cvd-by-violet-amber'] {
+  color-scheme: dark;
+  --bg-deep: #12101a;
+  --bg: rgba(24, 20, 36, 0.82);
+  --surface: rgba(32, 26, 48, 0.58);
+  --surface-elevated: rgba(40, 32, 58, 0.62);
+  --surface-hover: rgba(50, 40, 72, 0.68);
+  --border: rgba(220, 200, 255, 0.08);
+  --border-strong: rgba(220, 200, 255, 0.15);
+  --text: #f3f0fa;
+  --text-secondary: #b8a8d8;
+  --text-tertiary: #8a7aaa;
+  --accent: #cc5de8;
+  --accent-bright: #e599f7;
+  --accent-dim: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent) 30%, transparent);
+  --accent-ring-soft: color-mix(in srgb, var(--accent) 32%, transparent);
+  --accent-ring-strong: color-mix(in srgb, var(--accent) 52%, transparent);
+  --wiki-accent: #ffd43b;
+  --wiki-dim: color-mix(in srgb, var(--wiki-accent) 12%, transparent);
+  --wiki-ring: color-mix(in srgb, var(--wiki-accent) 32%, transparent);
+  --success: #51cf66;
+  --success-bright: #8ce99a;
+  --warning: #ff922b;
+  --warning-bright: #ffc078;
+  --danger: #ff6b6b;
+  --danger-text: #ffc9c9;
+  --neutral-indicator: #a894c4;
+  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
+  --gradient-danger: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--danger) 42%, #3a1010) 0%,
+    var(--danger) 100%
+  );
+  --chart-line-memory: var(--accent);
+  --chart-line-cpu: var(--wiki-accent);
+  --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 38%, #51cf66);
+  --chart-line-gpu-util: color-mix(in srgb, var(--accent) 42%, var(--wiki-accent));
+  --chart-line-model: color-mix(in srgb, var(--wiki-accent) 35%, #ff6b6b);
+  --chart-line-tok: var(--warning);
+  --chart-line-ctx: color-mix(in srgb, var(--warning) 40%, var(--wiki-accent));
+  --chart-line-latency: color-mix(in srgb, var(--wiki-accent) 35%, var(--accent-bright));
+  --user-bubble: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 26%, rgba(28, 22, 42, 0.92)) 0%,
+    color-mix(in srgb, var(--wiki-accent) 12%, rgba(20, 16, 32, 0.9)) 100%
+  );
+  --assistant-bubble: rgba(32, 26, 48, 0.58);
+  --chrome-rgb: 24, 20, 38;
+  --panel-rgb: 32, 26, 48;
+  --chip-rgb: 40, 32, 58;
+  --scrollbar-track: rgba(255, 255, 255, 0.035);
+  --scrollbar-track-edge: rgba(255, 255, 255, 0.06);
+}
