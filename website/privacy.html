@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy — Local LLM Desktop</title>
+    <meta
+      name="description"
+      content="How this static product site handles data. The desktop application stores chat and knowledge locally; optional third parties only when you use them."
+    />
+    <link rel="canonical" href="./privacy.html" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Privacy — Local LLM Desktop" />
+    <meta
+      property="og:image"
+      content="https://github.com/localllm/local-llm-desktop/raw/master/website/assets/og-image.png"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:image"
+      content="https://github.com/localllm/local-llm-desktop/raw/master/website/assets/og-image.png"
+    />
+    <link rel="icon" type="image/png" href="./assets/app-icon.png" />
+    <link rel="apple-touch-icon" href="./assets/app-icon.png" />
+    <link rel="stylesheet" href="./css/site.css" />
+  </head>
+  <body class="content-page">
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="bg-orb" aria-hidden="true"></div>
+    <div class="wrap">
+      <header class="site-nav">
+        <a class="brand" href="index.html">
+          <img class="brand-mark" src="./assets/app-icon.png" width="36" height="36" alt="" decoding="async" />
+          <span>Local LLM Desktop</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="documentation.html">Documentation</a>
+          <a href="pricing.html">Pricing</a>
+          <a href="download.html">Download</a>
+          <a href="download.html#tooling">Tooling</a>
+          <a href="license.html">License</a>
+          <a href="privacy.html" aria-current="page">Privacy</a>
+          <a class="nav-cta-secondary" href="pricing.html#contact">Commercial</a>
+          <a class="nav-cta" href="download.html">Get the app</a>
+        </nav>
+      </header>
+
+      <main class="prose">
+        <section class="hero">
+          <p class="section-label">Policy</p>
+          <h1>Privacy</h1>
+          <p class="hero-lead" style="margin: 0; text-align: left; max-width: none">
+            This page describes the <strong>marketing site</strong> (HTML in <code>website/</code>) and high-level notes
+            about the <strong>desktop app</strong>. It is not a substitute for your own compliance review.
+          </p>
+        </section>
+
+        <h2>This website</h2>
+        <p>
+          These pages are static files. <strong>We do not run first-party analytics, advertising trackers, or mandatory
+          cookies</strong> in the shipped HTML. When you open a page from disk (<code>file://</code>), no web server logs
+          are generated. When you host the folder on your own server, your hosting provider may log requests as usual.
+        </p>
+        <p>
+          Links to <strong>GitHub</strong> (downloads, source, licensing inquiries) are subject to
+          <a href="https://docs.github.com/site-policy/privacy-policies/github-privacy-statement">GitHub’s privacy
+          statement</a>. Fonts may load from <strong>Google Fonts</strong> via the stylesheet in
+          <code>site.css</code>; see <a href="https://policies.google.com/privacy">Google’s policy</a> if that applies to
+          your deployment.
+        </p>
+
+        <h2>The desktop application</h2>
+        <p>
+          Chat transcripts, knowledge base content, wiki, download metadata, and metrics samples are stored in a local
+          <strong>SQLite</strong> database in the app’s user data area on your machine. Model weights and converted files
+          live in directories you configure. See <a href="documentation.html#privacy">Documentation → Privacy</a> for
+          product behavior.
+        </p>
+        <p>
+          <strong>Hugging Face</strong> receives network requests when you search or download models in the app, under
+          your control. <strong>Ollama</strong> and <strong>llama.cpp</strong> are separate runtimes with their own
+          policies and update channels.
+        </p>
+
+        <h2>Commercial inquiries</h2>
+        <p>
+          If you open a GitHub issue for licensing, the content you submit is visible according to that repository’s
+          settings (public by default). Do not include secrets or personal data you are not comfortable sharing.
+        </p>
+
+        <h2>Changes</h2>
+        <p>
+          This text may be updated when the site adds analytics, embedded forms, or other data collection. The
+          <code>website/</code> folder in the repository is the source of truth.
+        </p>
+      </main>
+
+      <footer class="site-footer">
+        <span><a href="index.html">Home</a></span>
+        <span>
+          <a href="documentation.html">Documentation</a>
+          ·
+          <a href="pricing.html">Pricing</a>
+          ·
+          <a href="download.html">Download</a>
+          ·
+          <a href="license.html">License</a>
+        </span>
+      </footer>
+    </div>
+  </body>
+</html>

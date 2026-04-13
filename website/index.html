@@ -8,6 +8,29 @@
       name="description"
       content="Desktop app for private local LLM chat: Hugging Face downloads (GGUF and Safetensors with sidecars), Ollama or llama.cpp, RAG wiki with inline highlights, metrics widgets, accent themes, and optional LoRA training. PolyForm Noncommercial license."
     />
+    <link rel="canonical" href="./index.html" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Local LLM Desktop — local inference, Hugging Face, RAG wiki" />
+    <meta
+      property="og:description"
+      content="Private desktop shell for local LLM chat, Hugging Face model installs, RAG wiki with inline highlights, Ollama or llama.cpp, and optional LoRA training."
+    />
+    <meta
+      property="og:image"
+      content="https://github.com/localllm/local-llm-desktop/raw/master/website/assets/og-image.png"
+    />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Local LLM Desktop" />
+    <meta
+      name="twitter:description"
+      content="Local-first LLM desktop: Hugging Face, Ollama or llama.cpp, RAG wiki, metrics widgets."
+    />
+    <meta
+      name="twitter:image"
+      content="https://github.com/localllm/local-llm-desktop/raw/master/website/assets/og-image.png"
+    />
     <link rel="icon" type="image/png" href="./assets/app-icon.png" />
     <link rel="apple-touch-icon" href="./assets/app-icon.png" />
     <link rel="stylesheet" href="./css/site.css" />
@@ -23,9 +46,12 @@
         </a>
         <nav class="nav-links" aria-label="Primary">
           <a href="documentation.html">Documentation</a>
+          <a href="pricing.html">Pricing</a>
           <a href="download.html">Download</a>
           <a href="download.html#tooling">Tooling</a>
           <a href="license.html">License</a>
+          <a href="privacy.html">Privacy</a>
+          <a class="nav-cta-secondary" href="pricing.html#contact">Commercial</a>
           <a class="nav-cta" href="download.html">Get the app</a>
         </nav>
       </header>
@@ -43,6 +69,7 @@
           <div class="hero-actions">
             <a class="btn btn-primary" href="download.html">Download</a>
             <a class="btn btn-ghost" href="documentation.html">Read the docs</a>
+            <a class="btn btn-ghost" href="pricing.html">Pricing &amp; teams</a>
           </div>
           <ul class="hero-platforms" aria-label="Supported desktop platforms">
             <li><span class="platform-pill"><strong>Windows</strong> 10/11 · x64</span></li>
@@ -54,30 +81,36 @@
         <section class="showcase" aria-labelledby="showcase-heading">
           <h2 id="showcase-heading" class="visually-hidden">Product preview</h2>
           <div class="showcase-frame">
-            <img
-              src="./assets/screenshot-chat.svg"
-              width="1200"
-              height="720"
-              alt="Concept preview: chat layout with conversation list, message thread, composer, and knowledge sidebar in a dark glass UI."
-              decoding="async"
-              fetchpriority="high"
-            />
+            <picture>
+              <source srcset="./assets/screenshot-chat-1200.webp" type="image/webp" />
+              <img
+                src="./assets/screenshot-chat-1200.png"
+                width="1200"
+                height="720"
+                alt="Chat workspace: conversation list, message thread, composer, and knowledge sidebar in the dark glass UI."
+                decoding="async"
+                fetchpriority="high"
+              />
+            </picture>
           </div>
           <div class="showcase-caption">
             <strong>Chat workspace</strong>
-            <span>Concept art · replace with real captures for production</span>
+            <span>UI preview (marketing renders from product layout)</span>
           </div>
 
           <div class="shots">
             <figure class="shot-card">
               <div class="showcase-frame">
-                <img
-                  src="./assets/screenshot-models.svg"
-                  width="1200"
-                  height="720"
-                  alt="Concept preview: model library drawer with search, model cards, and download actions."
-                  decoding="async"
-                />
+                <picture>
+                  <source srcset="./assets/screenshot-models-1200.webp" type="image/webp" />
+                  <img
+                    src="./assets/screenshot-models-1200.png"
+                    width="1200"
+                    height="720"
+                    alt="Models hub: search, model cards, and download actions in the slide-over drawer."
+                    decoding="async"
+                  />
+                </picture>
               </div>
               <figcaption>
                 Model library — search the Hub, expandable rows, one-click download (GGUF or Safetensors), or Ollama pull
@@ -86,13 +119,16 @@
             </figure>
             <figure class="shot-card">
               <div class="showcase-frame">
-                <img
-                  src="./assets/screenshot-wiki.svg"
-                  width="1200"
-                  height="720"
-                  alt="Concept preview: wiki article view with topic list and knowledge graph panel."
-                  decoding="async"
-                />
+                <picture>
+                  <source srcset="./assets/screenshot-wiki-1200.webp" type="image/webp" />
+                  <img
+                    src="./assets/screenshot-wiki-1200.png"
+                    width="1200"
+                    height="720"
+                    alt="Knowledge: wiki article view with topic list and knowledge graph panel."
+                    decoding="async"
+                  />
+                </picture>
               </div>
               <figcaption>
                 Wiki &amp; graph — RAG-backed articles, glossary, knowledge graph, and wiki term highlights in chat with
@@ -101,13 +137,16 @@
             </figure>
             <figure class="shot-card">
               <div class="showcase-frame">
-                <img
-                  src="./assets/screenshot-chat.svg"
-                  width="1200"
-                  height="720"
-                  alt="Concept preview: same chat workspace emphasizing layout."
-                  decoding="async"
-                />
+                <picture>
+                  <source srcset="./assets/screenshot-chat-1200.webp" type="image/webp" />
+                  <img
+                    src="./assets/screenshot-chat-1200.png"
+                    width="1200"
+                    height="720"
+                    alt="Shell layout: navigation, runtime controls, and pinned widgets."
+                    decoding="async"
+                  />
+                </picture>
               </div>
               <figcaption>
                 Unified shell — bottom or side nav, runtime controls, pinned widgets (metrics, downloads, token
@@ -165,17 +204,92 @@
           </div>
         </section>
 
+        <section aria-labelledby="requirements-heading">
+          <p class="section-label">Requirements</p>
+          <h2 id="requirements-heading">What you need to run it</h2>
+          <p class="section-lead">
+            Prebuilt installers target desktop OSes below. You bring an inference backend; model size drives RAM and disk
+            more than the shell itself.
+          </p>
+          <div class="requirements-grid">
+            <div class="requirements-card">
+              <h3>Platform</h3>
+              <p>
+                <strong>Windows</strong> 10 or 11 (x64), <strong>macOS</strong> Intel or Apple silicon, or
+                <strong>Linux</strong> x64, matching the artifact you download.
+              </p>
+            </div>
+            <div class="requirements-card">
+              <h3>Inference backend</h3>
+              <p>
+                Install <strong>Ollama</strong> or <strong>llama.cpp</strong>
+                <code>llama-server</code> separately. The app switches between them from the top bar.
+              </p>
+            </div>
+            <div class="requirements-card">
+              <h3>Disk &amp; memory</h3>
+              <p>
+                Plan gigabytes per model on disk. Start around <strong>8&nbsp;GB</strong> system RAM for smaller models;
+                <strong>16&nbsp;GB+</strong> is more comfortable. GPU is optional; metrics can show NVIDIA memory when
+                available.
+              </p>
+            </div>
+            <div class="requirements-card">
+              <h3>Optional</h3>
+              <p>
+                Hugging Face <a href="https://huggingface.co/settings/tokens">token</a> for gated models and rate limits.
+                <strong>Python</strong> only if you use the optional local training workflow.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section aria-labelledby="faq-heading">
+          <p class="section-label">FAQ</p>
+          <h2 id="faq-heading">Common questions</h2>
+          <p class="section-lead">Licensing, privacy, and how the app talks to the outside world.</p>
+          <div class="faq-list">
+            <details>
+              <summary>When is use free versus commercial?</summary>
+              <p>
+                Noncommercial use is covered by the <strong>PolyForm Noncommercial License 1.0.0</strong> (personal use,
+                qualifying nonprofits, schools, government, and similar—see the license text). Deploying inside a company,
+                redistributing as part of a paid product, or other commercial use needs a
+                <a href="pricing.html">separate agreement</a>. When in doubt, ask before you ship.
+              </p>
+            </details>
+            <details>
+              <summary>Where does my data go?</summary>
+              <p>
+                Chat history, knowledge, wiki, and metrics samples live in a local <strong>SQLite</strong> database under
+                your user profile. Model files sit in the folder you configure. Core chat inference stays on your
+                machine; <strong>Hugging Face</strong> is contacted only for searches and downloads you start.
+              </p>
+            </details>
+            <details>
+              <summary>Do I need Ollama <em>and</em> llama.cpp?</summary>
+              <p>
+                No—pick one backend. Use <strong>Ollama</strong> for quick pulls from its registry, or
+                <strong>llama.cpp</strong> with your own <code>.gguf</code> paths. Safetensors installs may use a
+                one-time conversion step; see <a href="documentation.html">documentation</a>.
+              </p>
+            </details>
+          </div>
+        </section>
+
         <section aria-labelledby="license-teaser-heading">
           <p class="section-label">Licensing</p>
           <h2 id="license-teaser-heading">Free for you. Fair for teams.</h2>
           <p class="section-lead">
             The software is offered under the
-            <strong>PolyForm Noncommercial License 1.0.0</strong> plus terms naming
-            <strong>Cyril Grossenbacher</strong> as copyright holder: noncommercial use is free; commercial use needs a
-            separate agreement and fees. Read the full text on the license page before redistributing or deploying in a
-            business.
+            <strong>PolyForm Noncommercial License 1.0.0</strong> together with additional copyright notices in the
+            license file: noncommercial use is free; commercial use needs a separate agreement and fees. Read the full text
+            on the license page before redistributing or deploying in a business.
           </p>
-          <a class="btn btn-ghost" href="license.html">View license terms</a>
+          <div class="section-actions">
+            <a class="btn btn-ghost" href="license.html">View license terms</a>
+            <a class="btn btn-ghost" href="pricing.html">Commercial licensing</a>
+          </div>
         </section>
       </main>
 
@@ -184,24 +298,46 @@
         <span>
           <a href="documentation.html">Docs</a>
           ·
+          <a href="pricing.html">Pricing</a>
+          ·
           <a href="download.html">Download</a>
           ·
           <a href="license.html">License</a>
+          ·
+          <a href="privacy.html">Privacy</a>
         </span>
       </footer>
     </div>
-    <style>
-      .visually-hidden {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        padding: 0;
-        margin: -1px;
-        overflow: hidden;
-        clip: rect(0, 0, 0, 0);
-        white-space: nowrap;
-        border: 0;
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Local LLM Desktop",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Windows 10+, macOS, Linux x64",
+        "description": "Desktop app for private local LLM chat with Hugging Face model installs, Ollama or llama.cpp, RAG wiki, and optional LoRA training.",
+        "author": {
+          "@type": "Organization",
+          "name": "Local LLM Desktop"
+        },
+        "url": "https://github.com/localllm/local-llm-desktop",
+        "offers": [
+          {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD",
+            "name": "Noncommercial use",
+            "description": "PolyForm Noncommercial License 1.0.0 for qualifying noncommercial purposes.",
+            "url": "https://github.com/localllm/local-llm-desktop/blob/master/website/license.html"
+          },
+          {
+            "@type": "Offer",
+            "name": "Commercial license",
+            "description": "Separate written agreement and fees for commercial use, redistribution, or enterprise deployment. Contact via the pricing page.",
+            "url": "https://github.com/localllm/local-llm-desktop/blob/master/website/pricing.html"
+          }
+        ]
       }
-    </style>
+    </script>
   </body>
 </html>

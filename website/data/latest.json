@@ -1,0 +1,17 @@
+{
+  "version": "0.1.0",
+  "tag": "v0.1.0",
+  "repo": "localllm/local-llm-desktop",
+  "note": "Update tag, version, and filenames when you publish a GitHub release. Paths use electron-builder artifactName: Local LLM Desktop-${version}-…",
+  "files": {
+    "winSetup": "Local LLM Desktop-0.1.0-win-x64.exe",
+    "winZip": "Local LLM Desktop-0.1.0-win-x64.zip",
+    "macArmDmg": "Local LLM Desktop-0.1.0-mac-arm64.dmg",
+    "macX64Dmg": "Local LLM Desktop-0.1.0-mac-x64.dmg",
+    "macArmZip": "Local LLM Desktop-0.1.0-mac-arm64.zip",
+    "macX64Zip": "Local LLM Desktop-0.1.0-mac-x64.zip",
+    "linuxAppImage": "Local LLM Desktop-0.1.0-linux-x64.AppImage",
+    "linuxDeb": "Local LLM Desktop-0.1.0-linux-x64.deb",
+    "linuxZip": "Local LLM Desktop-0.1.0-linux-x64.zip"
+  }
+}

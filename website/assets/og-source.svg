@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <defs>
+    <linearGradient id="ogBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#030406"/>
+      <stop offset="55%" stop-color="#0a0c18"/>
+      <stop offset="100%" stop-color="#12152a"/>
+    </linearGradient>
+    <linearGradient id="ogOrb" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8b7cff" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#5ee1d3" stop-opacity="0.12"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#ogBg)"/>
+  <ellipse cx="920" cy="160" rx="320" ry="240" fill="url(#ogOrb)"/>
+  <text x="72" y="260" fill="#f0f2f8" font-family="system-ui, Segoe UI, sans-serif" font-size="52" font-weight="700">Local LLM Desktop</text>
+  <text x="72" y="330" fill="#8b92aa" font-family="system-ui, Segoe UI, sans-serif" font-size="26" font-weight="400">Private local inference, Hugging Face, RAG wiki</text>
+  <text x="72" y="390" fill="#5c6478" font-family="ui-monospace, Consolas, monospace" font-size="18">Windows, macOS, Linux</text>
+  <rect x="72" y="450" width="200" height="4" rx="2" fill="#8b7cff" opacity="0.85"/>
+</svg>
