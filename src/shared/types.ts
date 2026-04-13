@@ -79,7 +79,10 @@ export interface DownloadRow {
   /** Present while the file is actively downloading (merged from main-process job). */
   bytes_received?: number
   progress_percent?: number
-  /** Hugging Face model id (or custom label) stored when the file was downloaded; used as chat “author” when loaded. */
+  /**
+   * Human-readable label stored at download time (repo, Hub path / file, optional task type).
+   * Shown in download progress, Run → Hub downloads, and the top-bar file picker when it matches `local_path`.
+   */
   chat_display_name?: string
   /** HF file path inside the repo; used to rebuild the resolve URL when resuming. */
   hf_filename?: string
@@ -280,6 +283,8 @@ export interface RuntimeLoadProgress {
   message: string
   /** 0–100 when known (e.g. Ollama layer pull or GGUF upload). */
   percent?: number
+  /** Server health summary, llama-server stderr tail, conversion log, pull digest, etc. */
+  detail?: string
 }
 
 /** Main → renderer while a chat completion is streaming. */
