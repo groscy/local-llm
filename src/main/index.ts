@@ -130,6 +130,16 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', () => {
+  try {
+    const st = runtimeAdapter?.getStatus?.()
+    if (st?.running === true && st.modelPath?.trim() && (st.kind === 'ollama' || st.kind === 'llamacpp')) {
+      store.set('lastRuntimeModelPath', st.modelPath.trim())
+      store.set('lastRuntimeModelKind', st.kind)
+      store.set('resumeRuntimeOnLaunch', true)
+    }
+  } catch {
+    /* ignore */
+  }
   stopIntegrationServer()
 })
 
