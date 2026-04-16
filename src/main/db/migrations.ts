@@ -169,6 +169,21 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       );
       CREATE INDEX IF NOT EXISTS idx_message_prompt_domains_domain ON message_prompt_domains(domain_id);
     `
+  },
+  {
+    version: 9,
+    sql: `
+      ALTER TABLE train_jobs ADD COLUMN kb_source_ids_json TEXT;
+      ALTER TABLE train_jobs ADD COLUMN display_name TEXT;
+      ALTER TABLE train_jobs ADD COLUMN dataset_path TEXT;
+      ALTER TABLE train_jobs ADD COLUMN artifact_path TEXT;
+    `
+  },
+  {
+    version: 10,
+    sql: `
+      ALTER TABLE prompt_domains ADD COLUMN system_suffix TEXT;
+    `
   }
 ]
 
