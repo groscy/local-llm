@@ -338,8 +338,14 @@ export function getWikiPageBody(db: Database.Database, sourceId: string): string
   return chunks.map((c, i) => `## Section ${i + 1}${c.heading ? `: ${c.heading}` : ''}\n\n${c.text}`).join('\n\n---\n\n')
 }
 
-const GRAPH_MAX_CHUNKS_PER_SOURCE = 18
-const GRAPH_MAX_TOTAL_CHUNKS = 200
+/** Individual chunk nodes shown per source before a single “+N more” aggregate node. */
+const GRAPH_MAX_CHUNKS_PER_SOURCE = 16
+/** Hard cap on chunk-like nodes (real chunks + overflow badges) across the whole library. */
+const GRAPH_MAX_TOTAL_CHUNK_SLOTS = 1400
+/** Wiki page nodes included in the graph (rest still in KB; graph stays responsive). */
+const GRAPH_MAX_WIKI_NODES = 100
+/** Title-token “related” edges are O(n²); only computed among the first N sources. */
+const GRAPH_MAX_SOURCES_FOR_RELATED = 140
 
 function tokenizeTitle(title: string): string[] {
   const raw = title.toLowerCase().match(/[a-z0-9]{4,}/g)
@@ -359,7 +365,7 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
   const nodes: KnowledgeGraphNode[] = []
   const edges: KnowledgeGraphEdge[] = []
   let truncated = false
-  let chunksUsed = 0
+  let chunkSlotsUsed = 0
 
   for (const s of sources) {
     nodes.push({ id: s.id, kind: 'source', label: s.title })
@@ -370,13 +376,18 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
   )
 
   for (const s of sources) {
-    if (chunksUsed >= GRAPH_MAX_TOTAL_CHUNKS) {
+    if (chunkSlotsUsed >= GRAPH_MAX_TOTAL_CHUNK_SLOTS) {
       truncated = true
       break
     }
     const rows = chunkStmt.all(s.id) as { id: string; sourceId: string; ord: number; heading: string | null }[]
-    const cap = Math.min(GRAPH_MAX_CHUNKS_PER_SOURCE, GRAPH_MAX_TOTAL_CHUNKS - chunksUsed)
-    const slice = rows.slice(0, cap)
+    const room = GRAPH_MAX_TOTAL_CHUNK_SLOTS - chunkSlotsUsed
+    if (room <= 0) {
+      truncated = true
+      break
+    }
+    const perSourceCap = Math.min(GRAPH_MAX_CHUNKS_PER_SOURCE, room)
+    const slice = rows.slice(0, perSourceCap)
     if (rows.length > slice.length) truncated = true
     for (const r of slice) {
       const ordLabel = `#${r.ord + 1}`
@@ -392,11 +403,31 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
         sourceId: s.id
       })
       edges.push({ from: s.id, to: r.id, kind: 'contains' })
-      chunksUsed++
+      chunkSlotsUsed++
+    }
+    const omitted = rows.length - slice.length
+    if (omitted > 0 && chunkSlotsUsed < GRAPH_MAX_TOTAL_CHUNK_SLOTS) {
+      const overflowId = `kg-overflow:${s.id}`
+      nodes.push({
+        id: overflowId,
+        kind: 'chunk',
+        label: `+${omitted}`,
+        sublabel: 'chunks not drawn',
+        sourceId: s.id
+      })
+      edges.push({ from: s.id, to: overflowId, kind: 'contains' })
+      chunkSlotsUsed++
     }
   }
 
-  const wikiRows = db.prepare(`SELECT id, title FROM wiki_pages`).all() as { id: string; title: string }[]
+  const wikiRowsAll = db.prepare(`SELECT id, title FROM wiki_pages`).all() as { id: string; title: string }[]
+  const wikiRows =
+    wikiRowsAll.length > GRAPH_MAX_WIKI_NODES
+      ? (() => {
+          truncated = true
+          return wikiRowsAll.slice(0, GRAPH_MAX_WIKI_NODES)
+        })()
+      : wikiRowsAll
   for (const w of wikiRows) {
     nodes.push({ id: w.id, kind: 'wiki', label: w.title })
   }
@@ -406,8 +437,10 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
     .all() as { pageId: string; chunkId: string }[]
 
   const chunkIds = new Set(nodes.filter((n) => n.kind === 'chunk').map((n) => n.id))
+  const wikiNodeIds = new Set(wikiRows.map((w) => w.id))
   for (const l of linkRows) {
     if (!chunkIds.has(l.chunkId)) continue
+    if (!wikiNodeIds.has(l.pageId)) continue
     edges.push({ from: l.pageId, to: l.chunkId, kind: 'indexes' })
   }
 
@@ -425,8 +458,10 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
   for (const s of sources) {
     titleTokens.set(s.id, tokenizeTitle(s.title))
   }
-  for (let i = 0; i < sources.length; i++) {
-    for (let j = i + 1; j < sources.length; j++) {
+  const nRel = Math.min(sources.length, GRAPH_MAX_SOURCES_FOR_RELATED)
+  if (sources.length > GRAPH_MAX_SOURCES_FOR_RELATED) truncated = true
+  for (let i = 0; i < nRel; i++) {
+    for (let j = i + 1; j < nRel; j++) {
       const a = titleTokens.get(sources[i].id) ?? []
       const b = titleTokens.get(sources[j].id) ?? []
       if (a.length === 0 || b.length === 0) continue
