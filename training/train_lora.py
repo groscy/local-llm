@@ -26,11 +26,23 @@ def main() -> int:
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
 
+    dataset_path = Path(args.dataset)
+    line_count = 0
+    if dataset_path.is_file():
+        try:
+            line_count = sum(1 for _ in dataset_path.open("r", encoding="utf-8"))
+        except OSError:
+            line_count = 0
+
     manifest = {
         "base_model": args.base_model,
         "dataset": args.dataset,
+        "dataset_lines": line_count,
         "status": "stub",
-        "note": "Install torch, transformers, peft to run real QLoRA/LoRA training.",
+        "note": (
+            "Stub trainer: writes this manifest only. Install torch, transformers, peft (and merge to GGUF) "
+            "for real LoRA; place merged.gguf in the output folder so the app can register it under models/finetunes."
+        ),
     }
     (out / "adapter_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print("Wrote adapter_manifest.json to", out)
