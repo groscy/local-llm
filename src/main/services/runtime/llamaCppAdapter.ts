@@ -1,6 +1,10 @@
-import { spawn, type ChildProcess } from 'child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'child_process'
+import { existsSync } from 'fs'
 import path from 'node:path'
 import { logLine } from '../../logger'
+import { clampLlamaContextTokens, LLAMA_CONTEXT_TOKENS_DEFAULT } from '@shared/llamaContext'
+import { CHAT_MAX_COMPLETION_TOKENS_FALLBACK, clampChatMaxCompletionTokens } from '../chatMaxTokens'
+import { mergeChatAssistantStopSequences, truncateSimulatedUserContinuation } from '@shared/chatAssistantGuards'
 import { httpPostJson, httpPostStreamingResponse, httpRequestRaw } from '../httpLocal'
 import { processRssMb } from '../processMemory'
 import type { ChatMessage, RuntimeAdapter, RuntimeLoadProgress } from './types'
@@ -91,26 +95,62 @@ export class LlamaCppAdapter implements RuntimeAdapter {
   /** Shown in UI / status (user’s selected file when it differs from `modelPath`). */
   private displayModelPath = ''
   private lastError?: string
-  private stderrTail = ''
+  /** Combined stdout+stderr tail (many llama-server builds log load progress on stdout). */
+  private serverLogTail = ''
   private lastExitCode: number | null = null
+  /** Forward debounced process output to `onLoadProgress` while the model is loading (not after ready). */
+  private forwardStderrToUi = false
+  private stderrUiBatch = ''
+  private stderrUiFlushTimer: ReturnType<typeof setTimeout> | null = null
 
-  private appendStderr(chunk: string): void {
-    this.stderrTail = (this.stderrTail + chunk).slice(-12000)
+  private appendServerLog(chunk: string): void {
+    this.serverLogTail = (this.serverLogTail + chunk).slice(-24000)
   }
 
   private stripAnsi(s: string): string {
     return s.replace(/\x1b\[[0-9;]*m/g, '')
   }
 
-  /** Last few stderr lines for the load UI (llama-server logs tensor / layer progress here). */
-  private stderrDetailLines(maxLen = 640): string {
-    const raw = this.stripAnsi(this.stderrTail).trim()
+  /** Turn progress lines that use `\r` into newlines so chunks are visible in the UI. */
+  private normalizeServerChunk(s: string): string {
+    return this.stripAnsi(s.replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
+  }
+
+  private flushStderrUiBatch(report?: (e: RuntimeLoadProgress) => void, force = false): void {
+    if (this.stderrUiFlushTimer != null) {
+      clearTimeout(this.stderrUiFlushTimer)
+      this.stderrUiFlushTimer = null
+    }
+    const chunk = this.stderrUiBatch
+    this.stderrUiBatch = ''
+    if (chunk && report && (force || this.forwardStderrToUi)) {
+      report({ phase: 'load_log', message: chunk })
+    }
+  }
+
+  private queueStderrForUi(s: string, report?: (e: RuntimeLoadProgress) => void): void {
+    if (!this.forwardStderrToUi || !report) return
+    this.stderrUiBatch += s
+    if (this.stderrUiFlushTimer != null) return
+    this.stderrUiFlushTimer = setTimeout(() => {
+      this.stderrUiFlushTimer = null
+      const chunk = this.stderrUiBatch
+      this.stderrUiBatch = ''
+      if (chunk && this.forwardStderrToUi) {
+        report({ phase: 'load_log', message: chunk })
+      }
+    }, 50)
+  }
+
+  /** Last few process log lines for the load UI (tensor / layer progress). */
+  private serverLogDetailLines(maxLen = 1200): string {
+    const raw = this.normalizeServerChunk(this.serverLogTail).trim()
     if (!raw) return ''
     const lines = raw
-      .split(/\r?\n/)
+      .split(/\n/)
       .map((l) => l.trimEnd())
       .filter((l) => l.length > 0)
-    const pick = lines.slice(-8)
+    const pick = lines.slice(-14)
     const tail = pick.join('\n')
     return tail.length > maxLen ? tail.slice(-maxLen) : tail
   }
@@ -188,11 +228,13 @@ export class LlamaCppAdapter implements RuntimeAdapter {
   ): Promise<void> {
     const start = Date.now()
     let lastEmitAt = 0
+    let lastStatusLogAt = 0
+    let firstStatusLog = true
     /** Force first poll to publish so the UI updates immediately after spawn. */
     let lastDetailKey = '\x00'
     for (;;) {
       if (!this.proc) {
-        const tail = this.stderrTail.trim().slice(-1200)
+        const tail = this.serverLogTail.trim().slice(-1200)
         const code = this.lastExitCode
         throw new Error(
           `llama-server exited before the HTTP port was ready${code != null ? ` (exit ${code})` : ''}.` +
@@ -204,20 +246,21 @@ export class LlamaCppAdapter implements RuntimeAdapter {
       if (Date.now() >= deadline) {
         throw new Error(
           `llama-server did not become ready within ${Math.round(LLAMA_READY_TIMEOUT_MS / 1000)}s.` +
-            (this.stderrTail.trim() ? `\nRecent stderr:\n${this.stderrTail.trim().slice(-1200)}` : '')
+            (this.serverLogTail.trim() ? `\nRecent server output:\n${this.serverLogTail.trim().slice(-1200)}` : '')
         )
       }
       const elapsed = Date.now() - start
       const pct = Math.min(92, 28 + Math.round((elapsed / LLAMA_READY_TIMEOUT_MS) * 64))
-      const stderrBit = this.stderrDetailLines()
+      const logBit = this.serverLogDetailLines()
       const detailParts = [
-        info ? `Server: ${info}` : '',
-        stderrBit ? `llama-server:\n${stderrBit}` : ''
+        `Process pid ${this.proc.pid ?? '?'} · HTTP 127.0.0.1:${this.port}`,
+        info ? `Health / API: ${info}` : 'Health / API: (not responding yet — normal while weights load)',
+        logBit ? `Server log (stdout+stderr, last lines):\n${logBit}` : ''
       ].filter(Boolean)
-      const detail = detailParts.join('\n\n').slice(0, 1400)
-      const detailKey = `${info}|${stderrBit}`
+      const detail = detailParts.join('\n\n').slice(0, 2800)
+      const detailKey = `${info}|${logBit}`
       const now = Date.now()
-      if (detailKey !== lastDetailKey || now - lastEmitAt >= 2800) {
+      if (detailKey !== lastDetailKey || now - lastEmitAt >= 1400) {
         lastDetailKey = detailKey
         lastEmitAt = now
         const hint = info || `waiting for 127.0.0.1:${this.port}`
@@ -227,6 +270,16 @@ export class LlamaCppAdapter implements RuntimeAdapter {
           percent: pct,
           detail: detail || undefined
         })
+      }
+      if (firstStatusLog || now - lastStatusLogAt >= 1800) {
+        firstStatusLog = false
+        lastStatusLogAt = now
+        const statusLines = [
+          `── ${Math.round(elapsed / 1000)}s · pid ${this.proc.pid ?? '?'} · port ${this.port}`,
+          info ? `Health: ${info}` : 'Health: still waiting (connection refused or loading)',
+          logBit ? `Log tail:\n${logBit}` : '(no stdout/stderr lines captured yet — server may be quiet or still starting)'
+        ]
+        report?.({ phase: 'load_log', message: `${statusLines.join('\n')}\n\n` })
       }
       await new Promise((r) => setTimeout(r, LLAMA_READY_POLL_MS))
     }
@@ -238,11 +291,13 @@ export class LlamaCppAdapter implements RuntimeAdapter {
     displayModelPath?: string
     binaryPath?: string
     port?: number
+    /** Aligns server default `-n` with Settings → Max response tokens (HTTP still sends `max_tokens` each call). */
+    defaultPredictTokens?: number
+    /** `-c` KV context length; defaults if omitted. */
+    contextTokens?: number
     onLoadProgress?: (e: RuntimeLoadProgress) => void
   }): Promise<void> {
     await this.stop()
-    this.modelPath = opts.modelPath
-    this.displayModelPath = (opts.displayModelPath?.trim() || opts.modelPath).trim()
     this.port = opts.port ?? 8080
     const report = opts.onLoadProgress
     const bin = opts.binaryPath
@@ -250,44 +305,135 @@ export class LlamaCppAdapter implements RuntimeAdapter {
       this.lastError = 'llama-server binary path not configured'
       throw new Error(this.lastError)
     }
-    this.stderrTail = ''
+    const binResolved = path.resolve(String(bin).replace(/^file:\/\//i, ''))
+    if (!existsSync(binResolved)) {
+      this.lastError = `llama-server binary not found: ${binResolved}`
+      throw new Error(this.lastError)
+    }
+    const binDir = path.dirname(binResolved)
+    const modelResolved = path.resolve(String(opts.modelPath).replace(/^file:\/\//i, ''))
+    if (!existsSync(modelResolved)) {
+      this.lastError = `Model weights not found: ${modelResolved}`
+      throw new Error(this.lastError)
+    }
+    this.modelPath = modelResolved
+    this.displayModelPath = (opts.displayModelPath?.trim() || modelResolved).trim()
+    this.serverLogTail = ''
     this.lastExitCode = null
+    this.stderrUiBatch = ''
+    if (this.stderrUiFlushTimer != null) {
+      clearTimeout(this.stderrUiFlushTimer)
+      this.stderrUiFlushTimer = null
+    }
+    this.forwardStderrToUi = true
     report?.({ phase: 'spawn', message: 'Starting llama-server…', percent: 5 })
-    const args = ['-m', opts.modelPath, '--host', '127.0.0.1', '--port', String(this.port), '-c', '4096']
-    const child = spawn(bin, args, {
+    /** `--verbose` forces log lines over piped stdio (see llama.cpp server README). */
+    const nPredict =
+      typeof opts.defaultPredictTokens === 'number' && Number.isFinite(opts.defaultPredictTokens)
+        ? clampChatMaxCompletionTokens(opts.defaultPredictTokens)
+        : undefined
+    const ctx =
+      typeof opts.contextTokens === 'number' && Number.isFinite(opts.contextTokens)
+        ? clampLlamaContextTokens(opts.contextTokens)
+        : LLAMA_CONTEXT_TOKENS_DEFAULT
+    const args = [
+      '--verbose',
+      '-m',
+      modelResolved,
+      '--host',
+      '127.0.0.1',
+      '--port',
+      String(this.port),
+      '-c',
+      String(ctx),
+      ...(nPredict != null ? (['-n', String(nPredict)] as const) : [])
+    ]
+    const spawnOpts: SpawnOptions = {
       stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true
-    })
+      cwd: binDir,
+      env: { ...process.env },
+      /**
+       * Must stay `false` on Windows: `windowsHide: true` applies CREATE_NO_WINDOW, which often
+       * breaks piped stdout/stderr and DLL loading for CUDA llama-server builds next to the exe.
+       */
+      windowsHide: false
+    }
+    const child = spawn(binResolved, args, spawnOpts)
     this.proc = child
-    child.stderr?.on('data', (d) => {
-      const s = d.toString()
-      this.appendStderr(s)
-      logLine('info', 'llama_stderr', { chunk: s.slice(0, 200) })
+    const argDisplay = args.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')
+    report?.({
+      phase: 'load_log',
+      message:
+        `Launching llama-server\n` +
+        `  exe: ${binResolved}\n` +
+        `  cwd: ${binDir}\n` +
+        `  pid (initial): ${String(child.pid ?? 'not yet assigned')}\n` +
+        `  ${path.basename(binResolved)} ${argDisplay}\n` +
+        `  API → http://127.0.0.1:${this.port}\n\n`
+    })
+    const onChunk = (stream: 'stdout' | 'stderr', d: Buffer | string): void => {
+      const s = typeof d === 'string' ? d : d.toString('utf8')
+      this.appendServerLog(s)
+      const cleaned = this.normalizeServerChunk(s)
+      if (cleaned.trim()) this.queueStderrForUi(cleaned, report)
+      logLine('info', stream === 'stderr' ? 'llama_stderr' : 'llama_stdout', { chunk: s.slice(0, 200) })
+    }
+    child.stdout?.on('data', (d) => onChunk('stdout', d))
+    child.stderr?.on('data', (d) => onChunk('stderr', d))
+    child.on('spawn', () => {
+      report?.({
+        phase: 'load_log',
+        message: `Spawn event · pid=${String(child.pid ?? '?')} (stdio pipes attached)\n\n`
+      })
     })
     child.on('error', (e) => {
       this.lastError = e.message
       logLine('error', 'llama_spawn_error', { error: e.message })
+      report?.({ phase: 'load_log', message: `\n[spawn error] ${e.message}\n\n` })
     })
     child.on('exit', (code) => {
       this.lastExitCode = code
       logLine('info', 'llama_exit', { code })
+      this.flushStderrUiBatch(report, true)
+      this.forwardStderrToUi = false
       this.proc = null
     })
-    const ext = path.extname(opts.modelPath).toLowerCase()
+    const ext = path.extname(modelResolved).toLowerCase()
     const weightKind =
       ext === '.gguf' ? 'GGUF' : ext === '.safetensors' || ext === '.safetensor' ? 'Safetensors' : 'model'
     report?.({
       phase: 'load',
       message: `Loading ${weightKind} weights into memory — server will accept chat when ready (may take several minutes for large files)…`,
       percent: 22,
-      detail: `Model file:\n${this.displayModelPath || opts.modelPath}`
+      detail: `Model file:\n${this.displayModelPath || modelResolved}`
     })
+    await new Promise((r) => setTimeout(r, 120))
+    if (child.exitCode != null || child.signalCode != null) {
+      const tail = this.serverLogTail.trim().slice(-2400)
+      throw new Error(
+        `llama-server exited immediately (code ${child.exitCode}, signal ${child.signalCode ?? 'none'}).` +
+          (tail
+            ? `\nCaptured output:\n${tail}`
+            : '\nNo output was captured. Copy the command from the log and run it in Command Prompt to see the error.') +
+          (process.platform === 'win32'
+            ? '\nTip: CUDA builds need matching GPU drivers; the working directory is set to the folder containing the exe so bundled DLLs load.'
+            : '')
+      )
+    }
     const deadline = Date.now() + LLAMA_READY_TIMEOUT_MS
     await this.waitUntilLlamaReady(deadline, report)
+    this.forwardStderrToUi = false
+    this.flushStderrUiBatch(report, true)
     report?.({ phase: 'ready', message: 'llama-server is ready.', percent: 100 })
   }
 
   async stop(): Promise<void> {
+    this.forwardStderrToUi = false
+    this.stderrUiBatch = ''
+    if (this.stderrUiFlushTimer != null) {
+      clearTimeout(this.stderrUiFlushTimer)
+      this.stderrUiFlushTimer = null
+    }
     if (this.proc) {
       this.proc.kill('SIGTERM')
       this.proc = null
@@ -311,8 +457,21 @@ export class LlamaCppAdapter implements RuntimeAdapter {
       maxTokens?: number
       onStreamChunk?: (text: string) => void
       onStreamUsage?: (u: { promptTokens?: number; completionTokens?: number }) => void
+      ollamaModel?: string
+      ollamaBaseUrl?: string
+      skipDefaultAntiSelfPromptStops?: boolean
+      extraStopSequences?: string[]
+      temperature?: number
+      topP?: number
+      frequencyPenalty?: number
+      presencePenalty?: number
     }
   ): Promise<string> {
+    if (opts?.ollamaModel?.trim() || opts?.ollamaBaseUrl?.trim()) {
+      throw new Error(
+        'This runtime is llama.cpp — parallel workers cannot target different Ollama models. Switch to Ollama in Run, or turn off multi-model agents.'
+      )
+    }
     if (!this.proc) {
       throw new Error(
         'llama-server is not running (the process exited or was stopped). Open Run, then Start the llama.cpp runtime again.'
@@ -320,6 +479,25 @@ export class LlamaCppAdapter implements RuntimeAdapter {
     }
     const url = `http://127.0.0.1:${this.port}/v1/chat/completions`
     const stream = Boolean(opts?.onStreamChunk)
+    const stop = mergeChatAssistantStopSequences({
+      skipDefaultAntiSelfPromptStops: opts?.skipDefaultAntiSelfPromptStops,
+      extraStopSequences: opts?.extraStopSequences
+    })
+    const stopBody = stop && stop.length > 0 ? { stop } : {}
+    const samp: Record<string, number> = {}
+    if (typeof opts?.temperature === 'number' && Number.isFinite(opts.temperature)) {
+      samp.temperature = opts.temperature
+    }
+    if (typeof opts?.topP === 'number' && Number.isFinite(opts.topP)) {
+      samp.top_p = opts.topP
+    }
+    if (typeof opts?.frequencyPenalty === 'number' && Number.isFinite(opts.frequencyPenalty)) {
+      samp.frequency_penalty = opts.frequencyPenalty
+    }
+    if (typeof opts?.presencePenalty === 'number' && Number.isFinite(opts.presencePenalty)) {
+      samp.presence_penalty = opts.presencePenalty
+    }
+    const samplingBody = Object.keys(samp).length > 0 ? samp : {}
     try {
       if (!stream) {
         const { statusCode, json, raw } = await httpPostJson<{
@@ -331,8 +509,10 @@ export class LlamaCppAdapter implements RuntimeAdapter {
           {
             model: 'gpt-3.5-turbo',
             messages,
-            max_tokens: opts?.maxTokens ?? 512,
-            stream: false
+            max_tokens: opts?.maxTokens ?? CHAT_MAX_COMPLETION_TOKENS_FALLBACK,
+            stream: false,
+            ...stopBody,
+            ...samplingBody
           },
           600_000
         )
@@ -358,15 +538,17 @@ export class LlamaCppAdapter implements RuntimeAdapter {
             })
           }
         }
-        return text
+        return truncateSimulatedUserContinuation(text)
       }
 
       const streamOpts = opts!
       const body = JSON.stringify({
         model: 'gpt-3.5-turbo',
         messages,
-        max_tokens: streamOpts.maxTokens ?? 512,
-        stream: true
+        max_tokens: streamOpts.maxTokens ?? CHAT_MAX_COMPLETION_TOKENS_FALLBACK,
+        stream: true,
+        ...stopBody,
+        ...samplingBody
       })
       const sse = new SseChatBuffer(streamOpts.onStreamUsage)
       const onDelta = streamOpts.onStreamChunk!
@@ -388,7 +570,7 @@ export class LlamaCppAdapter implements RuntimeAdapter {
       if (!acc.trim()) {
         throw new Error(`Unexpected llama.cpp stream response: ${tail.slice(0, 300)}`)
       }
-      return acc
+      return truncateSimulatedUserContinuation(acc)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       if (msg.includes('Nothing is listening')) {

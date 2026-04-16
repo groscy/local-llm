@@ -149,6 +149,75 @@ function envWithBundledGgufOnPythonPath(base: NodeJS.ProcessEnv): NodeJS.Process
   }
 }
 
+/** Same env the convert script uses (vendored `gguf` on PYTHONPATH when present). */
+function convertChildEnv(): NodeJS.ProcessEnv {
+  return { ...envWithBundledGgufOnPythonPath(process.env), PYTHONUNBUFFERED: '1' }
+}
+
+/**
+ * True when the interpreter can import the pip-installed stack used by convert_hf_to_gguf.py.
+ * (Does not import `gguf`; that comes from PYTHONPATH for the bundled layout.)
+ */
+function probeConvertPipImports(python: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      python,
+      ['-c', 'import transformers; import torch; import yaml; import sentencepiece'],
+      { stdio: 'ignore', windowsHide: true, env: convertChildEnv() }
+    )
+    child.on('error', () => resolve(false))
+    child.on('close', (code) => resolve(code === 0))
+  })
+}
+
+/**
+ * Install vendored requirements so convert_hf_to_gguf.py can run (fixes ModuleNotFoundError: transformers, etc.).
+ */
+function pipInstallConvertRequirements(
+  python: string,
+  requirementsPath: string,
+  onProgress?: (e: { phase: string; message: string; percent?: number; detail?: string }) => void
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const args = ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', requirementsPath]
+    logLine('info', 'safetensors_gguf_pip_install_spawn', { python, requirementsPath })
+    const child = spawn(python, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      env: convertChildEnv()
+    })
+    let tail = ''
+    const bumpTail = (buf: Buffer): void => {
+      tail = (tail + buf.toString()).slice(-6000)
+      const lines = tail.trim().split(/\r?\n/).filter((x) => x.trim())
+      const last = lines[lines.length - 1]
+      if (last) {
+        onProgress?.({
+          phase: 'convert',
+          message: last.trim().slice(0, 200),
+          percent: 6,
+          detail: lines.slice(-8).join('\n').slice(-1400)
+        })
+      }
+    }
+    child.stdout?.on('data', bumpTail)
+    child.stderr?.on('data', bumpTail)
+    child.on('error', (e) => reject(e))
+    child.on('close', (code) => {
+      if (code === 0) {
+        logLine('info', 'safetensors_gguf_pip_install_ok', { python })
+        resolve()
+        return
+      }
+      reject(
+        new Error(
+          `pip install for HF→GGUF failed (exit ${code ?? '?'}). ${tail.trim().slice(-2000) || 'No output.'} Try manually: "${python}" -m pip install -r "${requirementsPath}"`
+        )
+      )
+    })
+  })
+}
+
 export function resolveConvertScriptPath(opts: {
   llamaBinaryPath?: string
   /** When the active binary came from PATH, still try walking from these paths (e.g. Settings value). */
@@ -300,7 +369,27 @@ export async function ensureGgufForSafetensorsModelPath(opts: {
       percent: 8,
       detail: `Input folder:\n${modelDir}\nOutput:\n${out}`
     })
-  mkdirSync(dirname(out), { recursive: true })
+    mkdirSync(dirname(out), { recursive: true })
+  const reqPath = bundledConvertRequirementsPath()
+  if (reqPath) {
+    const depsOk = await probeConvertPipImports(python)
+    if (!depsOk) {
+      opts.onProgress?.({
+        phase: 'convert',
+        message:
+          'Installing Python packages for Safetensors→GGUF (transformers, torch, …). First run only; may take several minutes.',
+        percent: 5,
+        detail: `${python}\n-r "${reqPath}"`
+      })
+      await pipInstallConvertRequirements(python, reqPath, opts.onProgress)
+      const after = await probeConvertPipImports(python)
+      if (!after) {
+        throw new Error(
+          `Python still cannot import transformers/torch after pip install. Check the interpreter in Settings → AI engine (${python}) and run: "${python}" -m pip install -r "${reqPath}"`
+        )
+      }
+    }
+  }
   const args = [script, modelDir, '--outfile', out, '--outtype', 'f16']
   logLine('info', 'safetensors_gguf_convert_spawn', { python, modelDir, out })
   await new Promise<void>((promiseResolve, promiseReject) => {
@@ -308,7 +397,7 @@ export async function ensureGgufForSafetensorsModelPath(opts: {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       cwd: dirname(script),
-      env: { ...envWithBundledGgufOnPythonPath(process.env), PYTHONUNBUFFERED: '1' }
+      env: convertChildEnv()
     })
     let errTail = ''
     let lastDetailAt = 0

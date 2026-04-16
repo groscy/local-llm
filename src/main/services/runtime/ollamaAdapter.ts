@@ -1,6 +1,8 @@
 import { createHash } from 'crypto'
 import { createReadStream, existsSync } from 'fs'
 import path from 'path'
+import { CHAT_MAX_COMPLETION_TOKENS_FALLBACK } from '../chatMaxTokens'
+import { mergeChatAssistantStopSequences, truncateSimulatedUserContinuation } from '@shared/chatAssistantGuards'
 import { logLine } from '../../logger'
 import {
   httpPostFileStream,
@@ -207,6 +209,8 @@ export class OllamaAdapter implements RuntimeAdapter {
     displayModelPath?: string
     binaryPath?: string
     port?: number
+    defaultPredictTokens?: number
+    contextTokens?: number
     onLoadProgress?: (e: RuntimeLoadProgress) => void
   }): Promise<void> {
     const trimmed = opts.modelPath.trim()
@@ -385,10 +389,40 @@ export class OllamaAdapter implements RuntimeAdapter {
       maxTokens?: number
       onStreamChunk?: (text: string) => void
       onStreamUsage?: (u: { promptTokens?: number; completionTokens?: number }) => void
+      ollamaModel?: string
+      ollamaBaseUrl?: string
+      skipDefaultAntiSelfPromptStops?: boolean
+      extraStopSequences?: string[]
+      temperature?: number
+      topP?: number
+      frequencyPenalty?: number
+      presencePenalty?: number
     }
   ): Promise<string> {
-    const url = `${this.baseUrl}/api/chat`
+    const model = (opts?.ollamaModel?.trim() || this.modelName).trim()
+    if (!model) throw new Error('Ollama model name is missing for this chat request.')
+    const base = (opts?.ollamaBaseUrl?.trim() || this.baseUrl).replace(/\/$/, '')
+    const url = `${base}/api/chat`
     const stream = Boolean(opts?.onStreamChunk)
+    const stop = mergeChatAssistantStopSequences({
+      skipDefaultAntiSelfPromptStops: opts?.skipDefaultAntiSelfPromptStops,
+      extraStopSequences: opts?.extraStopSequences
+    })
+    const predict = opts?.maxTokens ?? CHAT_MAX_COMPLETION_TOKENS_FALLBACK
+    const ollamaOptions: Record<string, unknown> =
+      stop && stop.length > 0 ? { num_predict: predict, stop } : { num_predict: predict }
+    if (typeof opts?.temperature === 'number' && Number.isFinite(opts.temperature)) {
+      ollamaOptions.temperature = opts.temperature
+    }
+    if (typeof opts?.topP === 'number' && Number.isFinite(opts.topP)) {
+      ollamaOptions.top_p = opts.topP
+    }
+    if (typeof opts?.frequencyPenalty === 'number' && Number.isFinite(opts.frequencyPenalty)) {
+      ollamaOptions.frequency_penalty = opts.frequencyPenalty
+    }
+    if (typeof opts?.presencePenalty === 'number' && Number.isFinite(opts.presencePenalty)) {
+      ollamaOptions.presence_penalty = opts.presencePenalty
+    }
     try {
       if (!stream) {
         const { statusCode, json, raw } = await httpPostJson<{
@@ -399,10 +433,10 @@ export class OllamaAdapter implements RuntimeAdapter {
         }>(
           url,
           {
-            model: this.modelName,
+            model,
             messages,
             stream: false,
-            options: { num_predict: opts?.maxTokens ?? 512 }
+            options: ollamaOptions
           },
           600_000
         )
@@ -425,7 +459,7 @@ export class OllamaAdapter implements RuntimeAdapter {
             completionTokens: typeof ct === 'number' ? ct : undefined
           })
         }
-        return content
+        return truncateSimulatedUserContinuation(content)
       }
 
       let full = ''
@@ -433,10 +467,10 @@ export class OllamaAdapter implements RuntimeAdapter {
       const { statusCode, errorText } = await httpPostNdjsonStream({
         url,
         jsonBody: {
-          model: this.modelName,
+          model,
           messages,
           stream: true,
-          options: { num_predict: opts?.maxTokens ?? 512 }
+          options: ollamaOptions
         },
         timeoutMs: 600_000,
         onObject: (obj) => {
@@ -467,7 +501,7 @@ export class OllamaAdapter implements RuntimeAdapter {
       if (!full.trim()) {
         throw new Error('Ollama returned an empty streamed reply')
       }
-      return full
+      return truncateSimulatedUserContinuation(full)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       if (msg.includes('Nothing is listening')) {
