@@ -27,12 +27,31 @@ import type {
   WikiRelatedSource,
   WikiSourceKind,
   WikiTopic,
-  PromptDomainRow
+  PromptDomainRow,
+  KbSource,
+  TrainJob,
+  MessageRow,
+  MessageAppendResponse
 } from '@shared/types'
+import { MAX_PROMPT_DOMAIN_SUFFIX_CHARS } from '@shared/promptDomains'
 import { hfResolveRevision, pickPrimaryHubWeightFile } from '@shared/hfGgufPick'
 import { hubWeightDownloadPathSet } from '@shared/hfDownloadBundle'
 import { DEFAULT_OLLAMA_MODEL_TAG } from '@shared/defaultRuntimeModel'
+import {
+  clampLlamaContextTokens,
+  LLAMA_CONTEXT_TOKENS_DEFAULT,
+  LLAMA_CONTEXT_TOKENS_MAX,
+  LLAMA_CONTEXT_TOKENS_MIN
+} from '@shared/llamaContext'
 import { evaluateModelForHardware } from '@shared/modelHardwareFit'
+import {
+  AGENT_PLANNER_MAX_TOKENS,
+  AGENT_WORKER_MAX_TOKENS,
+  buildAgentPlannerSystemPrompt,
+  buildSynthesisMessages,
+  buildWorkerMessages,
+  parseAgentPlanFromModelReply
+} from '@shared/agenticChat'
 import type { ColorSchemeId } from '@shared/colorScheme'
 import {
   COLOR_SCHEME_IDS,
@@ -42,17 +61,28 @@ import {
 } from '@shared/colorScheme'
 import {
   appendJournalTexts,
+  CHAT_MINIMAL_SYSTEM_PROMPT,
   defaultModelProfile,
   loadModelProfile,
   mergePersonalityPatches,
   MODEL_PROFILE_SYSTEM_PROMPT,
+  RAG_GROUNDING_INSTRUCTION,
   profileStorageKey,
   saveModelProfile,
+  stripChatAssistantVisibleMarkers,
   stripModelProfileMarkers,
   stripPartialProfileStreamTail,
+  userMessageInvitesModelPersonality,
   type ModelProfile,
   type ModelPersonalityVibe
 } from '@shared/modelPersonality'
+import {
+  chatHistoryMaxMessagesFromConfig,
+  estimatePromptTokensFromChars,
+  promptLikelyExceedsContext,
+  ragReplyMissingSnippetCitations,
+  sliceChatHistoryMessages
+} from '@shared/chatContextBudget'
 import { DownloadProgressBar, downloadRowProgressPct, fileNameFromPath, formatBytes } from './downloadProgressUi'
 import { ActivityPinnedWidget, type ActivityChatTokens } from './ActivityPinnedWidget'
 import type { ActivityTokenHistoryPoint } from './ActivityTokenSessionChart'
@@ -60,6 +90,8 @@ import { ChatRichContent } from './ChatRichContent'
 import { DownloadsPinnedWidget } from './DownloadsPinnedWidget'
 import { FloatingDots } from './FloatingDots'
 import { ModelPresenceBackdrop } from './ModelPresenceBackdrop'
+import { PresenceWakeOverlay } from './PresenceWakeOverlay'
+import { touchPresenceSessionHidden } from './presenceSession'
 import { MetricsTimeSeries } from './MetricsTimeSeries'
 import { IssuesPinnedWidget } from './IssuesPinnedWidget'
 import { MetricsPinnedWidget } from './MetricsPinnedWidget'
@@ -81,6 +113,23 @@ function WikiEntryRemoveButton(props: { ariaLabel: string; onPress: () => void }
       <i className="fa-solid fa-trash-can" aria-hidden />
     </button>
   )
+}
+
+const PRESENCE_WAKE_SHOWN_SESSION_KEY = 'localLlm:presenceWakeShown:v1'
+const AUTO_RESUME_ONCE_SESSION_KEY = 'localLlm:autoResumeOnce:v1'
+
+const LLAMA_LOAD_LOG_MAX_CHARS = 250_000
+const LS_LLAMA_CONSOLE_EXPANDED = 'llamaLoadConsoleExpanded'
+const LS_LLAMA_CONSOLE_HEIGHT_PX = 'llamaLoadConsoleHeightPx'
+const LLAMA_CONSOLE_H_MIN = 64
+const LLAMA_CONSOLE_H_DEFAULT = 168
+const LLAMA_CONSOLE_H_MAX_CAP = 560
+
+function clampLlamaConsoleHeight(h: number): number {
+  const max = Math.min(LLAMA_CONSOLE_H_MAX_CAP, Math.floor(window.innerHeight * 0.62))
+  const lo = Math.min(LLAMA_CONSOLE_H_MIN, max)
+  if (!Number.isFinite(h)) return Math.min(LLAMA_CONSOLE_H_DEFAULT, max)
+  return Math.min(max, Math.max(lo, Math.round(h)))
 }
 
 const WIKI_KIND_ORDER: WikiSourceKind[] = ['document', 'extracted_note', 'saved_chat', 'other']
@@ -266,7 +315,7 @@ function clampPinnedHeight(px: number): number {
 
 const CHAT_MAX_TOKENS_MIN = 1
 const CHAT_MAX_TOKENS_MAX = 262_144
-const CHAT_MAX_TOKENS_DEFAULT = 512
+const CHAT_MAX_TOKENS_DEFAULT = 4096
 
 function clampChatMaxTokens(n: number): number {
   if (!Number.isFinite(n)) return CHAT_MAX_TOKENS_DEFAULT
@@ -301,6 +350,9 @@ function humanizeChatError(raw: string): string {
   }
   if (/nothing is listening/i.test(stripped)) {
     return 'The AI engine did not answer. Make sure the model is started (play button) and wait until it is ready. Open Run to check setup.'
+  }
+  if (/exceed_context_size_error|exceeds the available context size/i.test(stripped)) {
+    return 'The prompt is larger than llama-server’s context window. Open Settings → Data → llama.cpp server, increase “Context size (tokens)”, then stop and start the model in Run (or shorten the chat / RAG snippets).'
   }
   if (stripped.length > 0 && stripped.length < 420) return stripped
   return raw
@@ -377,6 +429,8 @@ type LlamaEnvInfo = {
   detected: boolean
   resolvedPath: string
   configuredValid: boolean
+  binaryValid: boolean
+  validateError: string | null
 }
 
 type OllamaHostStatus = {
@@ -530,7 +584,7 @@ function charTokenEst(s: string): number {
   return Math.max(1, Math.ceil(s.length / 4))
 }
 
-type UserPromptReceipt = { delivered: boolean; responseStarted: boolean }
+type UserPromptReceipt = { delivered: boolean; responseStarted: boolean; failed?: boolean }
 
 function userMessageReceiptKey(cid: string | null, m: ChatMessageVm): string | undefined {
   if (!cid || m.role !== 'user') return undefined
@@ -544,8 +598,9 @@ function userMessageReceiptKey(cid: string | null, m: ChatMessageVm): string | u
 function UserPromptReceiptMarks(props: { receipt: UserPromptReceipt | undefined }): ReactElement | null {
   const r = props.receipt
   if (!r) return null
-  const label =
-    r.delivered && r.responseStarted
+  const label = r.failed
+    ? 'The model did not finish a reply for this prompt.'
+    : r.delivered && r.responseStarted
       ? 'Prompt reached the model and the reply has started.'
       : r.delivered
         ? 'Prompt reached the model; waiting for the first reply tokens.'
@@ -553,15 +608,28 @@ function UserPromptReceiptMarks(props: { receipt: UserPromptReceipt | undefined 
   return (
     <span className="msg-prompt-receipts" role="status" aria-label={label}>
       <i
-        className={`fa-solid fa-check msg-prompt-receipt${r.delivered ? ' msg-prompt-receipt--on' : ''}`}
+        className={`fa-solid fa-check msg-prompt-receipt${r.delivered && !r.failed ? ' msg-prompt-receipt--on' : ''}`}
         aria-hidden
       />
       <i
-        className={`fa-solid fa-check msg-prompt-receipt${r.responseStarted ? ' msg-prompt-receipt--on' : ''}`}
+        className={`fa-solid fa-check msg-prompt-receipt${r.responseStarted && !r.failed ? ' msg-prompt-receipt--on' : ''}`}
         aria-hidden
       />
     </span>
   )
+}
+
+function userMessageShowsRetry(
+  m: ChatMessageVm,
+  index: number,
+  messages: ChatMessageVm[],
+  receipt: UserPromptReceipt | undefined,
+  chatSending: boolean
+): boolean {
+  if (m.role !== 'user' || chatSending) return false
+  if (receipt?.failed) return true
+  if (messages[index + 1]?.role === 'assistant') return false
+  return index === messages.length - 1
 }
 
 function bubbleTokenLine(m: ChatMessageVm): string {
@@ -625,6 +693,20 @@ function localModelPathsEqual(a: string, b: string, winPlatform: boolean): boole
   const na = a.trim().replace(/\\/g, '/')
   const nb = b.trim().replace(/\\/g, '/')
   return winPlatform ? na.toLowerCase() === nb.toLowerCase() : na === nb
+}
+
+/** Derive how to start the runtime from the selected model string (Ollama tag vs local weight path). */
+function inferRuntimeKindForModelSelection(
+  sel: string,
+  localPaths: readonly string[],
+  winPlatform: boolean
+): 'ollama' | 'llamacpp' {
+  const t = sel.trim()
+  if (!t) return 'ollama'
+  if (localPaths.some((p) => localModelPathsEqual(p, t, winPlatform))) return 'llamacpp'
+  if (looksLikeLocalModelFilePath(t)) return 'llamacpp'
+  if (/\.(gguf|safetensors?)$/i.test(t)) return 'llamacpp'
+  return 'ollama'
 }
 
 /** True if `want` matches an Ollama tags list entry (exact tag, same base name, or `want:` prefix). */
@@ -734,27 +816,20 @@ function renderHfHubHardwareFitCell(m: HfModelSummary, hw: HardwareSummary | nul
   )
 }
 
-function hfInstalledSizeDisplay(
-  m: HfModelSummary,
-  runtimeKind: 'ollama' | 'llamacpp',
-  localDownloads: readonly DownloadRow[]
-): string {
-  if (runtimeKind === 'llamacpp') {
-    const rows = localDownloads.filter((r) => r.repo_id === m.id && r.status === 'complete')
-    const sum = rows.reduce((acc, r) => acc + (Number(r.bytes_total) || 0), 0)
-    if (sum > 0) return formatBytes(sum)
-  }
+function hfInstalledSizeDisplay(m: HfModelSummary, localDownloads: readonly DownloadRow[]): string {
+  const rows = localDownloads.filter((r) => r.repo_id === m.id && r.status === 'complete')
+  const sum = rows.reduce((acc, r) => acc + (Number(r.bytes_total) || 0), 0)
+  if (sum > 0) return formatBytes(sum)
   return hfSummarySizeDisplay(m)
 }
 
-/** Bytes for column sort: installed + llama.cpp uses summed completed download sizes when present. */
+/** Bytes for column sort: installed list prefers summed completed download sizes when present. */
 function hfSizeBytesForTableSort(
   m: HfModelSummary,
-  runtimeKind: 'ollama' | 'llamacpp',
   localDownloads: readonly DownloadRow[],
   installedList: boolean
 ): number {
-  if (installedList && runtimeKind === 'llamacpp') {
+  if (installedList) {
     const rows = localDownloads.filter((r) => r.repo_id === m.id && r.status === 'complete')
     const sum = rows.reduce((acc, r) => acc + (Number(r.bytes_total) || 0), 0)
     if (sum > 0) return sum
@@ -970,6 +1045,11 @@ export default function App(): React.ReactElement {
   const [destDir, setDestDir] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [welcomeModalOpen, setWelcomeModalOpen] = useState(false)
+  const [presenceWakeConfigReady, setPresenceWakeConfigReady] = useState(false)
+  const [presenceWakeOpen, setPresenceWakeOpen] = useState(false)
+  const [wakeBackdropIntensity, setWakeBackdropIntensity] = useState(0)
+  const [wakeChromeReveal, setWakeChromeReveal] = useState(false)
+  const [resumeRuntimeOnLaunch, setResumeRuntimeOnLaunch] = useState(false)
 
   const [runtimeKind, setRuntimeKind] = useState<'llamacpp' | 'ollama'>('ollama')
   const [modelPath, setModelPath] = useState(DEFAULT_OLLAMA_MODEL_TAG)
@@ -1000,12 +1080,16 @@ export default function App(): React.ReactElement {
     )
   }, [localModelFilePaths, modelPath, winPlatform])
 
+  const inferredModelRuntimeKind = useMemo(
+    () => inferRuntimeKindForModelSelection(modelPath, localModelFilePaths, winPlatform),
+    [modelPath, localModelFilePaths, winPlatform]
+  )
+
   /** Include the runtime’s model when it isn’t in the scanned folder list yet. */
   const topBarLlamaModelPathOptions = useMemo(() => {
     const base = localModelFilePaths
     const loaded =
       runtimeStatus?.running &&
-      runtimeKind === 'llamacpp' &&
       runtimeStatus?.kind === 'llamacpp' &&
       runtimeStatus.modelPath?.trim()
         ? runtimeStatus.modelPath.trim()
@@ -1013,35 +1097,32 @@ export default function App(): React.ReactElement {
     if (!loaded) return base
     if (base.some((p) => localModelPathsEqual(p, loaded, winPlatform))) return base
     return [loaded, ...base]
-  }, [
-    localModelFilePaths,
-    runtimeStatus?.running,
-    runtimeStatus?.kind,
-    runtimeStatus?.modelPath,
-    runtimeKind,
-    winPlatform
-  ])
+  }, [localModelFilePaths, runtimeStatus?.running, runtimeStatus?.kind, runtimeStatus?.modelPath, winPlatform])
 
   /** Include the loaded Ollama tag when it isn’t returned by list yet, and the draft tag (e.g. default fallback). */
   const topBarOllamaModelOptions = useMemo(() => {
     const base = ollamaChatTags
     const loaded =
       runtimeStatus?.running &&
-      runtimeKind === 'ollama' &&
       runtimeStatus?.kind === 'ollama' &&
       runtimeStatus.modelPath?.trim()
         ? runtimeStatus.modelPath.trim()
         : ''
     const draft =
-      !runtimeStatus?.running && runtimeKind === 'ollama' && modelPath.trim() ? modelPath.trim() : ''
-    let out = base
+      !runtimeStatus?.running &&
+      modelPath.trim() &&
+      inferRuntimeKindForModelSelection(modelPath, localModelFilePaths, winPlatform) === 'ollama'
+        ? modelPath.trim()
+        : ''
+    let out = [...base]
     if (loaded && !out.includes(loaded)) out = [loaded, ...out]
     if (draft && !out.includes(draft)) out = [draft, ...out]
     return out
   }, [
     modelPath,
+    localModelFilePaths,
+    winPlatform,
     ollamaChatTags,
-    runtimeKind,
     runtimeStatus?.kind,
     runtimeStatus?.modelPath,
     runtimeStatus?.running
@@ -1050,29 +1131,27 @@ export default function App(): React.ReactElement {
   const runtimeOn = Boolean(runtimeStatus?.running)
 
   const topBarModelSelectValue = useMemo(() => {
-    const cur = modelPath.trim()
-    if (runtimeKind === 'llamacpp') {
-      if (runtimeOn && runtimeStatus?.modelPath?.trim()) {
-        const loaded = runtimeStatus.modelPath.trim()
+    if (runtimeOn && runtimeStatus?.modelPath?.trim()) {
+      const mp = runtimeStatus.modelPath.trim()
+      if (runtimeStatus.kind === 'llamacpp') {
         for (const p of topBarLlamaModelPathOptions) {
-          if (localModelPathsEqual(p, loaded, winPlatform)) return p
+          if (localModelPathsEqual(p, mp, winPlatform)) return p
         }
-        return loaded
+        return mp
       }
-      return matchedLocalModelPath || ''
+      return mp
     }
-    if (runtimeKind === 'ollama') {
-      if (runtimeOn && runtimeStatus?.modelPath?.trim()) {
-        return runtimeStatus.modelPath.trim()
-      }
-      return cur && topBarOllamaModelOptions.includes(cur) ? cur : ''
-    }
+    const cur = modelPath.trim()
+    if (!cur) return ''
+    if (topBarOllamaModelOptions.includes(cur)) return cur
+    if (matchedLocalModelPath) return matchedLocalModelPath
+    if (topBarLlamaModelPathOptions.some((p) => localModelPathsEqual(p, cur, winPlatform))) return cur
     return ''
   }, [
-    runtimeKind,
     matchedLocalModelPath,
     modelPath,
     runtimeOn,
+    runtimeStatus?.kind,
     runtimeStatus?.modelPath,
     topBarLlamaModelPathOptions,
     topBarOllamaModelOptions,
@@ -1080,25 +1159,31 @@ export default function App(): React.ReactElement {
   ])
 
   useEffect(() => {
+    const k = inferRuntimeKindForModelSelection(modelPath, localModelFilePaths, winPlatform)
+    setRuntimeKind((prev) => (prev === k ? prev : k))
+  }, [modelPath, localModelFilePaths, winPlatform])
+
+  useEffect(() => {
     setLocalGgufDeleteMarks([])
     setOllamaDeleteMarks([])
   }, [runtimeKind])
 
-  const localModelDefaultSyncRef = useRef<{ kind: typeof runtimeKind; localLen: number }>({
-    kind: runtimeKind,
+  const localModelDefaultSyncRef = useRef<{ kind: 'ollama' | 'llamacpp'; localLen: number }>({
+    kind: 'ollama',
     localLen: 0
   })
 
   useEffect(() => {
+    const kind = inferRuntimeKindForModelSelection(modelPath, localModelFilePaths, winPlatform)
     const prev = localModelDefaultSyncRef.current
-    const switchedToLlama = prev.kind !== 'llamacpp' && runtimeKind === 'llamacpp'
+    const switchedToLlama = prev.kind !== 'llamacpp' && kind === 'llamacpp'
     const listBecameAvailable = prev.localLen === 0 && localModelFilePaths.length > 0
     localModelDefaultSyncRef.current = {
-      kind: runtimeKind,
+      kind,
       localLen: localModelFilePaths.length
     }
 
-    if (runtimeKind !== 'llamacpp') return
+    if (kind !== 'llamacpp') return
     if (runtimeStatus?.running) return
     const files = localModelFilePaths
     if (files.length === 0) return
@@ -1114,10 +1199,10 @@ export default function App(): React.ReactElement {
     if (cur) {
       setModelPath(files[0])
     }
-  }, [runtimeKind, localModelFilePaths, paths?.platform, modelPath, runtimeStatus?.running])
+  }, [modelPath, localModelFilePaths, paths?.platform, runtimeStatus?.running, winPlatform])
 
   useEffect(() => {
-    if (runtimeKind !== 'ollama') return
+    if (inferRuntimeKindForModelSelection(modelPath, localModelFilePaths, winPlatform) !== 'ollama') return
     if (ollamaChatTagsLoading) return
 
     const tags = ollamaChatTags
@@ -1134,29 +1219,29 @@ export default function App(): React.ReactElement {
     if (loaded && cur === loaded) return
     if (runtimeStatus?.running) return
     setModelPath(tags[0])
-  }, [runtimeKind, ollamaChatTags, ollamaChatTagsLoading, modelPath, runtimeStatus?.running, runtimeStatus?.modelPath])
+  }, [
+    localModelFilePaths,
+    winPlatform,
+    ollamaChatTags,
+    ollamaChatTagsLoading,
+    modelPath,
+    runtimeStatus?.running,
+    runtimeStatus?.modelPath
+  ])
 
   /** Keep the model field aligned with the running server so the top-bar list shows the loaded model. */
   useEffect(() => {
     if (!runtimeStatus?.running || !runtimeStatus.modelPath?.trim()) return
     if (runtimeStatus.kind !== 'ollama' && runtimeStatus.kind !== 'llamacpp') return
-    if (runtimeStatus.kind !== runtimeKind) return
     const mp = runtimeStatus.modelPath.trim()
     const cur = modelPath.trim()
-    if (runtimeKind === 'llamacpp') {
+    if (runtimeStatus.kind === 'llamacpp') {
       if (localModelPathsEqual(cur, mp, winPlatform)) return
     } else if (cur === mp) {
       return
     }
     setModelPath(mp)
-  }, [
-    runtimeStatus?.running,
-    runtimeStatus?.modelPath,
-    runtimeStatus?.kind,
-    runtimeKind,
-    modelPath,
-    winPlatform
-  ])
+  }, [runtimeStatus?.running, runtimeStatus?.modelPath, runtimeStatus?.kind, modelPath, winPlatform])
 
   const [conversations, setConversations] = useState<{ id: string; title: string }[]>([])
   const [convId, setConvId] = useState<string | null>(null)
@@ -1182,6 +1267,7 @@ export default function App(): React.ReactElement {
 
   const [wikiTopics, setWikiTopics] = useState<WikiTopic[]>([])
   const [promptDomains, setPromptDomains] = useState<PromptDomainRow[]>([])
+  const [promptDomainSuffixDrafts, setPromptDomainSuffixDrafts] = useState<Record<string, string>>({})
   const [wikiHighlightTerms, setWikiHighlightTerms] = useState<WikiChatHighlightTerm[]>([])
   const [wikiBody, setWikiBody] = useState('')
   const [wikiTitle, setWikiTitle] = useState('')
@@ -1197,6 +1283,13 @@ export default function App(): React.ReactElement {
   const wikiSearchSeqRef = useRef(0)
   const [kgPayload, setKgPayload] = useState<KnowledgeGraphPayload | null>(null)
   const [kgLoading, setKgLoading] = useState(false)
+  const [kgAnalysisBusy, setKgAnalysisBusy] = useState(false)
+  const [kgAnalysisError, setKgAnalysisError] = useState<string | null>(null)
+  const [kgAnalysisSummary, setKgAnalysisSummary] = useState<string | null>(null)
+  const [kgAnalysisMarkdown, setKgAnalysisMarkdown] = useState<string | null>(null)
+  const [kgAnalysisIngestedId, setKgAnalysisIngestedId] = useState<string | null>(null)
+  /** After switching from Chat to Wiki, scroll the knowledge graph section into view. */
+  const [wikiKgScrollPending, setWikiKgScrollPending] = useState(false)
 
   const [metricsBundle, setMetricsBundle] = useState<{
     snapshot: unknown
@@ -1227,13 +1320,19 @@ export default function App(): React.ReactElement {
   const [hfOllamaPullRepoId, setHfOllamaPullRepoId] = useState<string | null>(null)
   const [hfOllamaPullBusy, setHfOllamaPullBusy] = useState(false)
   const [hfOllamaPullProgress, setHfOllamaPullProgress] = useState<RuntimeLoadProgress | null>(null)
-  const [trainJobs, setTrainJobs] = useState<unknown[]>([])
+  const [trainJobs, setTrainJobs] = useState<TrainJob[]>([])
   const [trainBase, setTrainBase] = useState('')
   const [trainDataset, setTrainDataset] = useState('')
+  const [trainKbSources, setTrainKbSources] = useState<KbSource[]>([])
+  const [trainKbSelected, setTrainKbSelected] = useState<Record<string, boolean>>({})
+  const [trainDisplayName, setTrainDisplayName] = useState('')
+  const [trainStartBusy, setTrainStartBusy] = useState(false)
   const [hfTokenInput, setHfTokenInput] = useState('')
   const [colorScheme, setColorScheme] = useState<ColorSchemeId>(DEFAULT_COLOR_SCHEME)
   const [chatMaxTokensDraft, setChatMaxTokensDraft] = useState(String(CHAT_MAX_TOKENS_DEFAULT))
   const [wikiAutoExtract, setWikiAutoExtract] = useState(true)
+  const [agenticWorkersEnabled, setAgenticWorkersEnabled] = useState(false)
+  const [agentRemoteOllamaUrlDraft, setAgentRemoteOllamaUrlDraft] = useState('')
   const [integrationListenEnabled, setIntegrationListenEnabled] = useState(false)
   const [integrationPortDraft, setIntegrationPortDraft] = useState(String(INTEGRATION_PORT_DEFAULT))
   const [integrationTokenDraft, setIntegrationTokenDraft] = useState('')
@@ -1249,6 +1348,20 @@ export default function App(): React.ReactElement {
   const [settingsNav, setSettingsNav] = useState<SettingsNavId>('general')
   const [ollamaBaseUrlDraft, setOllamaBaseUrlDraft] = useState(OLLAMA_BASE_DEFAULT)
   const [llamaPortDraft, setLlamaPortDraft] = useState(String(LLAMA_PORT_DEFAULT))
+  const [llamaContextTokensDraft, setLlamaContextTokensDraft] = useState(
+    String(LLAMA_CONTEXT_TOKENS_DEFAULT)
+  )
+  /** Empty string = use global Chat → Max response tokens for llama.cpp. */
+  const [llamaChatMaxTokensDraft, setLlamaChatMaxTokensDraft] = useState('')
+  const [chatHistoryMaxMessagesDraft, setChatHistoryMaxMessagesDraft] = useState('80')
+  const [chatDomainEnhancement, setChatDomainEnhancement] = useState(false)
+  const [llamaRagGrounding, setLlamaRagGrounding] = useState(false)
+  const [llamaTemperatureDraft, setLlamaTemperatureDraft] = useState('0.8')
+  const [llamaTopPDraft, setLlamaTopPDraft] = useState('0.95')
+  const [llamaFrequencyPenaltyDraft, setLlamaFrequencyPenaltyDraft] = useState('0')
+  const [llamaPresencePenaltyDraft, setLlamaPresencePenaltyDraft] = useState('0')
+  /** Non-blocking notices for this send (context budget, history trim, RAG citations). */
+  const [chatTurnNotice, setChatTurnNotice] = useState<string | null>(null)
   const [hfDownloadJobs, setHfDownloadJobs] = useState<Record<string, HfCardDownloadState>>({})
   const hfDownloadJobsRef = useRef(hfDownloadJobs)
   hfDownloadJobsRef.current = hfDownloadJobs
@@ -1340,6 +1453,7 @@ export default function App(): React.ReactElement {
       setSlideKbWidthPx((w) => clampSlideKb(w))
       setPinnedWidgetsWidthPx((w) => clampPinnedWidth(w))
       setPinnedWidgetsHeightPx((h) => clampPinnedHeight(h))
+      setLlamaLoadConsoleHeightPx((h) => clampLlamaConsoleHeight(h))
     }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
@@ -1507,6 +1621,26 @@ export default function App(): React.ReactElement {
   const [activityPinned, setActivityPinned] = useState(false)
   const [issuesPinned, setIssuesPinned] = useState(false)
   const [runtimeLoadProgress, setRuntimeLoadProgress] = useState<RuntimeLoadProgress | null>(null)
+  const [runtimeLoadLog, setRuntimeLoadLog] = useState('')
+  const [llamaLoadConsoleExpanded, setLlamaLoadConsoleExpanded] = useState(() => {
+    try {
+      return window.localStorage.getItem(LS_LLAMA_CONSOLE_EXPANDED) !== '0'
+    } catch {
+      return true
+    }
+  })
+  const [llamaLoadConsoleHeightPx, setLlamaLoadConsoleHeightPx] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(LS_LLAMA_CONSOLE_HEIGHT_PX)
+      const n = raw ? parseInt(raw, 10) : LLAMA_CONSOLE_H_DEFAULT
+      return clampLlamaConsoleHeight(n)
+    } catch {
+      return clampLlamaConsoleHeight(LLAMA_CONSOLE_H_DEFAULT)
+    }
+  })
+  const [llamaConsoleResizing, setLlamaConsoleResizing] = useState(false)
+  const llamaConsoleResizeRef = useRef<{ startY: number; startH: number } | null>(null)
+  const llamaLoadConsoleRef = useRef<HTMLPreElement | null>(null)
   const [runtimeStarting, setRuntimeStarting] = useState(false)
   const [chatSending, setChatSending] = useState(false)
   const [userPromptReceipts, setUserPromptReceipts] = useState<
@@ -1546,19 +1680,6 @@ export default function App(): React.ReactElement {
   useEffect(() => {
     setUserPromptReceipts({})
   }, [convId])
-
-  const migrateUserPromptReceipt = useCallback((cid: string, userSentAt: number, messageId: string) => {
-    const oldK = `${cid}:t:${userSentAt}`
-    const newK = `${cid}:${messageId}`
-    setUserPromptReceipts((prev) => {
-      const v = prev[oldK]
-      if (!v) return prev
-      const next = { ...prev }
-      delete next[oldK]
-      next[newK] = v
-      return next
-    })
-  }, [])
 
   useEffect(() => {
     const generation = ++composerSuggestGenRef.current
@@ -1674,6 +1795,16 @@ export default function App(): React.ReactElement {
   }, [])
 
   useEffect(() => {
+    setPromptDomainSuffixDrafts((prev) => {
+      const n = { ...prev }
+      for (const d of promptDomains) {
+        if (!(d.id in n)) n[d.id] = d.systemSuffix
+      }
+      return n
+    })
+  }, [promptDomains])
+
+  useEffect(() => {
     const q = wikiSearchQuery.trim()
     if (mainView !== 'wiki') return
     if (!q) {
@@ -1735,8 +1866,14 @@ export default function App(): React.ReactElement {
     setRagSuggestActive(-1)
   }, [ragQuery, ragSuggestHits])
 
-  const loadKnowledgeGraph = useCallback(async () => {
+  const loadKnowledgeGraph = useCallback(async (opts?: { keepAnalysis?: boolean }) => {
     setKgLoading(true)
+    if (!opts?.keepAnalysis) {
+      setKgAnalysisError(null)
+      setKgAnalysisSummary(null)
+      setKgAnalysisMarkdown(null)
+      setKgAnalysisIngestedId(null)
+    }
     try {
       const d = await window.api.kbKnowledgeGraph()
       setKgPayload(d)
@@ -1746,6 +1883,67 @@ export default function App(): React.ReactElement {
       setKgLoading(false)
     }
   }, [])
+
+  const runKnowledgeGraphAnalysis = useCallback(
+    async (opts: { ingestReport: boolean }) => {
+      setKgAnalysisBusy(true)
+      setKgAnalysisError(null)
+      if (!opts.ingestReport) {
+        setKgAnalysisIngestedId(null)
+      }
+      try {
+        const r = await window.api.kbGraphAnalysisRun(opts)
+        if (!r.ok) {
+          setKgAnalysisError(r.error)
+          return
+        }
+        setKgAnalysisSummary(r.result.summary)
+        setKgAnalysisMarkdown(r.markdown)
+        setKgAnalysisIngestedId(r.ingestedSourceId ?? null)
+        if (opts.ingestReport && r.ingestedSourceId) {
+          await loadWiki()
+          await loadKnowledgeGraph({ keepAnalysis: true })
+        }
+      } catch (e) {
+        setKgAnalysisError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setKgAnalysisBusy(false)
+      }
+    },
+    [loadKnowledgeGraph, loadWiki]
+  )
+
+  const focusKnowledgeGraphSection = useCallback((): void => {
+    const el = document.getElementById('wiki-knowledge-graph-heading')
+    el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    if (el instanceof HTMLElement) {
+      el.focus({ preventScroll: true })
+    }
+  }, [])
+
+  const openKnowledgeGraph = useCallback(() => {
+    void loadKnowledgeGraph()
+    if (mainView !== 'wiki') {
+      setMainView('wiki')
+      void loadWiki()
+      setWikiKgScrollPending(true)
+    } else {
+      window.setTimeout(() => focusKnowledgeGraphSection(), 50)
+    }
+  }, [mainView, loadWiki, loadKnowledgeGraph, focusKnowledgeGraphSection])
+
+  useLayoutEffect(() => {
+    if (!wikiKgScrollPending || mainView !== 'wiki') return
+    const t = window.setTimeout(() => {
+      focusKnowledgeGraphSection()
+      setWikiKgScrollPending(false)
+    }, 120)
+    return () => window.clearTimeout(t)
+  }, [wikiKgScrollPending, mainView, focusKnowledgeGraphSection])
+
+  useEffect(() => {
+    if (mainView !== 'wiki') setWikiKgScrollPending(false)
+  }, [mainView])
 
   useEffect(() => {
     if (mainView === 'wiki') {
@@ -1789,7 +1987,9 @@ export default function App(): React.ReactElement {
       setLlamaEnv({
         detected: c.llamaDetected,
         resolvedPath: c.llamaResolvedPath || '',
-        configuredValid: c.llamaConfiguredPathValid
+        configuredValid: c.llamaConfiguredPathValid,
+        binaryValid: c.llamaBinaryValid ?? false,
+        validateError: c.llamaValidateError ?? null
       })
       setOllamaHost({ reachable: c.ollamaReachable, baseUrl: c.ollamaBase })
     },
@@ -1872,18 +2072,9 @@ export default function App(): React.ReactElement {
     setWelcomeModalOpen(true)
   }, [])
 
-  const applyRuntimeKindSetting = useCallback(
-    async (kind: 'ollama' | 'llamacpp') => {
-      setRuntimeKind(kind)
-      await window.api.setConfig({ runtimeKind: kind })
-      void refreshRunDrawerQuick()
-    },
-    [refreshRunDrawerQuick]
-  )
-
   const saveLlamaBinaryFromSettings = useCallback(async () => {
     await window.api.setConfig({ llamaBinaryPath: llamaBin.trim() })
-    void refreshRunDrawerQuick()
+    await refreshRunDrawerQuick()
   }, [llamaBin, refreshRunDrawerQuick])
 
   const refreshOllamaChatTags = useCallback(async () => {
@@ -2045,11 +2236,70 @@ export default function App(): React.ReactElement {
     void refreshOllamaChatTags()
   }, [ollamaHost?.reachable, refreshOllamaChatTags])
 
+  const persistLlamaConsoleExpanded = useCallback((open: boolean) => {
+    setLlamaLoadConsoleExpanded(open)
+    try {
+      window.localStorage.setItem(LS_LLAMA_CONSOLE_EXPANDED, open ? '1' : '0')
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
   useEffect(() => {
     return window.api.onRuntimeLoadProgress((p) => {
+      if (p.phase === 'load_log' && p.message) {
+        setRuntimeLoadLog((prev) => {
+          const next = prev + p.message
+          return next.length > LLAMA_LOAD_LOG_MAX_CHARS
+            ? next.slice(-LLAMA_LOAD_LOG_MAX_CHARS)
+            : next
+        })
+        return
+      }
       setRuntimeLoadProgress(p)
     })
   }, [])
+
+  useEffect(() => {
+    if (!runtimeLoadLog || !llamaLoadConsoleRef.current) return
+    const el = llamaLoadConsoleRef.current
+    el.scrollTop = el.scrollHeight
+  }, [runtimeLoadLog, llamaLoadConsoleExpanded])
+
+  useEffect(() => {
+    if (!llamaConsoleResizing) return
+    const onMove = (e: PointerEvent): void => {
+      const r = llamaConsoleResizeRef.current
+      if (!r) return
+      const next = clampLlamaConsoleHeight(r.startH + (e.clientY - r.startY))
+      setLlamaLoadConsoleHeightPx(next)
+    }
+    const onUp = (): void => {
+      setLlamaLoadConsoleHeightPx((h) => {
+        const c = clampLlamaConsoleHeight(h)
+        try {
+          window.localStorage.setItem(LS_LLAMA_CONSOLE_HEIGHT_PX, String(c))
+        } catch {
+          /* ignore */
+        }
+        return c
+      })
+      setLlamaConsoleResizing(false)
+      llamaConsoleResizeRef.current = null
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp, true)
+    window.addEventListener('pointercancel', onUp, true)
+    document.body.style.cursor = 'ns-resize'
+    document.body.style.userSelect = 'none'
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp, true)
+      window.removeEventListener('pointercancel', onUp, true)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [llamaConsoleResizing])
 
   useEffect(() => {
     return window.api.onOllamaPullProgress((p) => {
@@ -2223,12 +2473,22 @@ export default function App(): React.ReactElement {
         setChatMaxTokensDraft(String(clampChatMaxTokens(c.chatMaxTokens)))
       }
       setWikiAutoExtract(c.wikiAutoExtract !== false)
+      if (typeof c.agenticWorkersEnabled === 'boolean') setAgenticWorkersEnabled(c.agenticWorkersEnabled)
+      if (typeof c.agentRemoteOllamaUrl === 'string') setAgentRemoteOllamaUrlDraft(c.agentRemoteOllamaUrl)
       if (typeof c.integrationListenEnabled === 'boolean') setIntegrationListenEnabled(c.integrationListenEnabled)
       if (typeof c.integrationPort === 'number') {
         setIntegrationPortDraft(String(clampIntegrationPort(c.integrationPort)))
       }
       if (typeof c.integrationToken === 'string') setIntegrationTokenDraft(c.integrationToken)
-      if (c.runtimeKind === 'ollama' || c.runtimeKind === 'llamacpp') setRuntimeKind(c.runtimeKind)
+      const lrPath = typeof c.lastRuntimeModelPath === 'string' ? c.lastRuntimeModelPath.trim() : ''
+      const lrKind =
+        c.lastRuntimeModelKind === 'ollama' || c.lastRuntimeModelKind === 'llamacpp'
+          ? c.lastRuntimeModelKind
+          : null
+      if (lrPath) setModelPath(lrPath)
+      if (lrKind) setRuntimeKind(lrKind)
+      else if (c.runtimeKind === 'ollama' || c.runtimeKind === 'llamacpp') setRuntimeKind(c.runtimeKind)
+      setResumeRuntimeOnLaunch(c.resumeRuntimeOnLaunch === true)
       const wv = c.welcomeGuideVersion
       const welcomeSeen = typeof wv === 'number' && wv >= WELCOME_GUIDE_LATEST
       if (!welcomeSeen) setWelcomeModalOpen(true)
@@ -2242,10 +2502,82 @@ export default function App(): React.ReactElement {
       } else {
         setLlamaPortDraft(String(LLAMA_PORT_DEFAULT))
       }
+      if (typeof c.llamaContextTokens === 'number') {
+        setLlamaContextTokensDraft(String(clampLlamaContextTokens(c.llamaContextTokens)))
+      } else {
+        setLlamaContextTokensDraft(String(LLAMA_CONTEXT_TOKENS_DEFAULT))
+      }
+      if (typeof c.llamaChatMaxTokens === 'number') {
+        setLlamaChatMaxTokensDraft(String(clampChatMaxTokens(c.llamaChatMaxTokens)))
+      } else {
+        setLlamaChatMaxTokensDraft('')
+      }
+      if (typeof c.chatHistoryMaxMessages === 'number') {
+        setChatHistoryMaxMessagesDraft(String(chatHistoryMaxMessagesFromConfig(c.chatHistoryMaxMessages)))
+      } else {
+        setChatHistoryMaxMessagesDraft(String(chatHistoryMaxMessagesFromConfig(undefined)))
+      }
+      setChatDomainEnhancement(c.chatDomainEnhancement === true)
+      setLlamaRagGrounding(c.llamaRagGrounding === true)
+      if (typeof c.llamaTemperature === 'number') setLlamaTemperatureDraft(String(c.llamaTemperature))
+      if (typeof c.llamaTopP === 'number') setLlamaTopPDraft(String(c.llamaTopP))
+      if (typeof c.llamaFrequencyPenalty === 'number') {
+        setLlamaFrequencyPenaltyDraft(String(c.llamaFrequencyPenalty))
+      }
+      if (typeof c.llamaPresencePenalty === 'number') {
+        setLlamaPresencePenaltyDraft(String(c.llamaPresencePenalty))
+      }
       if (typeof c.llamaConvertScriptPath === 'string') setLlamaConvertScriptPath(c.llamaConvertScriptPath)
       if (typeof c.llamaPythonPath === 'string') setLlamaPythonPath(c.llamaPythonPath)
     })
+      .finally(() => {
+        setPresenceWakeConfigReady(true)
+      })
   }, [refreshPaths, loadConversations, loadWiki, refreshRuntimeStatus, applyRuntimeInstallPaths])
+
+  useEffect(() => {
+    const onVis = (): void => {
+      if (document.visibilityState === 'hidden') touchPresenceSessionHidden()
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
+
+  useEffect(() => {
+    if (!presenceWakeConfigReady || welcomeModalOpen) return
+    try {
+      if (sessionStorage.getItem(PRESENCE_WAKE_SHOWN_SESSION_KEY)) return
+    } catch {
+      return
+    }
+    setPresenceWakeOpen(true)
+  }, [presenceWakeConfigReady, welcomeModalOpen])
+
+  useEffect(() => {
+    if (!presenceWakeConfigReady || welcomeModalOpen) return
+    if (!resumeRuntimeOnLaunch) return
+    if (!modelPath.trim()) return
+    if (runtimeStarting || runtimeStatus?.running) return
+    const kind = inferRuntimeKindForModelSelection(modelPath, localModelFilePaths, winPlatform)
+    if (kind === 'ollama' && ollamaChatTagsLoading) return
+    try {
+      if (sessionStorage.getItem(AUTO_RESUME_ONCE_SESSION_KEY)) return
+      sessionStorage.setItem(AUTO_RESUME_ONCE_SESSION_KEY, '1')
+    } catch {
+      return
+    }
+    void startRuntime()
+  }, [
+    presenceWakeConfigReady,
+    welcomeModalOpen,
+    resumeRuntimeOnLaunch,
+    modelPath,
+    runtimeStarting,
+    runtimeStatus?.running,
+    localModelFilePaths,
+    winPlatform,
+    ollamaChatTagsLoading
+  ])
 
   useEffect(() => {
     const cap = 15
@@ -2259,10 +2591,10 @@ export default function App(): React.ReactElement {
   }, [])
 
   useEffect(() => {
-    if (runtimeKind !== 'llamacpp' || !llamaEnv?.detected || !llamaEnv.resolvedPath) return
+    if (inferredModelRuntimeKind !== 'llamacpp' || !llamaEnv?.detected || !llamaEnv.resolvedPath) return
     if (llamaBin.trim()) return
     setLlamaBin(llamaEnv.resolvedPath)
-  }, [runtimeKind, llamaEnv?.detected, llamaEnv?.resolvedPath, llamaBin])
+  }, [inferredModelRuntimeKind, llamaEnv?.detected, llamaEnv?.resolvedPath, llamaBin])
 
   useEffect(() => {
     if (drawer !== 'runtime') return
@@ -2480,6 +2812,79 @@ export default function App(): React.ReactElement {
     saveModelProfile(personalityModelKey, fresh)
   }, [personalityModelKey])
 
+  const resetInteractionBaseline = useCallback(async () => {
+    const ok = await window.api.confirmDestructive({
+      message: 'Reset chat interaction to baseline?',
+      detail:
+        'Clears mood/journal for this model file, turns off “Domain-enhanced prompts”, and restores default llama sampling (temperature, top-p, penalties). Chat history is kept. If you loaded a merged fine-tune, switch back to your base GGUF in Run when you want original weights.',
+      confirmLabel: 'Reset to baseline'
+    })
+    if (!ok) return
+    clearModelProfileStorage()
+    setChatDomainEnhancement(false)
+    setLlamaTemperatureDraft('0.8')
+    setLlamaTopPDraft('0.95')
+    setLlamaFrequencyPenaltyDraft('0')
+    setLlamaPresencePenaltyDraft('0')
+    await window.api.setConfig({
+      chatDomainEnhancement: false,
+      llamaTemperature: 0.8,
+      llamaTopP: 0.95,
+      llamaFrequencyPenalty: 0,
+      llamaPresencePenalty: 0
+    })
+    const curPath = (runtimeStatus?.modelPath ?? modelPath).trim()
+    const norm = curPath.replace(/\\/g, '/').toLowerCase()
+    if (norm.includes('/finetunes/')) {
+      const r = await window.api.trainBaseForFinetunePath(curPath)
+      if (r.baseModelPath) {
+        setErr(
+          `Baseline settings restored. This file is under finetunes — recorded base model path: ${r.baseModelPath}. Load it from Run for pre–fine-tune weights.`
+        )
+      } else {
+        setErr(
+          'Baseline settings restored. This file is under finetunes — load your original base GGUF from Run for pre–fine-tune weights (no matching train job was found).'
+        )
+      }
+    } else {
+      setErr(null)
+    }
+  }, [
+    clearModelProfileStorage,
+    modelPath,
+    runtimeStatus?.modelPath,
+    setErr,
+    setChatDomainEnhancement
+  ])
+
+  const shellChromeClass = useMemo(() => {
+    const parts = ['shell-chrome']
+    if (presenceWakeOpen) parts.push('shell-chrome--wake-hidden')
+    else if (wakeChromeReveal) parts.push('shell-chrome--wake-reveal')
+    return parts.join(' ')
+  }, [presenceWakeOpen, wakeChromeReveal])
+
+  const onPresenceWakeIntensityChange = useCallback((n: number) => {
+    setWakeBackdropIntensity(n)
+  }, [])
+
+  const onPresenceWakeDone = useCallback(() => {
+    try {
+      sessionStorage.setItem(PRESENCE_WAKE_SHOWN_SESSION_KEY, '1')
+    } catch {
+      /* ignore */
+    }
+    setWakeBackdropIntensity(0)
+    setPresenceWakeOpen(false)
+    setWakeChromeReveal(true)
+  }, [])
+
+  useEffect(() => {
+    if (!wakeChromeReveal) return
+    const id = window.setTimeout(() => setWakeChromeReveal(false), 520)
+    return () => window.clearTimeout(id)
+  }, [wakeChromeReveal])
+
   useEffect(() => {
     const running = Boolean(runtimeStatus?.running)
     const was = runtimeWasRunningRef.current
@@ -2543,7 +2948,8 @@ export default function App(): React.ReactElement {
 
   const appBlockingIssues = useMemo((): AppBlockingIssue[] => {
     const out: AppBlockingIssue[] = []
-    if (runtimeKind === 'ollama') {
+    const inferred = inferRuntimeKindForModelSelection(modelPath, localModelFilePaths, winPlatform)
+    if (inferred === 'ollama') {
       if (ollamaHost && !ollamaHost.reachable) {
         out.push({
           id: 'ollama-host',
@@ -2556,7 +2962,7 @@ export default function App(): React.ReactElement {
       }
     }
     if (
-      runtimeKind === 'ollama' &&
+      inferred === 'ollama' &&
       ollamaHost?.reachable &&
       !runtimeOn &&
       !ollamaChatTagsLoading &&
@@ -2571,11 +2977,13 @@ export default function App(): React.ReactElement {
     }
     return out
   }, [
+    localModelFilePaths,
+    modelPath,
+    winPlatform,
     ollamaChatTags,
     ollamaChatTagsErr,
     ollamaChatTagsLoading,
     ollamaHost,
-    runtimeKind,
     runtimeOn
   ])
 
@@ -2730,7 +3138,10 @@ export default function App(): React.ReactElement {
   )
 
   useEffect(() => {
-    if (drawer === 'train') void window.api.trainListJobs().then(setTrainJobs)
+    if (drawer === 'train') {
+      void window.api.trainListJobs().then((j) => setTrainJobs(j as TrainJob[]))
+      void window.api.kbSources().then((s) => setTrainKbSources((s as KbSource[]) ?? []))
+    }
     if (drawer === 'hf') {
       setHfLibraryMode('recommended')
       setHfResults([])
@@ -2806,14 +3217,19 @@ export default function App(): React.ReactElement {
   }, [hfListModels, hfSortBy, hfSortDir, hfFilterMinLikes, hfFilterMinDownloads, hfFilterMaxSizeGb])
 
   const hfHubInstalledModels = useMemo(() => {
-    const fromList = hfDisplayModels.filter((m) =>
-      runtimeKind === 'ollama'
-        ? ollamaRegistryTagInstalled(ollamaChatTags, m.ollamaLibraryName ?? '')
-        : localDownloads.some((r) => r.repo_id === m.id && r.status === 'complete')
+    const fromOllama = hfDisplayModels.filter((m) =>
+      ollamaRegistryTagInstalled(ollamaChatTags, m.ollamaLibraryName ?? '')
     )
-    if (runtimeKind !== 'llamacpp') return fromList
-
-    const seen = new Set(fromList.map((m) => m.id))
+    const fromFiles = hfDisplayModels.filter((m) =>
+      localDownloads.some((r) => r.repo_id === m.id && r.status === 'complete')
+    )
+    const seen = new Set<string>()
+    const merged: HfModelSummary[] = []
+    for (const m of [...fromOllama, ...fromFiles]) {
+      if (seen.has(m.id)) continue
+      seen.add(m.id)
+      merged.push(m)
+    }
     const orphanRepoIds = new Set<string>()
     for (const r of localDownloads) {
       if (r.status !== 'complete') continue
@@ -2830,16 +3246,16 @@ export default function App(): React.ReactElement {
           totalSizeBytes: sum > 0 ? sum : undefined
         }
       })
-    return [...extras, ...fromList]
-  }, [hfDisplayModels, runtimeKind, ollamaChatTags, localDownloads])
+    return [...extras, ...merged]
+  }, [hfDisplayModels, ollamaChatTags, localDownloads])
 
   const hfHubAvailableModels = useMemo(() => {
-    return hfDisplayModels.filter((m) =>
-      runtimeKind === 'ollama'
-        ? !ollamaRegistryTagInstalled(ollamaChatTags, m.ollamaLibraryName ?? '')
-        : !localDownloads.some((r) => r.repo_id === m.id && r.status === 'complete')
-    )
-  }, [hfDisplayModels, runtimeKind, ollamaChatTags, localDownloads])
+    return hfDisplayModels.filter((m) => {
+      const inOllama = ollamaRegistryTagInstalled(ollamaChatTags, m.ollamaLibraryName ?? '')
+      const inFiles = localDownloads.some((r) => r.repo_id === m.id && r.status === 'complete')
+      return !inOllama && !inFiles
+    })
+  }, [hfDisplayModels, ollamaChatTags, localDownloads])
 
   const hfHubInstalledModelsSorted = useMemo(() => {
     const rows = hfHubInstalledModels.slice()
@@ -2852,13 +3268,13 @@ export default function App(): React.ReactElement {
         if (c !== 0) return sign * c
         return tie
       }
-      const sa = hfSizeBytesForTableSort(a, runtimeKind, localDownloads, true)
-      const sb = hfSizeBytesForTableSort(b, runtimeKind, localDownloads, true)
+      const sa = hfSizeBytesForTableSort(a, localDownloads, true)
+      const sb = hfSizeBytesForTableSort(b, localDownloads, true)
       if (sa !== sb) return sign * (sa - sb)
       return tie
     })
     return rows
-  }, [hfHubInstalledModels, hfInstalledColSort, runtimeKind, localDownloads])
+  }, [hfHubInstalledModels, hfInstalledColSort, localDownloads])
 
   const hfHubAvailableModelsSorted = useMemo(() => {
     const rows = hfHubAvailableModels.slice()
@@ -2872,8 +3288,8 @@ export default function App(): React.ReactElement {
         return tie
       }
       if (col === 'size') {
-        const sa = hfSizeBytesForTableSort(a, runtimeKind, localDownloads, false)
-        const sb = hfSizeBytesForTableSort(b, runtimeKind, localDownloads, false)
+        const sa = hfSizeBytesForTableSort(a, localDownloads, false)
+        const sb = hfSizeBytesForTableSort(b, localDownloads, false)
         if (sa !== sb) return sign * (sa - sb)
         return tie
       }
@@ -2888,7 +3304,7 @@ export default function App(): React.ReactElement {
       return tie
     })
     return rows
-  }, [hfHubAvailableModels, hfAvailableColSort, runtimeKind, localDownloads])
+  }, [hfHubAvailableModels, hfAvailableColSort, localDownloads])
 
   const toggleHfInstalledColSort = useCallback((col: 'name' | 'size') => {
     setHfInstalledColSort((prev) =>
@@ -2908,7 +3324,7 @@ export default function App(): React.ReactElement {
   useEffect(() => {
     setHfInstalledListPage(1)
     setHfAvailableListPage(1)
-  }, [runtimeKind, hfLibraryMode])
+  }, [hfLibraryMode, hfHubInstalledModels.length, hfHubAvailableModels.length])
 
   useEffect(() => {
     const tp = Math.max(1, Math.ceil(hfHubInstalledModels.length / HF_HUB_PAGE_SIZE))
@@ -3015,7 +3431,7 @@ export default function App(): React.ReactElement {
       }
 
       const tag = d.ollamaLibraryName?.trim()
-      if (runtimeKind === 'ollama' && tag) {
+      if (tag) {
         if (hfOllamaPullBusy) return
         setQuickDownloadRepo(null)
         await runOllamaPullForHub(repoId, tag)
@@ -3023,7 +3439,7 @@ export default function App(): React.ReactElement {
       }
 
       setErr(
-        'No .gguf or .safetensors weight file found in this repository (or only auxiliary files such as mmproj). For models that exist only in the Ollama library, switch the top bar to Ollama and try again, or open Run to pull by name.'
+        'No .gguf or .safetensors weight file found in this repository (or only auxiliary files such as mmproj). For models that exist only in the Ollama library, pick an Ollama-tagged card or pull by name from Run, then try again.'
       )
     } catch (e) {
       setErr(String(e))
@@ -3073,13 +3489,13 @@ export default function App(): React.ReactElement {
   async function deleteInstalledHubModel(m: HfModelSummary): Promise<void> {
     if (hfHubDeleteRepoBusy) return
     setErr(null)
-    if (runtimeKind === 'ollama') {
-      const preset = m.ollamaLibraryName?.trim() ?? ''
-      const tag = ollamaInstalledTagMatch(ollamaChatTags, preset) ?? preset
-      if (!tag) {
-        setErr('Could not resolve an Ollama model name to remove.')
-        return
-      }
+    const preset = m.ollamaLibraryName?.trim() ?? ''
+    const tagFromOllama =
+      preset && ollamaRegistryTagInstalled(ollamaChatTags, preset)
+        ? ollamaInstalledTagMatch(ollamaChatTags, preset) ?? preset
+        : ''
+    if (tagFromOllama) {
+      const tag = tagFromOllama
       const ok = await window.api.confirmDestructive({
         message: `Remove “${tag}” from your Ollama library?`,
         detail: 'This frees disk space in Ollama’s store.',
@@ -3518,7 +3934,7 @@ export default function App(): React.ReactElement {
                       ) : null}
                     </td>
                     <td className="hf-model-table-mono">
-                      {hfInstalledSizeDisplay(m, runtimeKind, localDownloads)}
+                      {hfInstalledSizeDisplay(m, localDownloads)}
                     </td>
                     <td className="hf-model-table-actions hf-model-table-actions--delete">
                       <button
@@ -3572,19 +3988,42 @@ export default function App(): React.ReactElement {
     setErr(null)
     setRuntimeStarting(true)
     setRuntimeLoadProgress(null)
+    setRuntimeLoadLog('')
+    const kind = inferRuntimeKindForModelSelection(modelPath, localModelFilePaths, winPlatform)
+    setRuntimeKind(kind)
+    if (kind === 'llamacpp') {
+      persistLlamaConsoleExpanded(true)
+    }
     try {
-      const s = await window.api.runtimeStart({ kind: runtimeKind, modelPath })
+      const s = await window.api.runtimeStart({ kind, modelPath })
       setRuntimeStatus(s)
-      if (runtimeKind === 'llamacpp') {
+      const persist: Record<string, unknown> = {
+        lastRuntimeModelPath: modelPath.trim(),
+        lastRuntimeModelKind: kind,
+        resumeRuntimeOnLaunch: true
+      }
+      if (kind === 'llamacpp') {
         const pathForStore = llamaBin.trim() || llamaEnv?.resolvedPath || ''
-        await window.api.setConfig({ llamaBinaryPath: pathForStore, runtimeKind })
+        persist.llamaBinaryPath = pathForStore
+        persist.runtimeKind = kind
+        await window.api.setConfig(persist)
         if (pathForStore) setLlamaBin(pathForStore)
       } else {
-        await window.api.setConfig({ runtimeKind })
+        persist.runtimeKind = kind
+        await window.api.setConfig(persist)
       }
       void refreshRunDrawer()
     } catch (e) {
       setErr(String(e))
+      setResumeRuntimeOnLaunch(false)
+      try {
+        sessionStorage.removeItem(AUTO_RESUME_ONCE_SESSION_KEY)
+      } catch {
+        /* ignore */
+      }
+      void window.api.setConfig({ resumeRuntimeOnLaunch: false }).catch(() => {
+        /* ignore */
+      })
     } finally {
       setRuntimeStarting(false)
       setRuntimeLoadProgress(null)
@@ -3596,6 +4035,8 @@ export default function App(): React.ReactElement {
     try {
       const s = await window.api.runtimeStop()
       setRuntimeStatus(s)
+      setResumeRuntimeOnLaunch(false)
+      await window.api.setConfig({ resumeRuntimeOnLaunch: false })
       void refreshRunDrawer()
     } catch (e) {
       setErr(String(e))
@@ -3630,21 +4071,47 @@ export default function App(): React.ReactElement {
     if (picked) setModelsInstallPathDraft(picked)
   }
 
-  async function sendChat(): Promise<void> {
-    if (!convId || !draft.trim() || chatSending) return
+  async function sendChat(override?: { text?: string }): Promise<void> {
+    const userText = typeof override?.text === 'string' ? override.text.trim() : draft.trim()
+    if (!convId || !userText || chatSending) return
+    const conversationId = convId
     if (!runtimeStatus?.running) {
       setErr(
         'Your AI is not running yet. In the top bar, choose a model and press the play button. When the dot turns green, try sending again — or open Run for setup help.'
       )
       return
     }
+    if (agenticWorkersEnabled && runtimeStatus.kind !== 'ollama') {
+      setErr(
+        'Parallel multi-model agents need the Ollama runtime. Open Run, switch to Ollama, start a model — or turn off “Parallel agents” in Settings → Chat.'
+      )
+      return
+    }
     setErr(null)
-    const userText = draft.trim()
+    setChatTurnNotice(null)
     setDraft('')
-    const userSentAt = Date.now()
-    await window.api.messageAppend(convId, 'user', userText)
+    const userRow = (await window.api.messageAppend(conversationId, 'user', userText)) as MessageAppendResponse
+    const receiptKey = `${conversationId}:${userRow.id}`
     void window.api.promptDomainsList().then(setPromptDomains).catch(() => {})
-    setMessages((prev) => [...prev, { role: 'user', content: userText, createdAt: userSentAt }])
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: userRow.id,
+        role: 'user',
+        content: userText,
+        createdAt: userRow.createdAt
+      }
+    ])
+    setUserPromptReceipts((prev) => ({
+      ...prev,
+      [receiptKey]: { delivered: false, responseStarted: false, failed: false }
+    }))
+    const histMaxParsed = parseInt(chatHistoryMaxMessagesDraft.trim(), 10)
+    const histCap = chatHistoryMaxMessagesFromConfig(Number.isFinite(histMaxParsed) ? histMaxParsed : undefined)
+    const fullHistoryRows = messages.map((m) => ({ role: m.role, content: m.content }))
+    const historyForApi = sliceChatHistoryMessages(fullHistoryRows, histCap)
+    const historyDropped = fullHistoryRows.length - historyForApi.length
+
     let context = userText
     if (ragSnippets.length) {
       context =
@@ -3652,10 +4119,275 @@ export default function App(): React.ReactElement {
         ragSnippets.map((s, i) => `[${i + 1}] ${s}`).join('\n') +
         '\n\nUser question:\n' +
         userText
+      if (runtimeStatus.kind === 'llamacpp' && llamaRagGrounding) {
+        context = `${context}\n\n${RAG_GROUNDING_INSTRUCTION}`
+      }
     }
-    const historyForApi = messages.map((m) => ({ role: m.role, content: m.content }))
+
+    const domainSuffix = (userRow.promptDomainSuffix ?? '').trim()
+    const usePersonalityThisTurn = userMessageInvitesModelPersonality(userText)
+    let systemPreamble = usePersonalityThisTurn
+      ? MODEL_PROFILE_SYSTEM_PROMPT
+      : CHAT_MINIMAL_SYSTEM_PROMPT
+    if (domainSuffix) {
+      systemPreamble = `${systemPreamble}\n\n--- Topic context (matched chat domain) ---\n${domainSuffix}`
+    }
+
+    const notices: string[] = []
+    if (historyDropped > 0) {
+      notices.push(
+        `${historyDropped} older message(s) were not sent to the model (only the last ${histCap} user/assistant bubbles are included).`
+      )
+    }
+    if (runtimeStatus.kind === 'llamacpp') {
+      const ctxTok = clampLlamaContextTokens(
+        parseInt(llamaContextTokensDraft.trim(), 10) || LLAMA_CONTEXT_TOKENS_DEFAULT
+      )
+      const histChars = historyForApi.reduce((a, m) => a + m.content.length, 0)
+      const estTok = estimatePromptTokensFromChars(systemPreamble.length + histChars + context.length + 96)
+      if (promptLikelyExceedsContext({ estimatedPromptTokens: estTok, contextTokens: ctxTok })) {
+        notices.push(
+          `Estimated prompt ~${estTok} tokens may exceed your llama.cpp context (${ctxTok}). Increase context in Settings → Data, lower “Chat history messages”, or shorten RAG.`
+        )
+      }
+    }
+    if (domainSuffix) {
+      notices.push(
+        `Domain context appended (~${domainSuffix.length} chars, max ${MAX_PROMPT_DOMAIN_SUFFIX_CHARS} per turn).`
+      )
+    }
+    if (usePersonalityThisTurn) {
+      notices.push(
+        'This message matched an “opinion / personal stance” prompt — mood and journal markers are enabled for this reply only.'
+      )
+    }
+    setChatTurnNotice(notices.length > 0 ? notices.join(' ') : null)
+
+    async function finishAssistantMessage(replyRaw: string): Promise<void> {
+      const { visible: replyVisible, patches: ambiancePatches, journalTexts } = stripModelProfileMarkers(replyRaw)
+      const snap = activityChatTokensRef.current
+      await window.api.messageAppend(
+        conversationId,
+        'assistant',
+        replyVisible,
+        undefined,
+        snap
+          ? {
+              promptTokens: snap.prompt,
+              completionTokens: snap.completion,
+              promptIsEstimate: snap.promptIsEstimate,
+              completionIsEstimate: snap.completionIsEstimate
+            }
+          : undefined
+      )
+      const st = await window.api.runtimeStatus()
+      const persistKey = st?.modelPath?.trim() || modelPath.trim()
+      if (persistKey && usePersonalityThisTurn && (ambiancePatches.length > 0 || journalTexts.length > 0)) {
+        setModelProfile((prev) => {
+          let vibe = prev.vibe
+          for (const patch of ambiancePatches) {
+            vibe = mergePersonalityPatches(vibe, patch)
+          }
+          let next: ModelProfile = { ...prev, vibe }
+          if (journalTexts.length > 0) {
+            next = appendJournalTexts(next, journalTexts)
+          }
+          saveModelProfile(persistKey, next)
+          return next
+        })
+      }
+      const m = await window.api.conversationMessages(conversationId)
+      const reloaded = m as ChatMessageVm[]
+      setMessages(reloaded)
+      setUserPromptReceipts((prev) => {
+        const next = { ...prev }
+        delete next[receiptKey]
+        return next
+      })
+      const convTitle = conversations.find((c) => c.id === conversationId)?.title
+      void window.api
+        .kbWikiExtractTurn({
+          conversationId: conversationId,
+          conversationTitle: convTitle,
+          userMessage: userText,
+          assistantMessage: replyVisible
+        })
+        .then((r) => {
+          if (r.ok && r.skipped === false && r.sourceId) void loadWiki()
+        })
+        .catch(() => {
+          /* extraction is best-effort */
+        })
+    }
+
+    const useAgentic = agenticWorkersEnabled && runtimeStatus.kind === 'ollama'
+    let agentHandled = false
+
+    if (useAgentic) {
+      chatStreamSawFirstTokenRef.current = false
+      setChatSending(true)
+      setStreamingReplyStartedAt(Date.now())
+      setChatStreamBuffer('Planning parallel workers…')
+      activityChatTokensRef.current = null
+      setActivityChatTokens(null)
+      try {
+        const tagsRes = await window.api.ollamaListTags()
+        const tagNames = tagsRes.names ?? []
+        const hw = await window.api.hardwareSummary(paths?.modelsDefault)
+        const remote = agentRemoteOllamaUrlDraft.trim()
+        const plannerMsgs = [
+          {
+            role: 'system' as const,
+            content: buildAgentPlannerSystemPrompt({
+              localOllamaTags: tagNames,
+              hardwareSummary: hw,
+              remoteOllamaBaseUrl: remote || undefined,
+              primaryModelName: (runtimeStatus.modelPath ?? modelPath).trim() || 'primary'
+            })
+          },
+          { role: 'user' as const, content: `Decide worker routing for this request:\n\n${context}` }
+        ]
+        const planRaw = await window.api.runtimeChat(plannerMsgs, '', { maxTokens: AGENT_PLANNER_MAX_TOKENS })
+        const plan = parseAgentPlanFromModelReply(planRaw, Boolean(remote))
+        if (plan) {
+          setUserPromptReceipts((prev) => {
+            const cur = prev[receiptKey]
+            if (!cur) return prev
+            return { ...prev, [receiptKey]: { ...cur, delivered: true, responseStarted: true } }
+          })
+          const nTok = parseInt(chatMaxTokensDraft.trim(), 10)
+          const workerMax = Math.min(
+            AGENT_WORKER_MAX_TOKENS,
+            clampChatMaxTokens(Number.isFinite(nTok) ? nTok : CHAT_MAX_TOKENS_DEFAULT)
+          )
+          setChatStreamBuffer(`Running ${plan.workers.length} specialist worker(s) in parallel…`)
+          const workerResults = await Promise.all(
+            plan.workers.map((spec) => {
+              const wm = buildWorkerMessages({
+                originalUser: userText,
+                kbContext: context,
+                spec
+              })
+              return window.api
+                .runtimeChat(wm, '', {
+                  maxTokens: workerMax,
+                  ollamaModel: spec.model,
+                  ollamaBaseUrl: spec.backend === 'remote' && remote ? remote : undefined
+                })
+                .then((text) => ({ spec, text }))
+            })
+          )
+          const body = workerResults
+            .map(
+              (r) =>
+                `### ${r.spec.focus} (${r.spec.model}${r.spec.backend === 'remote' ? ' · self-hosted Ollama' : ''})\n\n${r.text.trim()}`
+            )
+            .join('\n\n---\n\n')
+          let replyRaw = body
+          if (plan.synthesize) {
+            const synRid =
+              typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+                ? crypto.randomUUID()
+                : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+            const pair = buildSynthesisMessages(body, userText)
+            const synSystemBase = userMessageInvitesModelPersonality(userText)
+              ? MODEL_PROFILE_SYSTEM_PROMPT
+              : CHAT_MINIMAL_SYSTEM_PROMPT
+            const synMsgs = [
+              {
+                role: 'system' as const,
+                content: `${synSystemBase}\n\n${pair[0].content}`
+              },
+              { role: 'user' as const, content: pair[1].content }
+            ]
+            const synChars = synMsgs.reduce((acc, m) => acc + m.content.length, 0)
+            const synEst = Math.max(1, Math.ceil(synChars / 4))
+            const initialSynTok: ActivityChatTokens = {
+              prompt: synEst,
+              completion: 0,
+              promptIsEstimate: true,
+              completionIsEstimate: true
+            }
+            activityChatTokensRef.current = initialSynTok
+            setActivityChatTokens(initialSynTok)
+            setChatStreamBuffer('')
+            chatStreamSawFirstTokenRef.current = false
+            const offSyn = window.api.onRuntimeChatProgress((p) => {
+              if (p.requestId !== synRid) return
+              if (p.kind === 'token' && p.text) {
+                const chunk = p.text
+                setChatStreamBuffer((prev) => prev + chunk)
+                setActivityChatTokens((prev) => {
+                  if (!prev || !prev.completionIsEstimate) {
+                    activityChatTokensRef.current = prev
+                    return prev
+                  }
+                  const delta = Math.max(1, Math.ceil(chunk.length / 4))
+                  const next = { ...prev, completion: prev.completion + delta }
+                  activityChatTokensRef.current = next
+                  return next
+                })
+              }
+              if (p.kind === 'usage') {
+                setActivityChatTokens((prev) => {
+                  const base =
+                    prev ??
+                    ({
+                      prompt: synEst,
+                      completion: 0,
+                      promptIsEstimate: true,
+                      completionIsEstimate: true
+                    } satisfies ActivityChatTokens)
+                  const next = {
+                    prompt: p.promptTokens != null ? p.promptTokens : base.prompt,
+                    completion: p.completionTokens != null ? p.completionTokens : base.completion,
+                    promptIsEstimate: p.promptTokens != null ? false : base.promptIsEstimate,
+                    completionIsEstimate: p.completionTokens != null ? false : base.completionIsEstimate
+                  }
+                  activityChatTokensRef.current = next
+                  return next
+                })
+              }
+            })
+            try {
+              replyRaw = await window.api.runtimeChat(synMsgs, synRid, { maxTokens: workerMax })
+            } finally {
+              offSyn()
+            }
+          } else {
+            setChatStreamBuffer(body)
+          }
+          await finishAssistantMessage(replyRaw)
+          agentHandled = true
+        } else {
+          setChatStreamBuffer('')
+          setErr(
+            'The planner did not return usable worker JSON. Falling back to a normal single-model reply for this message.'
+          )
+        }
+      } catch (e) {
+        setErr(humanizeChatError(String(e)))
+      } finally {
+        if (!agentHandled) {
+          setChatSending(false)
+          setStreamingReplyStartedAt(null)
+          setChatStreamBuffer('')
+          activityChatTokensRef.current = null
+          setActivityChatTokens(null)
+        }
+      }
+      if (agentHandled) {
+        setChatSending(false)
+        setStreamingReplyStartedAt(null)
+        setChatStreamBuffer('')
+        activityChatTokensRef.current = null
+        setActivityChatTokens(null)
+        return
+      }
+    }
+
     const msgs = [
-      { role: 'system' as const, content: MODEL_PROFILE_SYSTEM_PROMPT },
+      { role: 'system' as const, content: systemPreamble },
       ...historyForApi,
       { role: 'user' as const, content: context }
     ]
@@ -3672,23 +4404,18 @@ export default function App(): React.ReactElement {
       prompt: promptTokenEstimate,
       completion: 0,
       promptIsEstimate: true,
-      completionIsEstimate: true,
+      completionIsEstimate: true
     }
     activityChatTokensRef.current = initialTok
     setActivityChatTokens(initialTok)
-    const receiptKeyPending = `${convId}:t:${userSentAt}`
     chatStreamSawFirstTokenRef.current = false
-    setUserPromptReceipts((prev) => ({
-      ...prev,
-      [receiptKeyPending]: { delivered: false, responseStarted: false }
-    }))
     const offChat = window.api.onRuntimeChatProgress((p) => {
       if (p.requestId !== requestId) return
       if (p.kind === 'started') {
         setUserPromptReceipts((prev) => {
-          const cur = prev[receiptKeyPending]
+          const cur = prev[receiptKey]
           if (!cur) return prev
-          return { ...prev, [receiptKeyPending]: { ...cur, delivered: true } }
+          return { ...prev, [receiptKey]: { ...cur, delivered: true } }
         })
         return
       }
@@ -3696,11 +4423,11 @@ export default function App(): React.ReactElement {
         if (!chatStreamSawFirstTokenRef.current) {
           chatStreamSawFirstTokenRef.current = true
           setUserPromptReceipts((prev) => {
-            const cur = prev[receiptKeyPending]
+            const cur = prev[receiptKey]
             if (!cur) return prev
             return {
               ...prev,
-              [receiptKeyPending]: { delivered: true, responseStarted: true }
+              [receiptKey]: { delivered: true, responseStarted: true }
             }
           })
         }
@@ -3725,7 +4452,7 @@ export default function App(): React.ReactElement {
               prompt: promptTokenEstimate,
               completion: 0,
               promptIsEstimate: true,
-              completionIsEstimate: true,
+              completionIsEstimate: true
             } satisfies ActivityChatTokens)
           const next = {
             prompt: p.promptTokens != null ? p.promptTokens : base.prompt,
@@ -3740,74 +4467,25 @@ export default function App(): React.ReactElement {
     })
     try {
       const reply = await window.api.runtimeChat(msgs, requestId)
-      const { visible: replyVisible, patches: ambiancePatches, journalTexts } = stripModelProfileMarkers(reply)
-      const snap = activityChatTokensRef.current
-      await window.api.messageAppend(
-        convId,
-        'assistant',
-        replyVisible,
-        undefined,
-        snap
-          ? {
-              promptTokens: snap.prompt,
-              completionTokens: snap.completion,
-              promptIsEstimate: snap.promptIsEstimate,
-              completionIsEstimate: snap.completionIsEstimate
-            }
-          : undefined
-      )
-      const st = await window.api.runtimeStatus()
-      const persistKey = st?.modelPath?.trim() || modelPath.trim()
-      if (persistKey && (ambiancePatches.length > 0 || journalTexts.length > 0)) {
-        setModelProfile((prev) => {
-          let vibe = prev.vibe
-          for (const patch of ambiancePatches) {
-            vibe = mergePersonalityPatches(vibe, patch)
-          }
-          let next: ModelProfile = { ...prev, vibe }
-          if (journalTexts.length > 0) {
-            next = appendJournalTexts(next, journalTexts)
-          }
-          saveModelProfile(persistKey, next)
-          return next
+      await finishAssistantMessage(reply)
+      if (
+        runtimeStatus.kind === 'llamacpp' &&
+        llamaRagGrounding &&
+        ragSnippets.length > 0 &&
+        ragReplyMissingSnippetCitations(stripModelProfileMarkers(reply).visible, ragSnippets.length)
+      ) {
+        setChatTurnNotice((prev) => {
+          const extra =
+            'RAG: reply did not cite snippet numbers like [1] — verify factual claims against your sources.'
+          return prev ? `${prev} ${extra}` : extra
         })
       }
-      const m = await window.api.conversationMessages(convId)
-      const reloaded = m as ChatMessageVm[]
-      setMessages(reloaded)
-      let lastAsst = -1
-      for (let j = reloaded.length - 1; j >= 0; j--) {
-        if (reloaded[j].role === 'assistant') {
-          lastAsst = j
-          break
-        }
-      }
-      if (lastAsst >= 1) {
-        const u = reloaded[lastAsst - 1]
-        if (
-          u.role === 'user' &&
-          u.id &&
-          (u.createdAt === userSentAt || u.content.trim() === userText.trim())
-        ) {
-          migrateUserPromptReceipt(convId, userSentAt, u.id)
-        }
-      }
-      const convTitle = conversations.find((c) => c.id === convId)?.title
-      void window.api
-        .kbWikiExtractTurn({
-          conversationId: convId,
-          conversationTitle: convTitle,
-          userMessage: userText,
-          assistantMessage: replyVisible
-        })
-        .then((r) => {
-          if (r.ok && r.skipped === false && r.sourceId) void loadWiki()
-        })
-        .catch(() => {
-          /* extraction is best-effort */
-        })
     } catch (e) {
       setErr(humanizeChatError(String(e)))
+      setUserPromptReceipts((prev) => {
+        const cur = prev[receiptKey] ?? { delivered: false, responseStarted: false }
+        return { ...prev, [receiptKey]: { ...cur, failed: true } }
+      })
     } finally {
       offChat()
       setChatSending(false)
@@ -3815,6 +4493,35 @@ export default function App(): React.ReactElement {
       setChatStreamBuffer('')
       activityChatTokensRef.current = null
       setActivityChatTokens(null)
+    }
+  }
+
+  async function retryUserPrompt(m: ChatMessageVm, index: number): Promise<void> {
+    if (!convId || chatSending || m.role !== 'user') return
+    const rk = userMessageReceiptKey(convId, m)
+    const receipt = rk ? userPromptReceipts[rk] : undefined
+    if (!userMessageShowsRetry(m, index, messages, receipt, chatSending)) return
+    const id = m.id
+    if (!id) {
+      setErr('Cannot retry this prompt from here — copy the text into the composer and send again.')
+      return
+    }
+    setErr(null)
+    try {
+      const { ok } = await window.api.messageDelete(convId, id)
+      if (!ok) throw new Error('That message was not found.')
+      if (rk) {
+        setUserPromptReceipts((prev) => {
+          const next = { ...prev }
+          delete next[rk]
+          return next
+        })
+      }
+      const reloaded = (await window.api.conversationMessages(convId)) as ChatMessageVm[]
+      setMessages(reloaded)
+      await sendChat({ text: m.content.trim() })
+    } catch (e) {
+      setErr(String(e))
     }
   }
 
@@ -4086,6 +4793,21 @@ export default function App(): React.ReactElement {
     return Math.min(100, Math.max(0, (used / cap) * 100))
   }, [backdropSnap?.runtimeCtxUsed, chatMaxTokensDraft])
 
+  const llamaLoadConsoleBodyText = useMemo(() => {
+    const log = runtimeLoadLog.trim()
+    if (log) return log
+    const startingLlama =
+      runtimeStarting &&
+      inferRuntimeKindForModelSelection(modelPath, localModelFilePaths, winPlatform) === 'llamacpp'
+    if (!startingLlama) return ''
+    const rp = runtimeLoadProgress
+    const bits: string[] = []
+    if (rp?.message?.trim()) bits.push(rp.message.trim())
+    if (rp?.detail?.trim()) bits.push(rp.detail.trim())
+    if (bits.length > 0) return bits.join('\n\n')
+    return 'Starting llama-server…\n\nStatus lines will appear here (stdout, stderr, and health checks).'
+  }, [runtimeLoadLog, runtimeStarting, modelPath, localModelFilePaths, winPlatform, runtimeLoadProgress])
+
   return (
     <div className="shell">
       <ModelPresenceBackdrop
@@ -4098,7 +4820,26 @@ export default function App(): React.ReactElement {
         cpuPercent={backdropSnap?.processCpuPercent}
         ctxPercent={backdropCtxPercent}
         personality={modelProfile.vibe}
+        wakeIntensity={wakeBackdropIntensity}
       />
+      {presenceWakeOpen && (
+        <PresenceWakeOverlay
+          personality={modelProfile.vibe}
+          runtimeStarting={runtimeStarting}
+          setupRuntimeKind={inferredModelRuntimeKind}
+          resumeRuntimeSession={resumeRuntimeOnLaunch}
+          setupLiveDetail={
+            runtimeStarting
+              ? (runtimeLoadProgress?.message?.trim() ||
+                  runtimeLoadProgress?.detail?.trim() ||
+                  null)
+              : null
+          }
+          onIntensityChange={onPresenceWakeIntensityChange}
+          onDone={onPresenceWakeDone}
+        />
+      )}
+      <div className={shellChromeClass}>
       <aside className="nav-rail" aria-label="Primary navigation">
         <div className="nav-brand" title="Local LLM Desktop — private chat on your computer">
           <img src="/app-icon.png" alt="" width={44} height={44} decoding="async" />
@@ -4450,41 +5191,46 @@ export default function App(): React.ReactElement {
           <div className="top-bar-runtime-wrap" aria-label="Model and runtime">
             <div className="top-bar-runtime-row">
               <select
-                id="top-bar-runtime-backend-select"
-                className="select top-bar-runtime-backend"
-                aria-label="How models are loaded"
-                value={runtimeKind}
-                disabled={runtimeStarting || runtimeOn}
-                onChange={(e) => setRuntimeKind(e.target.value as 'llamacpp' | 'ollama')}
-              >
-                <option value="ollama">Ollama</option>
-                <option value="llamacpp">Files on my PC</option>
-              </select>
-              <select
                 id="top-bar-runtime-model-select"
-                className="select top-bar-runtime-model-select"
-                aria-label={runtimeKind === 'ollama' ? 'Which Ollama model to use' : 'Which model file to load'}
+                className="select top-bar-runtime-model-select top-bar-runtime-model-select--unified"
+                aria-label="Choose a local model (Ollama library or file on disk)"
                 disabled={runtimeStarting || runtimeOn}
                 value={topBarModelSelectValue}
                 onChange={(e) => {
-                  setModelPath(e.target.value)
+                  const v = e.target.value
+                  setModelPath(v)
+                  const k = inferRuntimeKindForModelSelection(v, localModelFilePaths, winPlatform)
+                  setRuntimeKind(k)
+                  void window.api.setConfig({ runtimeKind: k })
                 }}
               >
                 <option value="">
-                  {runtimeKind === 'ollama'
-                    ? ollamaChatTagsLoading
-                      ? 'Loading models…'
-                      : ollamaChatTagsErr
-                        ? 'Could not list models'
-                        : ollamaChatTags.length === 0
-                          ? 'No Ollama models found'
-                          : 'Choose Ollama model…'
-                    : localModelFilePaths.length === 0
-                      ? 'No weights in folder'
-                      : 'Choose model file…'}
+                  {ollamaChatTagsLoading
+                    ? 'Loading models…'
+                    : ollamaChatTagsErr
+                      ? 'Could not list Ollama models'
+                      : topBarOllamaModelOptions.length === 0 && topBarLlamaModelPathOptions.length === 0
+                        ? 'No models found — add weights or install Ollama'
+                        : 'Choose a model…'}
                 </option>
-                {runtimeKind === 'llamacpp'
-                  ? topBarLlamaModelPathOptions.map((p) => {
+                {topBarOllamaModelOptions.length > 0 ? (
+                  <optgroup label="Ollama library">
+                    {topBarOllamaModelOptions.map((tag) => {
+                      const ollamaLoaded = runtimeStatus?.modelPath?.trim() ?? ''
+                      const loadedOnly =
+                        runtimeOn && ollamaLoaded !== '' && tag === ollamaLoaded && !ollamaChatTags.includes(tag)
+                      return (
+                        <option key={tag} value={tag} title={tag}>
+                          {tag}
+                          {loadedOnly ? ' · loaded' : ''}
+                        </option>
+                      )
+                    })}
+                  </optgroup>
+                ) : null}
+                {topBarLlamaModelPathOptions.length > 0 ? (
+                  <optgroup label="Files on this PC">
+                    {topBarLlamaModelPathOptions.map((p) => {
                       const loadedMp = (runtimeOn ? runtimeStatus?.modelPath?.trim() : '') ?? ''
                       const loadedOnly =
                         Boolean(loadedMp) &&
@@ -4496,18 +5242,9 @@ export default function App(): React.ReactElement {
                           {loadedOnly ? ' · loaded' : ''}
                         </option>
                       )
-                    })
-                  : topBarOllamaModelOptions.map((tag) => {
-                      const ollamaLoaded = runtimeStatus?.modelPath?.trim() ?? ''
-                      const loadedOnly =
-                        runtimeOn && ollamaLoaded !== '' && tag === ollamaLoaded && !ollamaChatTags.includes(tag)
-                      return (
-                        <option key={tag} value={tag} title={tag}>
-                          {tag}
-                          {loadedOnly ? ' · loaded' : ''}
-                        </option>
-                      )
                     })}
+                  </optgroup>
+                ) : null}
               </select>
               <button
                 type="button"
@@ -4551,9 +5288,6 @@ export default function App(): React.ReactElement {
                 <span className="top-bar-runtime-progress-msg">
                   {runtimeLoadProgress?.message ?? 'Starting…'}
                 </span>
-                {runtimeLoadProgress?.detail?.trim() ? (
-                  <pre className="top-bar-runtime-progress-detail">{runtimeLoadProgress.detail.trim()}</pre>
-                ) : null}
               </div>
             ) : null}
           </div>
@@ -4920,6 +5654,9 @@ export default function App(): React.ReactElement {
                   )}
                   {messages.map((m, i) => {
                     const userRcKey = m.role === 'user' ? userMessageReceiptKey(convId, m) : undefined
+                    const userReceipt = userRcKey ? userPromptReceipts[userRcKey] : undefined
+                    const showUserRetry =
+                      m.role === 'user' && userMessageShowsRetry(m, i, messages, userReceipt, chatSending)
                     return (
                       <div key={m.id ?? `m-${i}`} className={`msg-row ${m.role === 'user' ? 'user' : 'assistant'}`}>
                         <div className="msg-bubble">
@@ -4949,16 +5686,33 @@ export default function App(): React.ReactElement {
                             ) : null}
                           </div>
                           <ChatRichContent
-                            content={m.content}
+                            content={
+                              m.role === 'assistant'
+                                ? stripChatAssistantVisibleMarkers(m.content)
+                                : m.content
+                            }
                             wikiHighlightTerms={
                               m.role === 'assistant' ? wikiHighlightTerms : undefined
                             }
                             onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
                           />
                           {m.role === 'user' ? (
-                            userRcKey != null && userPromptReceipts[userRcKey] != null ? (
+                            (userRcKey != null && userReceipt != null) || showUserRetry ? (
                               <div className="msg-user-footer">
-                                <UserPromptReceiptMarks receipt={userPromptReceipts[userRcKey]} />
+                                {userRcKey != null && userReceipt != null ? (
+                                  <UserPromptReceiptMarks receipt={userReceipt} />
+                                ) : null}
+                                {showUserRetry ? (
+                                  <button
+                                    type="button"
+                                    className="btn-secondary msg-prompt-retry"
+                                    onClick={() => void retryUserPrompt(m, i)}
+                                    disabled={chatSending}
+                                    title="Remove this prompt from the thread and send it again"
+                                  >
+                                    Retry
+                                  </button>
+                                ) : null}
                                 <div className="msg-token-foot msg-token-foot--user">{bubbleTokenLine(m)}</div>
                               </div>
                             ) : (
@@ -4997,7 +5751,9 @@ export default function App(): React.ReactElement {
                         </div>
                         {chatStreamBuffer ? (
                           <ChatRichContent
-                            content={stripPartialProfileStreamTail(chatStreamBuffer)}
+                            content={stripChatAssistantVisibleMarkers(
+                              stripPartialProfileStreamTail(chatStreamBuffer)
+                            )}
                             plainStreaming
                             wikiHighlightTerms={wikiHighlightTerms}
                             onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
@@ -5015,6 +5771,11 @@ export default function App(): React.ReactElement {
                 </div>
 
                 <div className="composer-wrap">
+                  {chatTurnNotice ? (
+                    <div className="chat-turn-notice" role="status">
+                      {chatTurnNotice}
+                    </div>
+                  ) : null}
                   {chatSending ? (
                     <div className="chat-generating-floater" aria-live="polite">
                       <FloatingDots label="Generating reply" />
@@ -5096,6 +5857,23 @@ export default function App(): React.ReactElement {
                       </div>
                     )}
                   </div>
+                  {runtimeStatus?.kind === 'ollama' && (
+                    <label className="metrics-widget-check agentic-chat-toggle" style={{ margin: '0 0 8px' }}>
+                      <input
+                        type="checkbox"
+                        checked={agenticWorkersEnabled}
+                        onChange={(e) => {
+                          const v = e.target.checked
+                          setAgenticWorkersEnabled(v)
+                          void window.api.setConfig({ agenticWorkersEnabled: v })
+                        }}
+                      />
+                      <span>
+                        <i className="fa-solid fa-diagram-project" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
+                        Parallel agents — planner + multi-model workers
+                      </span>
+                    </label>
+                  )}
                   <div className="composer-box">
                     <div
                       className="composer-field"
@@ -5219,6 +5997,15 @@ export default function App(): React.ReactElement {
                     )}
                   </div>
                   <p>Pull matches from your wiki into the next message. Open Wiki to add documents.</p>
+                  <div className="kb-sidebar-graph-cta">
+                    <button type="button" className="btn-secondary btn-sm" onClick={() => void openKnowledgeGraph()}>
+                      <i className="fa-solid fa-diagram-project" aria-hidden style={{ marginRight: 6, opacity: 0.75 }} />
+                      Knowledge graph
+                    </button>
+                    <p className="muted kb-sidebar-graph-cta-hint">
+                      Browse how sources, chunks, and wiki pages link — and run graph analysis — in the Wiki view.
+                    </p>
+                  </div>
                 </div>
                 <div className="kb-snippet-list">
                   {ragSnippets.length === 0 && <p className="muted" style={{ padding: '8px 4px' }}>No snippets yet — search above.</p>}
@@ -5302,15 +6089,25 @@ export default function App(): React.ReactElement {
                     >
                       {wikiExportBusy ? 'Exporting…' : 'Export wiki (ZIP)'}
                     </button>
+                    <button
+                      type="button"
+                      className="btn-secondary btn-wiki-kgraph"
+                      onClick={() => void openKnowledgeGraph()}
+                      title="Scroll to the knowledge graph and refresh its data"
+                    >
+                      <i className="fa-solid fa-diagram-project" aria-hidden style={{ marginRight: 6, opacity: 0.8 }} />
+                      Knowledge graph
+                    </button>
                   </div>
                 </div>
                 <div className="wiki-prompt-domains">
                   <h4 className="wiki-prompt-domains-title">Chat prompt domains</h4>
                   <p className="wiki-prompt-domains-hint muted">
-                    Topic clusters inferred from your user prompts (keyword overlap). Send a chat message to update this
-                    list.
+                    Topic clusters inferred from your user prompts (keyword overlap). Optional per-domain system context
+                    is used only when Settings → Chat → “Domain-enhanced prompts” is enabled. Send a chat message to
+                    refresh this list.
                   </p>
-                  {promptDomains.length === 0 ? (
+                      {promptDomains.length === 0 ? (
                     <p className="wiki-prompt-domains-empty muted">No domains yet.</p>
                   ) : (
                     <ul className="wiki-prompt-domains-list">
@@ -5324,6 +6121,45 @@ export default function App(): React.ReactElement {
                               {d.keywords.length > 8 ? '…' : ''}
                             </div>
                           ) : null}
+                          <label className="muted" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
+                            Optional system context when this domain matches (max {MAX_PROMPT_DOMAIN_SUFFIX_CHARS}{' '}
+                            chars; used only if “Domain-enhanced prompts” is on in Settings → Chat)
+                            <textarea
+                              className="input"
+                              style={{
+                                display: 'block',
+                                width: '100%',
+                                maxWidth: 520,
+                                minHeight: 56,
+                                marginTop: 6,
+                                fontSize: 12
+                              }}
+                              value={promptDomainSuffixDrafts[d.id] ?? d.systemSuffix}
+                              onChange={(e) =>
+                                setPromptDomainSuffixDrafts((prev) => ({
+                                  ...prev,
+                                  [d.id]: e.target.value.slice(0, MAX_PROMPT_DOMAIN_SUFFIX_CHARS)
+                                }))
+                              }
+                              spellCheck={false}
+                              rows={3}
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            className="btn-ghost-sm"
+                            style={{ marginTop: 6 }}
+                            onClick={() =>
+                              void window.api
+                                .promptDomainSetSuffix({
+                                  domainId: d.id,
+                                  systemSuffix: (promptDomainSuffixDrafts[d.id] ?? d.systemSuffix).trim()
+                                })
+                                .then(() => void loadWiki())
+                            }
+                          >
+                            Save domain context
+                          </button>
                         </li>
                       ))}
                     </ul>
@@ -5562,6 +6398,10 @@ export default function App(): React.ReactElement {
                       Select a topic or add a document. Content is chunked and searchable from Chat. The{' '}
                       <strong>Knowledge graph</strong> section below shows how sources, chunks, and wiki pages connect.
                     </p>
+                    <button type="button" className="btn-secondary wiki-empty-kgraph-btn" onClick={() => void openKnowledgeGraph()}>
+                      <i className="fa-solid fa-diagram-project" aria-hidden style={{ marginRight: 8, opacity: 0.8 }} />
+                      Open knowledge graph
+                    </button>
                   </div>
                 )}
               </article>
@@ -5569,7 +6409,11 @@ export default function App(): React.ReactElement {
                 className="wiki-graph-section"
                 aria-labelledby="wiki-knowledge-graph-heading"
               >
-                <h2 id="wiki-knowledge-graph-heading" className="wiki-graph-section-heading">
+                <h2
+                  id="wiki-knowledge-graph-heading"
+                  className="wiki-graph-section-heading"
+                  tabIndex={-1}
+                >
                   Knowledge graph
                 </h2>
                 <div className="wiki-graph-panel-wrap">
@@ -5578,6 +6422,14 @@ export default function App(): React.ReactElement {
                     data={kgPayload}
                     loading={kgLoading}
                     onRefresh={() => void loadKnowledgeGraph()}
+                    graphAnalysis={{
+                      busy: kgAnalysisBusy,
+                      error: kgAnalysisError,
+                      summary: kgAnalysisSummary,
+                      markdown: kgAnalysisMarkdown,
+                      ingestedId: kgAnalysisIngestedId
+                    }}
+                    onRunGraphAnalysis={(o) => void runKnowledgeGraphAnalysis(o)}
                     onPickSource={(id) => {
                       void openWikiPage(id)
                     }}
@@ -5588,6 +6440,51 @@ export default function App(): React.ReactElement {
             </div>
           )}
         </div>
+        {inferredModelRuntimeKind === 'llamacpp' && (runtimeStarting || runtimeLoadLog.length > 0) ? (
+          <div className="llama-load-console" aria-label="llama-server startup output">
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize llama.cpp panel height"
+              className={`llama-load-console-resize${llamaConsoleResizing ? ' llama-load-console-resize--active' : ''}`}
+              onPointerDown={(e) => {
+                if (e.button !== 0) return
+                e.preventDefault()
+                llamaConsoleResizeRef.current = {
+                  startY: e.clientY,
+                  startH: llamaLoadConsoleHeightPx
+                }
+                setLlamaConsoleResizing(true)
+              }}
+            />
+            <button
+              type="button"
+              className="llama-load-console-toggle"
+              aria-expanded={llamaLoadConsoleExpanded}
+              onClick={() => persistLlamaConsoleExpanded(!llamaLoadConsoleExpanded)}
+            >
+              <i
+                className={`fa-solid fa-chevron-${llamaLoadConsoleExpanded ? 'down' : 'right'}`}
+                aria-hidden
+              />
+              <span className="llama-load-console-toggle-label">llama.cpp server output</span>
+              {runtimeStarting ? (
+                <span className="llama-load-console-toggle-badge">Starting…</span>
+              ) : null}
+            </button>
+            {llamaLoadConsoleExpanded ? (
+              <pre
+                ref={llamaLoadConsoleRef}
+                className="llama-load-console-body"
+                tabIndex={0}
+                style={{ height: llamaLoadConsoleHeightPx }}
+              >
+                {llamaLoadConsoleBodyText ||
+                  'Waiting for llama-server logs…'}
+              </pre>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       </div>
 
@@ -5771,8 +6668,8 @@ export default function App(): React.ReactElement {
                           : personalityModelKey}
                       </p>
                       <p className="muted model-profile-panel-lead">
-                        Mood shapes the background glow. The journal collects optional first-person notes the model adds
-                        via hidden markers at the end of its replies.
+                        Mood and journal update only when you ask for a personal or subjective view (for example
+                        “What is your opinion on …?”). Everyday questions stay neutral; markers are not requested then.
                       </p>
                       <div className="model-profile-traits" aria-label="Mood traits">
                         {MODEL_PROFILE_VIBE_LABELS.map(({ key, label }) => {
@@ -5802,6 +6699,14 @@ export default function App(): React.ReactElement {
                           onClick={() => clearModelProfileStorage()}
                         >
                           Reset profile
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-ghost-sm"
+                          onClick={() => void resetInteractionBaseline()}
+                          title="Profile, domain extras, sampling defaults; see message if a finetune is loaded"
+                        >
+                          Reset to baseline…
                         </button>
                       </div>
                       {modelProfile.journal.length === 0 ? (
@@ -5962,10 +6867,7 @@ export default function App(): React.ReactElement {
                         </div>
                       )}
                     </div>
-                    {runtimeKind === 'ollama' &&
-                    ollamaChatTags.length > 0 &&
-                    !ollamaChatTagsLoading &&
-                    !ollamaChatTagsErr ? (
+                    {ollamaChatTags.length > 0 && !ollamaChatTagsLoading && !ollamaChatTagsErr ? (
                       <div className="runtime-model-purge" role="group" aria-label="Remove Ollama models">
                         <div className="runtime-model-purge-title">Remove models from Ollama</div>
                         <p className="muted" style={{ margin: '0 0 10px', fontSize: 12 }}>
@@ -6002,7 +6904,7 @@ export default function App(): React.ReactElement {
                         </div>
                       </div>
                     ) : null}
-                  {runtimeKind === 'llamacpp' && llamaEnv && !llamaEnv.detected && (
+                  {inferredModelRuntimeKind === 'llamacpp' && llamaEnv && !llamaEnv.detected && (
                     <div className="runtime-llama-setup-banner" role="status">
                       <p className="runtime-llama-setup-banner-title">llama-server not detected</p>
                       <p className="muted" style={{ margin: '0 0 12px' }}>
@@ -6026,26 +6928,43 @@ export default function App(): React.ReactElement {
                       </div>
                     </div>
                   )}
-                  {runtimeKind === 'llamacpp' && llamaEnv?.detected && !llamaEnv.configuredValid && llamaEnv.resolvedPath ? (
+                  {inferredModelRuntimeKind === 'llamacpp' && llamaEnv?.detected && !llamaEnv.binaryValid && llamaEnv.validateError ? (
+                    <div className="runtime-llama-setup-banner runtime-llama-setup-banner--error" role="alert">
+                      <p className="runtime-llama-setup-banner-title">llama-server binary is not usable</p>
+                      <p className="muted" style={{ margin: '0 0 12px', whiteSpace: 'pre-wrap' }}>
+                        {llamaEnv.validateError}
+                      </p>
+                      <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+                        Choose the <strong>llama-server</strong> executable from a llama.cpp release (not llama-cli). On
+                        Windows, use the variant that matches your GPU (CUDA/ Vulkan/ CPU) and keep DLLs next to the .exe.
+                      </p>
+                    </div>
+                  ) : null}
+                  {inferredModelRuntimeKind === 'llamacpp' && llamaEnv?.detected && !llamaEnv.configuredValid && llamaEnv.resolvedPath ? (
                     <p className="muted runtime-llama-path-note">
                       No saved binary path on disk; using{' '}
                       <code className="inline-code">{llamaEnv.resolvedPath}</code> from PATH. Save by starting a model from
                       the top bar or paste a binary path below.
                     </p>
                   ) : null}
-                    {runtimeKind === 'llamacpp' ? (
+                    {inferredModelRuntimeKind === 'llamacpp' ? (
                       <p className="muted runtime-field-hint-inline">
                         Weight files in folder:{' '}
                         <span className="runtime-local-models-dir">{paths?.modelsDefault ?? '—'}</span>
                       </p>
                     ) : null}
-                    {runtimeKind === 'llamacpp' ? (
+                    {inferredModelRuntimeKind === 'llamacpp' ? (
                       <>
                         <label className="runtime-field-label" htmlFor="runtime-llama-bin-input">
                           llama-server binary
                         </label>
-                        {llamaEnv?.detected && llamaEnv.configuredValid ? (
-                          <p className="muted runtime-llama-ok">Saved path looks valid.</p>
+                        {llamaEnv?.detected && llamaEnv.configuredValid && llamaEnv.binaryValid ? (
+                          <p className="muted runtime-llama-ok">Saved path looks valid (llama-server check passed).</p>
+                        ) : null}
+                        {llamaEnv?.detected && llamaEnv.configuredValid && !llamaEnv.binaryValid && llamaEnv.validateError ? (
+                          <p className="runtime-llama-validate-warn" role="alert">
+                            {llamaEnv.validateError}
+                          </p>
                         ) : null}
                         <input
                           id="runtime-llama-bin-input"
@@ -6064,7 +6983,7 @@ export default function App(): React.ReactElement {
                         </p>
                       </>
                     ) : null}
-                    {runtimeKind === 'llamacpp' && localModelFilePaths.length > 0 ? (
+                    {inferredModelRuntimeKind === 'llamacpp' && localModelFilePaths.length > 0 ? (
                       <div className="runtime-model-purge" role="group" aria-label="Delete local GGUF files">
                         <div className="runtime-model-purge-title">Delete local weight files</div>
                         <p className="muted" style={{ margin: '0 0 10px', fontSize: 12 }}>
@@ -6163,7 +7082,6 @@ export default function App(): React.ReactElement {
                                         className="btn-ghost-sm"
                                         disabled={runtimeStarting}
                                         onClick={() => {
-                                          setRuntimeKind('llamacpp')
                                           setModelPath(r.local_path)
                                         }}
                                       >
@@ -6208,23 +7126,192 @@ export default function App(): React.ReactElement {
 
               {drawer === 'train' && (
                 <>
-                  <p className="muted">Optional Python worker. Requires training/train_lora.py.</p>
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    Build a <strong>specialized local model</strong> by fine-tuning from a base GGUF (or HF folder path your
+                    Python stack accepts) on text exported from your <strong>knowledge base</strong>. The app writes{' '}
+                    <code className="inline-code">Alpaca-style</code> JSONL (instruction / output per chunk) into the job
+                    folder, runs <code className="inline-code">training/train_lora.py</code>, then copies any{' '}
+                    <code className="inline-code">merged.gguf</code> (or largest <code className="inline-code">.gguf</code>)
+                    into <code className="inline-code">models/finetunes/</code> so it appears in Run’s file picker.
+                  </p>
                   <div className="drawer-section">
-                    <h3>Paths</h3>
-                    <input className="input" placeholder="Base model path" value={trainBase} onChange={(e) => setTrainBase(e.target.value)} style={{ marginBottom: 8 }} />
-                    <input className="input" placeholder="Dataset JSONL" value={trainDataset} onChange={(e) => setTrainDataset(e.target.value)} />
+                    <h3 className="settings-section-title">
+                      <i className="fa-solid fa-database" aria-hidden style={{ marginRight: 6, opacity: 0.75 }} />
+                      Knowledge for training
+                    </h3>
+                    <p className="muted" style={{ marginTop: 0 }}>
+                      Tick sources to include all their chunks. Or leave sources empty and set an explicit JSONL path below
+                      (advanced).
+                    </p>
+                    <div
+                      className="train-kb-picker"
+                      style={{ maxHeight: 220, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8, padding: 8 }}
+                    >
+                      {trainKbSources.length === 0 ? (
+                        <p className="muted" style={{ margin: 0 }}>
+                          No knowledge sources yet — add documents or save a chat to the wiki from the Knowledge panel.
+                        </p>
+                      ) : (
+                        trainKbSources.map((s) => (
+                          <label
+                            key={s.id}
+                            className="metrics-widget-check"
+                            style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 6 }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={!!trainKbSelected[s.id]}
+                              onChange={(e) =>
+                                setTrainKbSelected((prev) => ({ ...prev, [s.id]: e.target.checked }))
+                              }
+                            />
+                            <span style={{ minWidth: 0 }}>{s.title}</span>
+                          </label>
+                        ))
+                      )}
+                    </div>
+                    <div className="row" style={{ marginTop: 10, gap: 8, flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn-secondary btn-ghost-sm"
+                        onClick={() => {
+                          const next: Record<string, boolean> = {}
+                          for (const s of trainKbSources) next[s.id] = true
+                          setTrainKbSelected(next)
+                        }}
+                      >
+                        Select all
+                      </button>
+                      <button type="button" className="btn-secondary btn-ghost-sm" onClick={() => setTrainKbSelected({})}>
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                  <div className="drawer-section">
+                    <h3 className="settings-section-title">
+                      <i className="fa-solid fa-sliders" aria-hidden style={{ marginRight: 6, opacity: 0.75 }} />
+                      Base model &amp; label
+                    </h3>
+                    <label className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                      Base weights path (local <code className="inline-code">.gguf</code> or path your trainer expects)
+                    </label>
+                    <input
+                      className="input"
+                      placeholder="C:\\…\\models\\Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+                      value={trainBase}
+                      onChange={(e) => setTrainBase(e.target.value)}
+                      style={{ width: '100%', marginBottom: 12 }}
+                    />
+                    <label className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                      Name for the specialized model (used in <code className="inline-code">finetunes/*.gguf</code>)
+                    </label>
+                    <input
+                      className="input"
+                      placeholder="e.g. wiki-support-bot"
+                      value={trainDisplayName}
+                      onChange={(e) => setTrainDisplayName(e.target.value)}
+                      style={{ width: '100%', marginBottom: 12 }}
+                    />
+                    <label className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                      Optional: dataset JSONL path on disk (skips knowledge checkboxes when filled)
+                    </label>
+                    <input
+                      className="input"
+                      placeholder="Leave empty to use selected knowledge sources"
+                      value={trainDataset}
+                      onChange={(e) => setTrainDataset(e.target.value)}
+                      style={{ width: '100%' }}
+                    />
                   </div>
                   <button
                     type="button"
                     className="btn-primary"
+                    disabled={trainStartBusy || !trainBase.trim()}
                     onClick={async () => {
-                      await window.api.trainStart({ baseModelPath: trainBase, datasetPath: trainDataset })
-                      setTrainJobs(await window.api.trainListJobs())
+                      const kbIds = Object.entries(trainKbSelected)
+                        .filter(([, on]) => on)
+                        .map(([id]) => id)
+                      const manualDs = trainDataset.trim()
+                      if (!manualDs && kbIds.length === 0) {
+                        setErr('Select knowledge sources or enter a dataset JSONL path.')
+                        return
+                      }
+                      setTrainStartBusy(true)
+                      setErr(null)
+                      try {
+                        await window.api.trainStart({
+                          baseModelPath: trainBase.trim(),
+                          ...(manualDs ? { datasetPath: manualDs } : { kbSourceIds: kbIds }),
+                          displayName: trainDisplayName.trim() || undefined
+                        })
+                        setTrainJobs((await window.api.trainListJobs()) as TrainJob[])
+                      } catch (e) {
+                        setErr(String(e))
+                      } finally {
+                        setTrainStartBusy(false)
+                      }
                     }}
                   >
-                    Start job
+                    {trainStartBusy ? 'Starting…' : 'Start fine-tune job'}
                   </button>
-                  <pre className="code-block">{JSON.stringify(trainJobs, null, 2)}</pre>
+                  <div className="drawer-section" style={{ marginTop: 16 }}>
+                    <h3 className="settings-section-title">
+                      <i className="fa-solid fa-list" aria-hidden style={{ marginRight: 6, opacity: 0.75 }} />
+                      Jobs
+                    </h3>
+                    {trainJobs.length === 0 ? (
+                      <p className="muted">No jobs yet.</p>
+                    ) : (
+                      <ul className="train-job-list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                        {trainJobs.map((j) => (
+                          <li
+                            key={j.id}
+                            style={{
+                              border: '1px solid var(--border)',
+                              borderRadius: 8,
+                              padding: 10,
+                              marginBottom: 8
+                            }}
+                          >
+                            <div style={{ fontWeight: 600 }}>{j.displayName ?? j.id.slice(0, 8)}</div>
+                            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                              Status: <strong>{j.status}</strong>
+                              {j.artifactPath ? (
+                                <>
+                                  {' · '}
+                                  <code className="inline-code" style={{ wordBreak: 'break-all' }}>
+                                    {j.artifactPath}
+                                  </code>
+                                </>
+                              ) : null}
+                            </div>
+                            {j.message ? (
+                              <pre className="code-block" style={{ marginTop: 8, fontSize: 11, maxHeight: 100, overflow: 'auto' }}>
+                                {j.message}
+                              </pre>
+                            ) : null}
+                            {(j.status === 'complete' || j.status === 'error') && (
+                              <button
+                                type="button"
+                                className="btn-secondary btn-ghost-sm"
+                                style={{ marginTop: 8 }}
+                                onClick={async () => {
+                                  try {
+                                    await window.api.trainRescanArtifact(j.id)
+                                    setTrainJobs((await window.api.trainListJobs()) as TrainJob[])
+                                  } catch (e) {
+                                    setErr(String(e))
+                                  }
+                                }}
+                              >
+                                Rescan output for GGUF → models/finetunes
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 </>
               )}
 
@@ -6477,8 +7564,9 @@ export default function App(): React.ReactElement {
                         Generation &amp; wiki
                       </h3>
                       <p className="muted" style={{ marginTop: 0 }}>
-                        Caps how many tokens the model may generate per reply (Ollama <code className="inline-code">num_predict</code>, llama.cpp{' '}
-                        <code className="inline-code">max_tokens</code>). Takes effect on the next message.
+                        Default max new tokens per reply for Ollama (<code className="inline-code">num_predict</code>) and for llama.cpp when you have not set a separate cap under{' '}
+                        <strong>Settings → Data → llama.cpp server</strong>. llama-server also uses this (or the llama-specific value) as <code className="inline-code">-n</code> when started;
+                        restart Run after changing if another client on the same port omits <code className="inline-code">max_tokens</code>.
                       </p>
                       <label style={{ display: 'block', marginTop: 12 }}>
                         <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
@@ -6501,6 +7589,62 @@ export default function App(): React.ReactElement {
                           }}
                         />
                       </label>
+                      {(() => {
+                        const n = parseInt(chatMaxTokensDraft.trim(), 10)
+                        return Number.isFinite(n) && n > 0 && n < 1024 ? (
+                          <p className="muted" style={{ marginTop: 8, marginBottom: 0, maxWidth: 520 }}>
+                            Values under ~1024 tokens often cut answers short. Raise this for normal chat unless you
+                            need very short replies.
+                          </p>
+                        ) : null
+                      })()}
+                      <label style={{ display: 'block', marginTop: 16 }}>
+                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                          <i className="fa-solid fa-clock-rotate-left" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
+                          Chat history messages (sent to the model)
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          style={{ width: '100%', maxWidth: 200 }}
+                          min={2}
+                          max={500}
+                          step={1}
+                          value={chatHistoryMaxMessagesDraft}
+                          onChange={(e) => setChatHistoryMaxMessagesDraft(e.target.value)}
+                          onBlur={() => {
+                            const n = parseInt(chatHistoryMaxMessagesDraft.trim(), 10)
+                            const v = chatHistoryMaxMessagesFromConfig(Number.isFinite(n) ? n : undefined)
+                            setChatHistoryMaxMessagesDraft(String(v))
+                            void window.api.setConfig({ chatHistoryMaxMessages: v })
+                          }}
+                        />
+                      </label>
+                      <p className="muted" style={{ marginTop: 6, marginBottom: 0, fontSize: 12, maxWidth: 560 }}>
+                        Only the most recent user+assistant bubbles are included in each request (older turns are
+                        dropped). Lower this if llama.cpp runs out of context with long threads or large RAG inserts.
+                      </p>
+                      <p className="muted" style={{ marginTop: 14, marginBottom: 0, fontSize: 12, maxWidth: 560 }}>
+                        Mood and journal updates use the profile system prompt only when you ask for a personal stance
+                        (e.g. “What is your opinion on …?”). Ordinary questions use a neutral assistant prompt.
+                      </p>
+                      <label className="metrics-widget-check" style={{ marginTop: 12 }}>
+                        <input
+                          type="checkbox"
+                          checked={chatDomainEnhancement}
+                          onChange={(e) => {
+                            const v = e.target.checked
+                            setChatDomainEnhancement(v)
+                            void window.api.setConfig({ chatDomainEnhancement: v })
+                          }}
+                        />
+                        <span>
+                          Domain-enhanced prompts — when a user message matches a{' '}
+                          <strong>Chat prompt domain</strong> that has optional context (see Wiki → domains), append
+                          that text to the system message (bounded to {MAX_PROMPT_DOMAIN_SUFFIX_CHARS} characters per
+                          turn).
+                        </span>
+                      </label>
                       <label className="metrics-widget-check" style={{ marginTop: 16 }}>
                         <input
                           type="checkbox"
@@ -6521,6 +7665,41 @@ export default function App(): React.ReactElement {
                         they can be removed with <strong>Save chat to knowledge base</strong>–style cleanup when you delete the chat. Turn off to save time and
                         tokens.
                       </p>
+                      <label className="metrics-widget-check" style={{ marginTop: 18 }}>
+                        <input
+                          type="checkbox"
+                          checked={agenticWorkersEnabled}
+                          onChange={(e) => {
+                            const v = e.target.checked
+                            setAgenticWorkersEnabled(v)
+                            void window.api.setConfig({ agenticWorkersEnabled: v })
+                          }}
+                        />
+                        <span>
+                          <i className="fa-solid fa-diagram-project" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
+                          Enable parallel multi-model agents (Ollama only)
+                        </span>
+                      </label>
+                      <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                        Each send runs a short planner on your primary model, then up to four specialist workers in parallel. Workers can use different Ollama
+                        tags on this machine. Optionally, you may add a second Ollama base URL for another host <strong>you</strong> operate (homelab PC, LAN
+                        box, VPS with Ollama). Third-party LLM APIs are not supported — self-hosted Ollama only.
+                      </p>
+                      <label style={{ display: 'block', marginTop: 14 }}>
+                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                          <i className="fa-solid fa-server" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
+                          Self-hosted Ollama URL (optional, second machine you run)
+                        </span>
+                        <input
+                          type="url"
+                          className="input"
+                          style={{ width: '100%', maxWidth: 420 }}
+                          placeholder="http://192.168.1.50:11434 or https://ollama.myserver.net"
+                          value={agentRemoteOllamaUrlDraft}
+                          onChange={(e) => setAgentRemoteOllamaUrlDraft(e.target.value)}
+                          onBlur={() => void window.api.setConfig({ agentRemoteOllamaUrl: agentRemoteOllamaUrlDraft.trim() })}
+                        />
+                      </label>
                     </div>
                   </section>
                     )}
@@ -6734,24 +7913,10 @@ export default function App(): React.ReactElement {
                           </button>
                         </div>
                         <div className="drawer-section">
-                          <h3 className="settings-section-title">
-                            <i className="fa-solid fa-layer-group" aria-hidden />
-                            Default backend
-                          </h3>
-                          <label style={{ display: 'block', marginTop: 8 }}>
-                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                              Active runtime kind (matches top bar)
-                            </span>
-                            <select
-                              className="select"
-                              style={{ width: '100%', maxWidth: 320 }}
-                              value={runtimeKind}
-                              onChange={(e) => void applyRuntimeKindSetting(e.target.value as 'ollama' | 'llamacpp')}
-                            >
-                              <option value="ollama">Ollama</option>
-                              <option value="llamacpp">llama.cpp (server)</option>
-                            </select>
-                          </label>
+                          <p className="muted" style={{ marginTop: 0, marginBottom: 0 }}>
+                            Ollama tags and local weight files are combined in the top bar. The app starts <strong>Ollama</strong> or{' '}
+                            <strong>llama-server</strong> automatically from the entry you pick.
+                          </p>
                         </div>
                         <div className="drawer-section">
                           <h3 className="settings-section-title">
@@ -6826,6 +7991,166 @@ export default function App(): React.ReactElement {
                           </label>
                           <label style={{ display: 'block', marginTop: 16 }}>
                             <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              Context size (tokens, <code className="inline-code">-c</code>)
+                            </span>
+                            <input
+                              type="number"
+                              className="input"
+                              style={{ width: '100%', maxWidth: 200 }}
+                              min={LLAMA_CONTEXT_TOKENS_MIN}
+                              max={LLAMA_CONTEXT_TOKENS_MAX}
+                              step={1024}
+                              value={llamaContextTokensDraft}
+                              onChange={(e) => setLlamaContextTokensDraft(e.target.value)}
+                              onBlur={() => {
+                                const n = parseInt(llamaContextTokensDraft.trim(), 10)
+                                const v = clampLlamaContextTokens(
+                                  Number.isFinite(n) ? n : LLAMA_CONTEXT_TOKENS_DEFAULT
+                                )
+                                setLlamaContextTokensDraft(String(v))
+                                void window.api.setConfig({ llamaContextTokens: v })
+                              }}
+                            />
+                          </label>
+                          <p className="muted" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
+                            Prompt plus reply must fit in this window (long chats and RAG need more). Uses more VRAM/RAM when
+                            higher. Restart Run after changing.
+                          </p>
+                          <label style={{ display: 'block', marginTop: 18 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              Max response tokens (llama.cpp only)
+                            </span>
+                            <input
+                              type="number"
+                              className="input"
+                              style={{ width: '100%', maxWidth: 200 }}
+                              min={CHAT_MAX_TOKENS_MIN}
+                              max={CHAT_MAX_TOKENS_MAX}
+                              value={llamaChatMaxTokensDraft}
+                              placeholder={chatMaxTokensDraft.trim() || String(CHAT_MAX_TOKENS_DEFAULT)}
+                              onChange={(e) => setLlamaChatMaxTokensDraft(e.target.value)}
+                              onBlur={() => {
+                                const t = llamaChatMaxTokensDraft.trim()
+                                if (!t) {
+                                  void window.api.setConfig({ llamaChatMaxTokens: null })
+                                  return
+                                }
+                                const n = parseInt(t, 10)
+                                const v = clampChatMaxTokens(Number.isFinite(n) ? n : CHAT_MAX_TOKENS_DEFAULT)
+                                setLlamaChatMaxTokensDraft(String(v))
+                                void window.api.setConfig({ llamaChatMaxTokens: v })
+                              }}
+                            />
+                          </label>
+                          <p className="muted" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
+                            Optional override for <code className="inline-code">max_tokens</code> and server <code className="inline-code">-n</code>. Leave empty to use{' '}
+                            <strong>Chat &amp; knowledge → Max response tokens</strong>. Restart Run after changing.
+                          </p>
+                          <p className="settings-section-title" style={{ marginTop: 18, marginBottom: 6, fontSize: 14 }}>
+                            Sampling (OpenAI API)
+                          </p>
+                          <p className="muted" style={{ marginTop: 0, fontSize: 12 }}>
+                            Passed on each <code className="inline-code">/v1/chat/completions</code> call. Restart Run is not required.
+                          </p>
+                          <div className="settings-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, maxWidth: 440 }}>
+                            <label style={{ display: 'block' }}>
+                              <span className="muted" style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
+                                Temperature
+                              </span>
+                              <input
+                                type="number"
+                                className="input"
+                                min={0}
+                                max={2}
+                                step={0.05}
+                                value={llamaTemperatureDraft}
+                                onChange={(e) => setLlamaTemperatureDraft(e.target.value)}
+                                onBlur={() => {
+                                  const n = parseFloat(llamaTemperatureDraft.trim())
+                                  const v = Number.isFinite(n) ? Math.min(2, Math.max(0, n)) : 0.8
+                                  setLlamaTemperatureDraft(String(v))
+                                  void window.api.setConfig({ llamaTemperature: v })
+                                }}
+                              />
+                            </label>
+                            <label style={{ display: 'block' }}>
+                              <span className="muted" style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
+                                Top P
+                              </span>
+                              <input
+                                type="number"
+                                className="input"
+                                min={0}
+                                max={1}
+                                step={0.05}
+                                value={llamaTopPDraft}
+                                onChange={(e) => setLlamaTopPDraft(e.target.value)}
+                                onBlur={() => {
+                                  const n = parseFloat(llamaTopPDraft.trim())
+                                  const v = Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.95
+                                  setLlamaTopPDraft(String(v))
+                                  void window.api.setConfig({ llamaTopP: v })
+                                }}
+                              />
+                            </label>
+                            <label style={{ display: 'block' }}>
+                              <span className="muted" style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
+                                Frequency penalty
+                              </span>
+                              <input
+                                type="number"
+                                className="input"
+                                min={-2}
+                                max={2}
+                                step={0.1}
+                                value={llamaFrequencyPenaltyDraft}
+                                onChange={(e) => setLlamaFrequencyPenaltyDraft(e.target.value)}
+                                onBlur={() => {
+                                  const n = parseFloat(llamaFrequencyPenaltyDraft.trim())
+                                  const v = Number.isFinite(n) ? Math.min(2, Math.max(-2, n)) : 0
+                                  setLlamaFrequencyPenaltyDraft(String(v))
+                                  void window.api.setConfig({ llamaFrequencyPenalty: v })
+                                }}
+                              />
+                            </label>
+                            <label style={{ display: 'block' }}>
+                              <span className="muted" style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
+                                Presence penalty
+                              </span>
+                              <input
+                                type="number"
+                                className="input"
+                                min={-2}
+                                max={2}
+                                step={0.1}
+                                value={llamaPresencePenaltyDraft}
+                                onChange={(e) => setLlamaPresencePenaltyDraft(e.target.value)}
+                                onBlur={() => {
+                                  const n = parseFloat(llamaPresencePenaltyDraft.trim())
+                                  const v = Number.isFinite(n) ? Math.min(2, Math.max(-2, n)) : 0
+                                  setLlamaPresencePenaltyDraft(String(v))
+                                  void window.api.setConfig({ llamaPresencePenalty: v })
+                                }}
+                              />
+                            </label>
+                          </div>
+                          <label className="metrics-widget-check" style={{ marginTop: 12 }}>
+                            <input
+                              type="checkbox"
+                              checked={llamaRagGrounding}
+                              onChange={(e) => {
+                                const v = e.target.checked
+                                setLlamaRagGrounding(v)
+                                void window.api.setConfig({ llamaRagGrounding: v })
+                              }}
+                            />
+                            <span>
+                              Require RAG snippet citations (llama.cpp) — adds instructions to cite [1], [2], … and
+                              warns if the reply omits them.
+                            </span>
+                          </label>
+                          <label style={{ display: 'block', marginTop: 16 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
                               <code className="inline-code">llama-server</code> binary path
                             </span>
                             <input
@@ -6845,6 +8170,16 @@ export default function App(): React.ReactElement {
                           {llamaEnv?.detected && llamaEnv.resolvedPath ? (
                             <p className="muted" style={{ marginTop: 10, marginBottom: 0, fontSize: 12 }}>
                               Detected on PATH: <code className="inline-code">{llamaEnv.resolvedPath}</code>
+                            </p>
+                          ) : null}
+                          {llamaEnv?.detected && llamaEnv.binaryValid ? (
+                            <p className="muted runtime-llama-ok" style={{ marginTop: 10, marginBottom: 0 }}>
+                              llama-server validation passed (--help probe).
+                            </p>
+                          ) : null}
+                          {llamaEnv?.detected && !llamaEnv.binaryValid && llamaEnv.validateError ? (
+                            <p className="runtime-llama-validate-warn" role="alert" style={{ marginTop: 10, marginBottom: 0 }}>
+                              {llamaEnv.validateError}
                             </p>
                           ) : null}
                           <label style={{ display: 'block', marginTop: 18 }}>
@@ -7057,7 +8392,7 @@ export default function App(): React.ReactElement {
             ) : null}
             {settingsConfirmKind === 'factory' ? (
               <p className="muted modal-text">
-                Stops the runtime and cancels in-flight downloads. All saved settings (including custom models folder, llama binary and Safetensors-convert paths, Ollama URL, ports, max response tokens, auto wiki extraction from chat, IDE integration, and pinned widgets) return to defaults, and your Hugging Face token is removed from this device. Chats, knowledge base, wiki, caches, and model files are not changed by this action alone.
+                Stops the runtime and cancels in-flight downloads. All saved settings (including custom models folder, llama binary and Safetensors-convert paths, Ollama URL, ports, llama context size, max response tokens, auto wiki extraction from chat, IDE integration, and pinned widgets) return to defaults, and your Hugging Face token is removed from this device. Chats, knowledge base, wiki, caches, and model files are not changed by this action alone.
               </p>
             ) : null}
             <div className="modal-actions">
@@ -7082,6 +8417,7 @@ export default function App(): React.ReactElement {
           </div>
         </div>
       )}
+      </div>
     </div>
   )
 }

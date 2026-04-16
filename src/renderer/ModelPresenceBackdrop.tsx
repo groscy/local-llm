@@ -24,6 +24,8 @@ export type ModelPresenceBackdropProps = {
   ctxPercent?: number
   /** Evolving mood from optional [[AMB:…]] markers; blends with load-based motion. */
   personality?: ModelPersonalityVibe | null
+  /** 0–1: brief startup “wake” pulse while the presence overlay is visible (idle runtime only). */
+  wakeIntensity?: number
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -43,6 +45,10 @@ function targetActivity(p: ModelPresenceBackdropProps): number {
   }
   if (p.running) {
     return Math.min(1, 0.16 + Math.min(0.36, tok / 75) + (cpu / 100) * 0.24 + (ctx / 100) * 0.16)
+  }
+  const wake = clamp(p.wakeIntensity ?? 0, 0, 1)
+  if (wake > 0) {
+    return Math.min(1, 0.08 + wake * 0.52)
   }
   return 0.06
 }

@@ -1,3 +1,4 @@
+import type { KnowledgeGraphAnalysisRunResponse } from '@shared/knowledgeGraphAnalysis'
 import type {
   DownloadRow,
   HardwareSummary,
@@ -73,6 +74,10 @@ type Api = {
     llamaResolvedPath: string
     llamaDetected: boolean
     llamaConfiguredPathValid: boolean
+    /** True when `llamaResolvedPath` passes a llama-server --help probe. */
+    llamaBinaryValid: boolean
+    /** Set when the binary exists but is not usable (wrong tool, missing DLL, etc.). */
+    llamaValidateError: string | null
     /** Ollama daemon responds at `ollamaBase` (/api/tags). */
     ollamaReachable: boolean
   }>
@@ -103,10 +108,13 @@ type Api = {
   deleteLocalGgufModel: (absolutePath: string) => Promise<{ ok: true }>
   /** Remove one model from the Ollama library. Unload first if it is the active model. */
   deleteOllamaModel: (modelName: string) => Promise<{ ok: true }>
+  /**
+   * Chat via the active runtime (Ollama or llama.cpp). Omitted `maxTokens` uses Settings → Max response tokens.
+   */
   runtimeChat: (
     messages: { role: string; content: string }[],
     requestId: string,
-    opts?: { maxTokens?: number }
+    opts?: { maxTokens?: number; ollamaModel?: string; ollamaBaseUrl?: string }
   ) => Promise<string>
   conversationsList: () => Promise<unknown[]>
   conversationCreate: (title?: string) => Promise<unknown>
@@ -125,7 +133,10 @@ type Api = {
       completionIsEstimate?: boolean
     }
   ) => Promise<unknown>
+  messageDelete: (conversationId: string, messageId: string) => Promise<{ ok: boolean }>
   promptDomainsList: () => Promise<PromptDomainRow[]>
+  promptDomainSetSuffix: (p: { domainId: string; systemSuffix: string }) => Promise<{ ok: true }>
+  trainBaseForFinetunePath: (artifactPath: string) => Promise<{ baseModelPath: string | null }>
   kbIngestText: (title: string, uri: string, body: string) => Promise<unknown>
   kbIngestConversation: (conversationId: string) => Promise<unknown>
   kbIngestFile: () => Promise<unknown>
@@ -139,6 +150,7 @@ type Api = {
   kbDeleteSource: (sourceId: string) => Promise<{ ok: true }>
   kbExportWikiZip: () => Promise<WikiExportZipResult>
   kbKnowledgeGraph: () => Promise<KnowledgeGraphPayload>
+  kbGraphAnalysisRun: (opts?: { ingestReport?: boolean }) => Promise<KnowledgeGraphAnalysisRunResponse>
   kbWikiExtractTurn: (p: {
     conversationId: string
     conversationTitle?: string
@@ -147,9 +159,16 @@ type Api = {
   }) => Promise<WikiExtractTurnResult>
   metricsSnapshot: (opts?: { persist?: boolean }) => Promise<unknown>
   metricsHistory: (limit?: number) => Promise<unknown[]>
-  trainStart: (p: { baseModelPath: string; datasetPath: string; pythonPath?: string }) => Promise<unknown>
+  trainStart: (p: {
+    baseModelPath: string
+    datasetPath?: string
+    kbSourceIds?: string[]
+    displayName?: string
+    pythonPath?: string
+  }) => Promise<unknown>
   trainStatus: (id: string) => Promise<unknown>
   trainListJobs: () => Promise<unknown[]>
+  trainRescanArtifact: (jobId: string) => Promise<unknown>
   setHfToken: (token: string | null) => Promise<{ ok: boolean; warn?: string }>
 }
 

@@ -66,9 +66,22 @@ function looksLikeAsciiDoc(s: string): boolean {
 function toSafeHtml(raw: string): string {
   return DOMPurify.sanitize(raw, {
     USE_PROFILES: { html: true },
-    ADD_ATTR: ['target', 'rel', 'data-katex-id', 'data-katex-display'],
+    ADD_ATTR: [
+      'target',
+      'rel',
+      'data-katex-id',
+      'data-katex-display',
+      'loading',
+      'decoding',
+      'srcset',
+      'sizes',
+      'referrerpolicy',
+      'media',
+      'type'
+    ],
+    /** https / http / mailto / ftp / data (e.g. PNG base64) / blob (e.g. canvas) + relative-looking paths */
     ALLOWED_URI_REGEXP:
-      /^(?:(?:https?|mailto|ftp|data):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
+      /^(?:(?:https?|mailto|ftp|data|blob):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
   })
 }
 

@@ -8,19 +8,19 @@ function layoutGraph(
   data: KnowledgeGraphPayload,
   containerWidth: number
 ): { positions: Map<string, Pos>; boxes: Map<string, Box>; width: number; height: number } {
-  const pad = 32
-  const wikiBoxW = 124
-  const wikiBoxH = 38
-  const wikiGapX = 20
-  const wikiRowGap = 28
-  const sourceR = 24
-  const sourceBoxW = 132
+  const pad = 28
+  const wikiBoxW = 136
+  const wikiBoxH = 36
+  const wikiGapX = 14
+  const wikiRowGap = 22
+  const sourceR = 22
+  const sourceBoxW = 128
   const sourceBoxH = sourceR * 2
-  const chunkW = 96
-  const chunkH = 26
-  const chunkGap = 12
-  const minSourceTrack = 148
-  const colGap = 16
+  const chunkW = 88
+  const chunkH = 24
+  const chunkGapY = 8
+  const chunkGapX = 10
+  const colGap = 14
 
   const sources = data.nodes.filter((n) => n.kind === 'source')
   const wikis = data.nodes.filter((n) => n.kind === 'wiki')
@@ -33,11 +33,20 @@ function layoutGraph(
     }
   }
 
+  const chunkColsFor = (n: number): number => {
+    if (n <= 8) return 1
+    if (n <= 20) return 2
+    return 3
+  }
+
+  const nCol = Math.max(sources.length, 1)
+  const minSourceTrack =
+    nCol > 24 ? 104 : nCol > 16 ? 118 : nCol > 10 ? 132 : 148
+
   const positions = new Map<string, Pos>()
   const boxes = new Map<string, Box>()
 
   const innerFromContainer = Math.max(containerWidth - pad * 2, 200)
-  const nCol = Math.max(sources.length, 1)
   const minInnerForSources = nCol * minSourceTrack + (nCol - 1) * colGap
   const innerW = Math.max(innerFromContainer, minInnerForSources)
   const layoutWidth = innerW + pad * 2
@@ -87,21 +96,29 @@ function layoutGraph(
     })
 
     const chunks = chunksBySource.get(s.id) ?? []
-    let y = ySource + sourceR + 22
-    for (const ch of chunks) {
-      positions.set(ch.id, { x, y })
+    const cols = chunkColsFor(chunks.length)
+    const colStride = chunkW + chunkGapX
+    const blockHalf = ((cols - 1) * colStride) / 2
+    const rows = Math.ceil(chunks.length / cols)
+    let y = ySource + sourceR + 18
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const ch = chunks[idx]!
+      const col = idx % cols
+      const row = Math.floor(idx / cols)
+      const xc = x - blockHalf + col * colStride
+      const yc = y + row * (chunkH + chunkGapY)
+      positions.set(ch.id, { x: xc, y: yc })
       boxes.set(ch.id, {
-        x: x - chunkW / 2,
-        y: y - chunkH / 2,
+        x: xc - chunkW / 2,
+        y: yc - chunkH / 2,
         w: chunkW,
         h: chunkH
       })
-      deepest = Math.max(deepest, y + chunkH / 2)
-      y += chunkH + chunkGap
+      deepest = Math.max(deepest, yc + chunkH / 2)
     }
   })
 
-  const height = Math.max(320, deepest + pad + 56)
+  const height = Math.max(340, deepest + pad + 48)
   return { positions, boxes, width: layoutWidth, height }
 }
 
@@ -145,12 +162,25 @@ export function KnowledgeGraphView(props: {
   onPickSource?: (sourceId: string) => void
   /** When true, omit the toolbar title (parent supplies a section heading). */
   hideToolbarTitle?: boolean
+  /** Optional graph analysis job (cluster / hubs / refinements); wired from main process. */
+  graphAnalysis?: {
+    busy: boolean
+    error: string | null
+    summary: string | null
+    markdown: string | null
+    ingestedId: string | null
+  }
+  onRunGraphAnalysis?: (opts: { ingestReport: boolean }) => void
 }): ReactNode {
-  const { data, loading, onRefresh, onPickSource, hideToolbarTitle } = props
+  const { data, loading, onRefresh, onPickSource, hideToolbarTitle, graphAnalysis, onRunGraphAnalysis } =
+    props
   const tbClass = `kg-toolbar${hideToolbarTitle ? ' kg-toolbar--embedded' : ''}`
+  const analysisBusy = graphAnalysis?.busy ?? false
+  const graphInitialLoad = loading && data == null
   const wrapRef = useRef<HTMLDivElement>(null)
   const [w, setW] = useState(640)
   const [hoverId, setHoverId] = useState<string | null>(null)
+  const [zoom, setZoom] = useState(1)
 
   useLayoutEffect(() => {
     const el = wrapRef.current
@@ -170,6 +200,19 @@ export function KnowledgeGraphView(props: {
     return layoutGraph(data, w)
   }, [data, w])
 
+  const graphCounts = useMemo(() => {
+    if (!data) return null
+    const sources = data.nodes.filter((n) => n.kind === 'source').length
+    const chunks = data.nodes.filter((n) => n.kind === 'chunk').length
+    const wikis = data.nodes.filter((n) => n.kind === 'wiki').length
+    const edges = data.edges.length
+    return { sources, chunks, wikis, edges }
+  }, [data])
+
+  useLayoutEffect(() => {
+    setZoom(1)
+  }, [data])
+
   const edgeHighlight = useCallback(
     (from: string, to: string): boolean => {
       if (!hoverId) return false
@@ -187,18 +230,75 @@ export function KnowledgeGraphView(props: {
     [onPickSource]
   )
 
+  const fitZoom = useCallback(() => {
+    const el = wrapRef.current
+    if (!el || !layout) return
+    const pad = 20
+    const zw = Math.max(120, el.clientWidth - pad)
+    const zh = Math.max(120, el.clientHeight - pad)
+    const sx = zw / layout.width
+    const sy = zh / layout.height
+    setZoom(Math.min(2.4, Math.max(0.1, Math.min(sx, sy))))
+  }, [layout])
+
+  const analysisPanel =
+    graphAnalysis &&
+    (graphAnalysis.error ||
+      graphAnalysis.summary ||
+      graphAnalysis.markdown ||
+      graphAnalysis.ingestedId) ? (
+      <div className="kg-analysis" aria-live="polite">
+        {graphAnalysis.error ? (
+          <p className="kg-analysis-error" role="alert">
+            {graphAnalysis.error}
+          </p>
+        ) : null}
+        {graphAnalysis.summary ? <p className="kg-analysis-summary">{graphAnalysis.summary}</p> : null}
+        {graphAnalysis.ingestedId ? (
+          <p className="muted kg-analysis-ingested">Report saved as a new library document.</p>
+        ) : null}
+        {graphAnalysis.markdown ? (
+          <details className="kg-analysis-details">
+            <summary>Full report (Markdown)</summary>
+            <pre className="kg-analysis-md">{graphAnalysis.markdown}</pre>
+          </details>
+        ) : null}
+      </div>
+    ) : null
+
   if (loading && !data) {
     return (
       <div className="kg-panel">
         <div className={tbClass}>
           {!hideToolbarTitle ? <span className="kg-toolbar-title">Knowledge graph</span> : null}
           <div className="kg-toolbar-meta">
+            {onRunGraphAnalysis ? (
+              <>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  disabled={graphInitialLoad || analysisBusy}
+                  onClick={() => onRunGraphAnalysis({ ingestReport: false })}
+                >
+                  {analysisBusy ? '…' : 'Analyze graph'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  disabled={graphInitialLoad || analysisBusy}
+                  onClick={() => onRunGraphAnalysis({ ingestReport: true })}
+                >
+                  {analysisBusy ? '…' : 'Save report to library'}
+                </button>
+              </>
+            ) : null}
             <button type="button" className="btn-secondary btn-sm" onClick={onRefresh} disabled>
               Refresh
             </button>
           </div>
         </div>
         <p className="muted kg-empty">Loading graph…</p>
+        {analysisPanel}
       </div>
     )
   }
@@ -209,6 +309,26 @@ export function KnowledgeGraphView(props: {
         <div className={tbClass}>
           {!hideToolbarTitle ? <span className="kg-toolbar-title">Knowledge graph</span> : null}
           <div className="kg-toolbar-meta">
+            {onRunGraphAnalysis ? (
+              <>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  disabled={graphInitialLoad || analysisBusy}
+                  onClick={() => onRunGraphAnalysis({ ingestReport: false })}
+                >
+                  {analysisBusy ? '…' : 'Analyze graph'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  disabled={graphInitialLoad || analysisBusy}
+                  onClick={() => onRunGraphAnalysis({ ingestReport: true })}
+                >
+                  {analysisBusy ? '…' : 'Save report to library'}
+                </button>
+              </>
+            ) : null}
             <button type="button" className="btn-secondary btn-sm" onClick={onRefresh}>
               Refresh
             </button>
@@ -217,6 +337,7 @@ export function KnowledgeGraphView(props: {
         <p className="muted kg-empty">
           No sources yet. Use <strong>+ Add document</strong> in the library to ingest text; then open this view again.
         </p>
+        {analysisPanel}
       </div>
     )
   }
@@ -224,28 +345,101 @@ export function KnowledgeGraphView(props: {
   if (!layout) return null
 
   const { positions, boxes, width: layoutWidth, height } = layout
+  const scaledW = layoutWidth * zoom
+  const scaledH = height * zoom
 
   return (
     <div className="kg-panel">
       <div className={tbClass}>
         {!hideToolbarTitle ? <span className="kg-toolbar-title">Knowledge graph</span> : null}
         <div className="kg-toolbar-meta">
-          {data.truncated && <span className="kg-truncation-note">Sampled for display</span>}
+          {graphCounts ? (
+            <span className="kg-toolbar-counts" title="Nodes shown in this view (large libraries may be sampled)">
+              {graphCounts.sources} sources · {graphCounts.chunks} chunk nodes · {graphCounts.wikis} wiki ·{' '}
+              {graphCounts.edges} edges
+            </span>
+          ) : null}
+          {data.truncated && (
+            <span className="kg-truncation-note" title="Some chunks, wiki pages, or cross-links are omitted to keep the graph fast">
+              Sampled
+            </span>
+          )}
+          <span className="kg-zoom-cluster" aria-label="Zoom">
+            <button type="button" className="btn-secondary btn-sm" onClick={() => fitZoom()} title="Fit graph to panel">
+              Fit
+            </button>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => setZoom((z) => Math.max(0.1, Math.round((z / 1.12) * 1000) / 1000))}
+              title="Zoom out"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => setZoom((z) => Math.min(2.5, Math.round(z * 1.12 * 1000) / 1000))}
+              title="Zoom in"
+            >
+              +
+            </button>
+            <button type="button" className="btn-secondary btn-sm" onClick={() => setZoom(1)} title="Reset zoom (100%)">
+              100%
+            </button>
+            <span className="kg-zoom-hint muted">Ctrl+wheel</span>
+          </span>
+          {onRunGraphAnalysis ? (
+            <>
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                disabled={loading || analysisBusy}
+                onClick={() => onRunGraphAnalysis({ ingestReport: false })}
+              >
+                {analysisBusy ? '…' : 'Analyze graph'}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary btn-sm"
+                disabled={loading || analysisBusy}
+                onClick={() => onRunGraphAnalysis({ ingestReport: true })}
+              >
+                {analysisBusy ? '…' : 'Save report to library'}
+              </button>
+            </>
+          ) : null}
           <button type="button" className="btn-secondary btn-sm" onClick={onRefresh} disabled={loading}>
             {loading ? '…' : 'Refresh'}
           </button>
         </div>
       </div>
 
-      <div ref={wrapRef} className="kg-svg-wrap">
-        <svg
-          className="kg-graph-svg"
-          width={layoutWidth}
-          height={height}
-          viewBox={`0 0 ${layoutWidth} ${height}`}
-          role="img"
-          aria-label="Knowledge base structure: sources, indexed chunks, and wiki pages"
+      <div
+        ref={wrapRef}
+        className="kg-svg-wrap"
+        onWheel={(e) => {
+          if (!e.ctrlKey && !e.metaKey) return
+          e.preventDefault()
+          setZoom((z) => {
+            const next = e.deltaY < 0 ? z * 1.08 : z / 1.08
+            return Math.min(2.5, Math.max(0.1, Math.round(next * 1000) / 1000))
+          })
+        }}
+      >
+        <div
+          className="kg-svg-scale-box"
+          style={{ width: scaledW, height: scaledH }}
         >
+          <svg
+            className="kg-graph-svg"
+            width={layoutWidth}
+            height={height}
+            style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }}
+            viewBox={`0 0 ${layoutWidth} ${height}`}
+            role="img"
+            aria-label="Knowledge base structure: sources, indexed chunks, and wiki pages"
+          >
           <g className="kg-edges">
             {data.edges.map((e, i) => {
               const p1 = positions.get(e.from)
@@ -271,7 +465,8 @@ export function KnowledgeGraphView(props: {
               const b = boxes.get(n.id)
               if (!p || !b) return null
               const hi = hoverId === n.id
-              const label = truncate(n.label, n.kind === 'chunk' ? 18 : 24)
+              const isOverflow = n.kind === 'chunk' && n.id.startsWith('kg-overflow:')
+              const label = truncate(n.label, n.kind === 'chunk' ? (isOverflow ? 12 : 16) : 26)
               if (n.kind === 'wiki') {
                 return (
                   <g
@@ -325,7 +520,7 @@ export function KnowledgeGraphView(props: {
               return (
                 <g
                   key={n.id}
-                  className={`kg-node kg-node--chunk${hi ? ' kg-node--hi' : ''}`}
+                  className={`kg-node kg-node--chunk${isOverflow ? ' kg-node--overflow' : ''}${hi ? ' kg-node--hi' : ''}`}
                   style={{ cursor: onPickSource ? 'pointer' : 'default' }}
                   onMouseEnter={() => setHoverId(n.id)}
                   onMouseLeave={() => setHoverId(null)}
@@ -341,6 +536,7 @@ export function KnowledgeGraphView(props: {
             })}
           </g>
         </svg>
+        </div>
       </div>
 
       <ul className="kg-legend" aria-label="Legend">
@@ -349,6 +545,9 @@ export function KnowledgeGraphView(props: {
         </li>
         <li>
           <span className="kg-legend-swatch kg-node--chunk" /> Chunk
+        </li>
+        <li>
+          <span className="kg-legend-swatch kg-node--overflow" /> +N more chunks (sampled)
         </li>
         <li>
           <span className="kg-legend-swatch kg-node--wiki" /> Wiki page
@@ -366,6 +565,8 @@ export function KnowledgeGraphView(props: {
           <span className="kg-legend-line kg-edge--related" /> related title
         </li>
       </ul>
+
+      {analysisPanel}
     </div>
   )
 }
