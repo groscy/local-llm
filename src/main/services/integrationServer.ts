@@ -4,19 +4,13 @@ import { z } from 'zod'
 import type { ChatMessage, RuntimeAdapter } from './runtime/types'
 import { recordChatRoundtripMs } from './chatLatencyStats'
 import { appendPluginReport } from './pluginIntegrationHub'
+import { resolveChatMaxCompletionTokens } from './chatMaxTokens'
+import { llamaSamplingFromStore } from './llamaChatOptions'
 import { logLine } from '../logger'
 
 const DEFAULT_PORT = 17373
 
 let server: http.Server | null = null
-
-function readChatMaxTokens(store: Store<Record<string, unknown>>): number {
-  const rawMax = store.get('chatMaxTokens')
-  if (typeof rawMax === 'number' && Number.isFinite(rawMax)) {
-    return Math.min(262_144, Math.max(1, Math.floor(rawMax)))
-  }
-  return 512
-}
 
 function expectedToken(store: Store<Record<string, unknown>>): string | null {
   const t = store.get('integrationToken')
@@ -172,15 +166,30 @@ export function configureIntegrationServer(ctx: {
           return
         }
         const messages = parsed.data.messages as ChatMessage[]
-        const maxTokens =
-          parsed.data.maxTokens != null
-            ? Math.min(262_144, Math.max(1, Math.floor(parsed.data.maxTokens)))
-            : readChatMaxTokens(store)
+        const st = rt.getStatus()
+        const maxTokens = resolveChatMaxCompletionTokens(
+          store,
+          parsed.data.maxTokens,
+          st.kind === 'llamacpp' ? 'llamacpp' : st.kind === 'ollama' ? 'ollama' : undefined
+        )
         try {
           const usage: { promptTokens?: number; completionTokens?: number } = {}
           const chatStarted = Date.now()
+          const samplingOpts =
+            st.kind === 'llamacpp'
+              ? (() => {
+                  const s = llamaSamplingFromStore(store)
+                  return {
+                    temperature: s.temperature,
+                    topP: s.topP,
+                    frequencyPenalty: s.frequencyPenalty,
+                    presencePenalty: s.presencePenalty
+                  }
+                })()
+              : {}
           const reply = await rt.chat(messages, {
             maxTokens,
+            ...samplingOpts,
             onStreamUsage: (u) => {
               if (typeof u.promptTokens === 'number') usage.promptTokens = u.promptTokens
               if (typeof u.completionTokens === 'number') usage.completionTokens = u.completionTokens
