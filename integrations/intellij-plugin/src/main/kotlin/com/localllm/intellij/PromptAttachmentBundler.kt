@@ -1,9 +1,11 @@
 package com.localllm.intellij
 
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.fileTypes.UnknownFileType
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.vfs.VirtualFile
 import java.nio.charset.StandardCharsets
 import java.nio.file.Paths
@@ -48,7 +50,7 @@ object PromptAttachmentBundler {
                 continue
             }
             val raw = try {
-                String(file.contentsToByteArray(), StandardCharsets.UTF_8)
+                readTextPreferOpenDocument(file)
             } catch (_: Exception) {
                 summary.add("${file.name} (skipped: read error)")
                 continue
@@ -96,7 +98,19 @@ object PromptAttachmentBundler {
         return Result(sb.toString().trimEnd(), summary)
     }
 
-    private fun relativeProjectPath(project: Project, file: VirtualFile): String? {
+    /**
+     * Uses the in-memory [Document] when the file is open (or cached) so prompts and patches match unsaved editor text.
+     */
+    private fun readTextPreferOpenDocument(file: VirtualFile): String {
+        val doc = FileDocumentManager.getInstance().getDocument(file)
+        if (doc != null) {
+            return if (doc.textLength == 0) "" else doc.getText(TextRange(0, doc.textLength))
+        }
+        return String(file.contentsToByteArray(), StandardCharsets.UTF_8)
+    }
+
+    /** Project-relative path with forward slashes, or null if the file is outside the project base. */
+    fun relativeProjectPath(project: Project, file: VirtualFile): String? {
         val base = project.basePath ?: return null
         return try {
             val bp = Paths.get(base).normalize()

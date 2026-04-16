@@ -43,6 +43,30 @@ object MarkdownFenceFileExtractor {
         return dedupeLastWins(raw)
     }
 
+    /** Half-open [start, endExclusive) spans for each path-tagged fence the extractor would apply. */
+    fun pathTaggedFenceRegions(markdown: String): List<Pair<Int, Int>> {
+        val out = mutableListOf<Pair<Int, Int>>()
+        var i = 0
+        while (i < markdown.length) {
+            val tick = markdown.indexOf("```", i)
+            if (tick < 0) break
+            val lineEnd = markdown.indexOf('\n', tick + 3)
+            if (lineEnd < 0) break
+            val info = markdown.substring(tick + 3, lineEnd).trim()
+            val bodyStart = lineEnd + 1
+            val endTick = markdown.indexOf("```", bodyStart)
+            if (endTick < 0) break
+            val body = markdown.substring(bodyStart, endTick)
+            resolvePathAndContent(info, body)?.let { (_, content) ->
+                if (content.length >= minContentChars) {
+                    out.add(tick to (endTick + 3))
+                }
+            }
+            i = endTick + 3
+        }
+        return out
+    }
+
     private fun dedupeLastWins(
         edits: List<StructuredApplyParser.StructuredEdit.FullFile>
     ): List<StructuredApplyParser.StructuredEdit.FullFile> {
@@ -54,7 +78,32 @@ object MarkdownFenceFileExtractor {
         return byPath.values.toList()
     }
 
-    private fun resolvePathAndContent(info: String, bodyRaw: String): Pair<String, String>? {
+    /**
+     * Bodies of ``` fences that are not path-tagged (would not be picked up by [parseFencedFullFiles]).
+     * Order matches appearance in the reply (use the same order as attachments when pairing).
+     */
+    fun anonymousCodeFenceBodies(markdown: String): List<String> {
+        val out = mutableListOf<String>()
+        var i = 0
+        while (i < markdown.length) {
+            val tick = markdown.indexOf("```", i)
+            if (tick < 0) break
+            val lineEnd = markdown.indexOf('\n', tick + 3)
+            if (lineEnd < 0) break
+            val info = markdown.substring(tick + 3, lineEnd).trim()
+            val bodyStart = lineEnd + 1
+            val endTick = markdown.indexOf("```", bodyStart)
+            if (endTick < 0) break
+            val body = markdown.substring(bodyStart, endTick)
+            if (resolvePathAndContent(info, body) == null) {
+                out.add(body.trimEnd(' ', '\t', '\r', '\n'))
+            }
+            i = endTick + 3
+        }
+        return out
+    }
+
+    internal fun resolvePathAndContent(info: String, bodyRaw: String): Pair<String, String>? {
         val bodyNorm = bodyRaw.trimEnd(' ', '\t', '\r', '\n')
         if (bodyNorm.isEmpty()) return null
 

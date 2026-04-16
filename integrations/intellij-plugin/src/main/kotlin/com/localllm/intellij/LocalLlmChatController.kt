@@ -11,6 +11,7 @@ import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -115,6 +116,7 @@ class LocalLlmChatController(
                         userMessage = bundled.augmentedUserMessage,
                         includeGraph = compose.includeGraph.isSelected,
                         attachmentCount = files.size,
+                        referencedFiles = files,
                         onLog = { line ->
                             ApplicationManager.getApplication().invokeLater { transcript.append(line) }
                         }
@@ -224,6 +226,7 @@ class LocalLlmChatController(
         userMessage: String,
         includeGraph: Boolean,
         attachmentCount: Int,
+        referencedFiles: List<VirtualFile>,
         onLog: (String) -> Unit
     ) {
         val graphText = if (includeGraph) {
@@ -291,12 +294,18 @@ class LocalLlmChatController(
 
             when (val parsed = ClarifyResponseParser.parse(completion.reply)) {
                 is ClarifyResponseParser.Parsed.DirectAnswer -> {
+                    val payloadOnly = ApplyReplyExtractor.applyPayloadOnlyOrNull(completion.reply)
+                    val assistantRecorded = (payloadOnly ?: completion.reply).trim()
                     val tail = messages.drop(1).toMutableList()
-                    tail.add(LocalLlmHttpClient.ChatMessage("assistant", completion.reply))
+                    tail.add(LocalLlmHttpClient.ChatMessage("assistant", assistantRecorded))
                     apiHistory.clear()
                     apiHistory.addAll(tail)
 
-                    onLog("Model:\n${parsed.text}\n\n")
+                    if (payloadOnly != null) {
+                        onLog("$assistantRecorded\n\n")
+                    } else {
+                        onLog("Model:\n$assistantRecorded\n\n")
+                    }
                     onLog("${formatTokenUsageLine(completion, messages)}\n\n")
                     val meta = mutableMapOf<String, Any?>(
                         "project" to project.name,
@@ -307,7 +316,7 @@ class LocalLlmChatController(
                     completion.promptTokens?.let { meta["promptTokens"] = it }
                     completion.completionTokens?.let { meta["completionTokens"] = it }
                     notifyDesktop(PluginReportKind.CHAT_COMPLETED, project.name, meta)
-                    offerApplyStructuredEdits(parsed.text) { endSendTurn(true) }
+                    offerApplyStructuredEdits(assistantRecorded, referencedFiles) { endSendTurn(true) }
                     return
                 }
                 is ClarifyResponseParser.Parsed.NeedsClarification -> {
@@ -355,12 +364,19 @@ class LocalLlmChatController(
         return MarkdownFenceFileExtractor.parseFencedFullFiles(modelReply)
     }
 
-    private fun offerApplyStructuredEdits(modelReply: String, onDone: () -> Unit) {
+    private fun offerApplyStructuredEdits(
+        modelReply: String,
+        referencedFiles: List<VirtualFile>,
+        onDone: () -> Unit
+    ) {
         if (!compose.applyStructuredEdits.isSelected) {
             onDone()
             return
         }
-        val edits = collectEditsFromModelReply(modelReply)
+        var edits = collectEditsFromModelReply(modelReply)
+        if (edits.isEmpty()) {
+            edits = ImplicitAttachmentApply.inferEdits(project, modelReply, referencedFiles)
+        }
         if (edits.isEmpty()) {
             onDone()
             return

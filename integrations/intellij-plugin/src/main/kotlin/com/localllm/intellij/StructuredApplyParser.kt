@@ -81,6 +81,39 @@ object StructuredApplyParser {
         return out
     }
 
+    /**
+     * Half-open [start, endExclusive) regions covering each non-empty LOCAL_LLM_FILE / LOCAL_LLM_PATCH block, in order.
+     * Used to drop assistant prose around apply payloads in the transcript and chat history.
+     */
+    fun localLlmApplyRegions(text: String): List<Pair<Int, Int>> {
+        val out = mutableListOf<Pair<Int, Int>>()
+        var i = 0
+        while (i < text.length) {
+            val nextFile = text.indexOf(OPEN_FILE, i, ignoreCase = true)
+            val nextPatch = text.indexOf(OPEN_PATCH, i, ignoreCase = true)
+            val takeFile = when {
+                nextFile < 0 && nextPatch < 0 -> break
+                nextFile < 0 -> false
+                nextPatch < 0 -> true
+                else -> nextFile <= nextPatch
+            }
+            if (takeFile) {
+                val block = parseFileBlock(text, nextFile) ?: break
+                if (block.content.isNotEmpty()) {
+                    out.add(nextFile to block.nextIndex)
+                }
+                i = block.nextIndex
+            } else {
+                val block = parsePatchBlock(text, nextPatch) ?: break
+                if (block.hunks.isNotEmpty()) {
+                    out.add(nextPatch to block.nextIndex)
+                }
+                i = block.nextIndex
+            }
+        }
+        return out
+    }
+
     private data class ParsedFile(val path: String, val content: String, val nextIndex: Int)
 
     private fun parseFileBlock(text: String, start: Int): ParsedFile? {
