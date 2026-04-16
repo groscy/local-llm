@@ -1,10 +1,12 @@
 import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
 import type { PromptDomainRow } from '@shared/types'
+import { MAX_PROMPT_DOMAIN_SUFFIX_CHARS } from '@shared/promptDomains'
 import { logLine } from '../logger'
 
 /** Max keyword stems stored per domain (union grows on merge / new prompts). */
 const MAX_KEYWORDS_PER_DOMAIN = 72
+
 /** Assign user prompt to existing domain when Jaccard(keywords) ≥ this. */
 const ASSIGN_THRESHOLD = 0.18
 /** Merge two domains when their keyword sets overlap ≥ this. */
@@ -117,6 +119,7 @@ type DomainRow = {
   keywords_json: string
   created_at: number
   updated_at: number
+  system_suffix: string | null
 }
 
 function parseKeywords(json: string): string[] {
@@ -132,7 +135,9 @@ function parseKeywords(json: string): string[] {
 function loadDomains(db: Database.Database, limit = 400): DomainRow[] {
   return db
     .prepare(
-      `SELECT id, title, keywords_json, created_at, updated_at FROM prompt_domains
+      `SELECT id, title, keywords_json, created_at, updated_at,
+              COALESCE(system_suffix, '') AS system_suffix
+       FROM prompt_domains
        ORDER BY updated_at DESC LIMIT ?`
     )
     .all(limit) as DomainRow[]
@@ -184,13 +189,20 @@ function linkMessage(db: Database.Database, messageId: string, domainId: string,
 
 function mergeTwoDomains(db: Database.Database, keepId: string, dropId: string): void {
   if (keepId === dropId) return
-  const keepRow = db.prepare('SELECT keywords_json FROM prompt_domains WHERE id = ?').get(keepId) as
-    | { keywords_json: string }
-    | undefined
-  const dropRow = db.prepare('SELECT keywords_json FROM prompt_domains WHERE id = ?').get(dropId) as
-    | { keywords_json: string }
-    | undefined
+  const keepRow = db
+    .prepare('SELECT keywords_json, COALESCE(system_suffix, \'\') AS system_suffix FROM prompt_domains WHERE id = ?')
+    .get(keepId) as { keywords_json: string; system_suffix: string } | undefined
+  const dropRow = db
+    .prepare('SELECT keywords_json, COALESCE(system_suffix, \'\') AS system_suffix FROM prompt_domains WHERE id = ?')
+    .get(dropId) as { keywords_json: string; system_suffix: string } | undefined
   if (!keepRow || !dropRow) return
+
+  const mergedSuffix = (() => {
+    const a = keepRow.system_suffix.trim()
+    const b = dropRow.system_suffix.trim()
+    if (a && b && a !== b) return `${a}\n\n${b}`.slice(0, MAX_PROMPT_DOMAIN_SUFFIX_CHARS)
+    return (a || b).slice(0, MAX_PROMPT_DOMAIN_SUFFIX_CHARS)
+  })()
 
   const tr = db.transaction(() => {
     const mids = db
@@ -211,11 +223,9 @@ function mergeTwoDomains(db: Database.Database, keepId: string, dropId: string):
       }
     }
     const k = mergeKeywordLists(parseKeywords(keepRow.keywords_json), parseKeywords(dropRow.keywords_json))
-    db.prepare('UPDATE prompt_domains SET keywords_json = ?, updated_at = ? WHERE id = ?').run(
-      JSON.stringify(k),
-      Date.now(),
-      keepId
-    )
+    db.prepare(
+      'UPDATE prompt_domains SET keywords_json = ?, system_suffix = ?, updated_at = ? WHERE id = ?'
+    ).run(JSON.stringify(k), mergedSuffix || null, Date.now(), keepId)
     db.prepare('DELETE FROM prompt_domains WHERE id = ?').run(dropId)
   })
   tr()
@@ -293,6 +303,7 @@ export function listPromptDomains(db: Database.Database, limit = 200): PromptDom
   const rows = db
     .prepare(
       `SELECT d.id, d.title, d.keywords_json AS keywordsJson, d.created_at AS createdAt, d.updated_at AS updatedAt,
+              COALESCE(d.system_suffix, '') AS systemSuffix,
               COUNT(m.message_id) AS messageCount
        FROM prompt_domains d
        LEFT JOIN message_prompt_domains m ON m.domain_id = d.id
@@ -306,8 +317,54 @@ export function listPromptDomains(db: Database.Database, limit = 200): PromptDom
     id: String(r.id),
     title: String(r.title),
     keywords: parseKeywords(String(r.keywordsJson)),
+    systemSuffix: typeof r.systemSuffix === 'string' ? r.systemSuffix : '',
     createdAt: Number(r.createdAt),
     updatedAt: Number(r.updatedAt),
     messageCount: Number(r.messageCount) || 0
   }))
+}
+
+export function updatePromptDomainSystemSuffix(db: Database.Database, domainId: string, systemSuffix: string): void {
+  const id = domainId.trim()
+  if (!id) return
+  const t = Date.now()
+  const trimmed = systemSuffix.trim().slice(0, MAX_PROMPT_DOMAIN_SUFFIX_CHARS)
+  db.prepare('UPDATE prompt_domains SET system_suffix = ?, updated_at = ? WHERE id = ?').run(
+    trimmed || null,
+    t,
+    id
+  )
+}
+
+/**
+ * Build a bounded system-message fragment from domains linked to this user message.
+ */
+export function collectDomainSystemSuffixForMessage(db: Database.Database, messageId: string): string {
+  const rows = db
+    .prepare(
+      `SELECT COALESCE(d.system_suffix, '') AS suffix, m.weight AS w
+       FROM message_prompt_domains m
+       JOIN prompt_domains d ON d.id = m.domain_id
+       WHERE m.message_id = ?
+       ORDER BY m.weight DESC, d.updated_at DESC`
+    )
+    .all(messageId) as { suffix: string; w: number }[]
+
+  const parts: string[] = []
+  let total = 0
+  for (const r of rows) {
+    const s = (r.suffix ?? '').trim()
+    if (!s) continue
+    const sep = parts.length > 0 ? '\n\n' : ''
+    const nextLen = total + sep.length + s.length
+    if (nextLen > MAX_PROMPT_DOMAIN_SUFFIX_CHARS) {
+      const room = MAX_PROMPT_DOMAIN_SUFFIX_CHARS - total - sep.length
+      if (room < 32) break
+      parts.push(s.slice(0, room))
+      break
+    }
+    parts.push(s)
+    total = nextLen
+  }
+  return parts.join('\n\n')
 }

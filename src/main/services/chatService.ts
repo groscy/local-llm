@@ -63,6 +63,19 @@ export function renameConversation(
   return { ...row, title: nextTitle }
 }
 
+/** Removes one message row; `message_prompt_domains` rows cascade on FK. */
+export function deleteMessage(db: Database.Database, conversationId: string, messageId: string): boolean {
+  const t = Date.now()
+  const r = db
+    .prepare('DELETE FROM messages WHERE id = ? AND conversation_id = ?')
+    .run(messageId, conversationId)
+  if (r.changes > 0) {
+    db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(t, conversationId)
+    return true
+  }
+  return false
+}
+
 export function appendMessage(
   db: Database.Database,
   conversationId: string,
