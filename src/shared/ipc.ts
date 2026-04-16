@@ -59,9 +59,14 @@ export const IPC = {
   CONVERSATION_MESSAGES: 'chat:conversationMessages',
   CONVERSATION_RENAME: 'chat:conversationRename',
   MESSAGE_APPEND: 'chat:messageAppend',
+  MESSAGE_DELETE: 'chat:messageDelete',
   CONVERSATION_DELETE: 'chat:conversationDelete',
   /** Keyword-based domains learned from user prompts (see `promptDomainService`). */
   PROMPT_DOMAINS_LIST: 'chat:promptDomainsList',
+  PROMPT_DOMAIN_SET_SUFFIX: 'chat:promptDomainSetSuffix',
+
+  /** Resolve base GGUF path for a finetune artifact recorded on a completed train job. */
+  TRAIN_BASE_FOR_FINETUNE_PATH: 'train:baseForFinetunePath',
 
   // Knowledge / RAG
   KB_INGEST_TEXT: 'kb:ingestText',
@@ -82,6 +87,8 @@ export const IPC = {
   KB_EXPORT_WIKI_ZIP: 'kb:exportWikiZip',
   /** Structural graph: sources → chunks, wiki pages → chunks, optional related sources. */
   KB_KNOWLEDGE_GRAPH: 'kb:knowledgeGraph',
+  /** Deterministic cluster / hub / refinement analysis over the current graph; optional markdown ingest. */
+  KB_GRAPH_ANALYSIS_RUN: 'kb:graphAnalysisRun',
   /** After a chat turn: run a short local model pass to extract wiki notes and ingest (optional). */
   KB_WIKI_EXTRACT_TURN: 'kb:wikiExtractTurn',
 
@@ -93,6 +100,8 @@ export const IPC = {
   TRAIN_START: 'train:start',
   TRAIN_STATUS: 'train:status',
   TRAIN_LIST_JOBS: 'train:listJobs',
+  /** Re-scan a finished job’s output folder for new .gguf and copy to models/finetunes */
+  TRAIN_RESCAN_ARTIFACT: 'train:rescanArtifact',
 
   SECRETS_SET_HF_TOKEN: 'secrets:setHfToken',
 

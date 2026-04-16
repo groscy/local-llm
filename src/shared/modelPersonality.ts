@@ -39,6 +39,25 @@ export function defaultModelProfile(): ModelProfile {
   return { vibe: { ...DEFAULT_MODEL_PERSONALITY }, journal: [] }
 }
 
+/**
+ * Use the model-profile system prompt (mood + journal markers) only when the user clearly asks
+ * for a subjective / personal stance — not for ordinary tasks.
+ */
+export function userMessageInvitesModelPersonality(raw: string): boolean {
+  const t = raw.trim().replace(/\s+/g, ' ')
+  if (t.length < 14) return false
+  if (/\bwhat\s+('s|is)\s+your\s+opinion\b/i.test(t)) return true
+  if (/\bin\s+your\s+opinion\b/i.test(t)) return true
+  if (/\b(give|share)\s+(me\s+)?your\s+opinion\b/i.test(t)) return true
+  if (/\bdo\s+you\s+have\s+(an\s+)?opinion\b/i.test(t)) return true
+  if (/\byour\s+opinion\s+(on|of|about)\b/i.test(t)) return true
+  if (/\bwhat\s+are\s+your\s+thoughts\s+(on|of|about)\b/i.test(t)) return true
+  if (/\bwhat'?s\s+your\s+take\s+(on|about)\b/i.test(t)) return true
+  if (/\bwhat'?s\s+your\s+view\s+(on|of|about)\b/i.test(t)) return true
+  if (/\bhow\s+do\s+you\s+feel\s+about\b/i.test(t)) return true
+  return false
+}
+
 /** System message for chat requests (keep in sync with strip functions). */
 export const MODEL_PROFILE_SYSTEM_PROMPT = `This app keeps a hidden "model profile" for you: (1) optional numeric mood for a soft background glow, and (2) an internal journal the user reads in a profile panel.
 
@@ -55,7 +74,23 @@ I noticed I leaned into careful steps here.
 Or one line:
 [[JOURNAL:I enjoyed unpacking that idea with them.]]
 
-Use the journal when you have a genuine in-character reflection; skip both blocks when not meaningful.`
+Use the journal when you have a genuine in-character reflection; skip both blocks when not meaningful.
+
+You may include images when helpful: Markdown \`![alt](https://…)\` or, for small diagrams only, \`data:image/png;base64,…\`.
+
+Reply for a single assistant turn only. Do not continue the conversation with imagined user lines, “User:” / “Human:” roleplay, quoted prompts pretending the user typed them, or answering your own questions as if the user replied. When your answer is complete, stop.`
+
+/** Default system prompt: neutral, factual assistant unless the user explicitly asks for opinions (separate profile prompt). */
+export const CHAT_MINIMAL_SYSTEM_PROMPT = `You are a helpful assistant. Answer clearly and accurately in one reply. Use markdown when it helps readability.
+
+Keep a neutral, professional tone. Do not adopt a character voice, diary style, or subjective persona unless the user clearly asks for your personal opinion or feelings.
+
+You may include images when helpful: use Markdown \`![description](https://…)\` for remote URLs, or a small \`data:image/png;base64,…\` image only when the user needs an inline figure and a link is not enough.
+
+Do not invent facts. If you lack information, say so. Do not continue with imagined user lines or roleplay. When your answer is complete, stop.`
+
+/** Appended to the user turn when RAG snippets are present and llama “Require snippet citations” is enabled. */
+export const RAG_GROUNDING_INSTRUCTION = `When answering, rely on general knowledge plus the numbered snippets above only where they apply. Cite each snippet you use with its bracket number, e.g. [1] or [2]. If the snippets do not cover the question, answer from general knowledge and do not attribute claims to snippets they do not support.`
 
 /** @deprecated Use MODEL_PROFILE_SYSTEM_PROMPT */
 export const MODEL_AMBIENCE_SYSTEM_PROMPT = MODEL_PROFILE_SYSTEM_PROMPT
@@ -63,10 +98,73 @@ export const MODEL_AMBIENCE_SYSTEM_PROMPT = MODEL_PROFILE_SYSTEM_PROMPT
 const V2_PREFIX = 'modelProfile:v2:'
 const V1_PREFIX = 'modelPersonality:v1:'
 
-const AMB_RE = /\[\[AMB:\s*(\{[\s\S]*?\})\s*\]\]/gi
 const JOURNAL_BLOCK_RE = /\[\[JOURNAL\]\]\s*([\s\S]*?)\s*\[\[\/JOURNAL\]\]/gi
 /** Single-line; avoid ] inside the line */
 const JOURNAL_LINE_RE = /\[\[JOURNAL:\s*([^\]\n]+?)\s*\]\]/gi
+
+const MODEL_PROFILE_BLOCK_RE =
+  /\[\[MODEL_PROFILE\]\]\s*([\s\S]*?)\s*\[\[\/MODEL_PROFILE\]\]/gi
+const MODEL_PROFILE_LINE_RE = /\[\[MODEL_PROFILE:\s*([^\]\n]+?)\s*\]\]/gi
+
+/** `[[AMB:…]]` even with tricky JSON; also drops unclosed `[[AMB:` tails. */
+function stripAmbBlocksLoose(s: string, patches: Partial<ModelPersonalityVibe>[]): string {
+  let out = s
+  for (;;) {
+    const idx = out.indexOf('[[AMB:')
+    if (idx < 0) break
+    const close = out.indexOf(']]', idx + 6)
+    if (close < 0) {
+      out = out.slice(0, idx).replace(/\s+\z/, '')
+      break
+    }
+    const inner = out.slice(idx + 6, close).trim()
+    try {
+      const p = normalizePatch(JSON.parse(inner) as unknown)
+      if (Object.keys(p).length) patches.push(p)
+    } catch {
+      const brace = inner.indexOf('{')
+      const braceEnd = inner.lastIndexOf('}')
+      if (brace >= 0 && braceEnd > brace) {
+        try {
+          const p = normalizePatch(JSON.parse(inner.slice(brace, braceEnd + 1)) as unknown)
+          if (Object.keys(p).length) patches.push(p)
+        } catch {
+          /* malformed — still drop block below */
+        }
+      }
+    }
+    out = out.slice(0, idx) + out.slice(close + 2)
+  }
+  return out
+}
+
+/** Model “thinking” / reasoning tags that should never appear in the chat pane. */
+function stripReasoningAndThinkTags(s: string): string {
+  let t = s
+  t = t.replace(/<\s*think\s*>[\s\S]*?<\s*\/\s*think\s*>/gi, '')
+  /* Qwen-style “think” tags embed U+200D between “t” and “h” */
+  const zwj = '\u200d'
+  t = t.replace(
+    new RegExp('<\\s*t' + zwj + 'hink\\s*>[\\s\\S]*?<\\s*\\/\\s*t' + zwj + 'hink\\s*>', 'gi'),
+    ''
+  )
+  t = t.replace(/<\s*thinking\s*>[\s\S]*?<\s*\/\s*thinking\s*>/gi, '')
+  t = t.replace(/<\s*redacted_reasoning\s*>[\s\S]*?<\s*\/\s*redacted_reasoning\s*>/gi, '')
+  t = t.replace(/<\s*redacted_thinking\s*>[\s\S]*?<\s*\/\s*redacted_thinking\s*>/gi, '')
+  t = t.replace(/<\s*reasoning\s*>[\s\S]*?<\s*\/\s*reasoning\s*>/gi, '')
+  return stripPipeBracketSpecialTokens(t)
+}
+
+/** ChatML / Llama-style `<|im_s` … `|>`, `<|redacte` … `|>`, `<|eot_id|>`, etc., plus unclosed tails. */
+function stripPipeBracketSpecialTokens(s: string): string {
+  let t = s.replace(/<\s*\|[^|]{0,500}\|\s*>/g, '')
+  const open = t.lastIndexOf('<|')
+  if (open >= 0) {
+    const rest = t.slice(open)
+    if (!/\|>/.test(rest)) t = t.slice(0, open).replace(/\s+\z/, '')
+  }
+  return t
+}
 
 function randomEntryId(): string {
   try {
@@ -240,7 +338,7 @@ export function appendJournalTexts(profile: ModelProfile, texts: readonly string
   return { ...profile, journal: capJournal(journal) }
 }
 
-/** Strip [[JOURNAL]]…[[/JOURNAL]], [[JOURNAL:…]], and [[AMB:…]] */
+/** Strip [[JOURNAL]]…, [[MODEL_PROFILE]]…, [[AMB:…]], dangling blocks, thinking/reasoning XML, and `<|…|>` template tokens. */
 export function stripModelProfileMarkers(text: string): {
   visible: string
   patches: Partial<ModelPersonalityVibe>[]
@@ -258,21 +356,25 @@ export function stripModelProfileMarkers(text: string): {
     if (t) journalTexts.push(t)
     return ''
   })
+  s = s.replace(MODEL_PROFILE_BLOCK_RE, () => '')
+  s = s.replace(MODEL_PROFILE_LINE_RE, () => '')
 
   const patches: Partial<ModelPersonalityVibe>[] = []
-  s = s.replace(AMB_RE, (_, json: string) => {
-    try {
-      const parsed = JSON.parse(json) as unknown
-      const p = normalizePatch(parsed)
-      if (Object.keys(p).length) patches.push(p)
-    } catch {
-      /* ignore */
-    }
-    return ''
-  })
+  s = stripAmbBlocksLoose(s, patches)
+  /* Unclosed [[JOURNAL]] block (no [[/JOURNAL]]) */
+  s = s.replace(/\[\[JOURNAL\]\]\s*[\s\S]*$/i, '')
+  /* Unclosed [[MODEL_PROFILE]] block (no [[/MODEL_PROFILE]]) */
+  s = s.replace(/\[\[MODEL_PROFILE\]\]\s*[\s\S]*$/i, '')
+
+  s = stripReasoningAndThinkTags(s)
 
   const visible = s.replace(/\s+\n/g, '\n').trimEnd()
   return { visible, patches, journalTexts }
+}
+
+/** Strip profile markers and common model leak tags for chat bubbles (no side effects). */
+export function stripChatAssistantVisibleMarkers(text: string): string {
+  return stripModelProfileMarkers(text).visible
 }
 
 /** @deprecated Use stripModelProfileMarkers */
@@ -283,10 +385,33 @@ export function stripAmbianceMarkers(text: string): { visible: string; patches: 
 
 /** Hide incomplete trailing profile markers while streaming */
 export function stripPartialProfileStreamTail(text: string): string {
-  const markers = ['[[AMB:', '[[JOURNAL]]', '[[JOURNAL:']
-  const idx = markers.map((m) => text.indexOf(m)).filter((i) => i >= 0)
-  if (idx.length === 0) return text
-  return text.slice(0, Math.min(...idx)).trimEnd()
+  const lower = text.toLowerCase()
+  const needleIdx: number[] = []
+  const purpleThinkOpen = '<t\u200dhink>'
+  const iPurple = text.indexOf(purpleThinkOpen)
+  if (iPurple >= 0) needleIdx.push(iPurple)
+  const plainThinkOpen = '<' + 'think>'
+  const iPlainThink = lower.indexOf(plainThinkOpen.toLowerCase())
+  if (iPlainThink >= 0) needleIdx.push(iPlainThink)
+  const iPipe = text.indexOf('<|')
+  if (iPipe >= 0) needleIdx.push(iPipe)
+  for (const m of [
+    '[[AMB:',
+    '[[MODEL_PROFILE]]',
+    '[[MODEL_PROFILE:',
+    '[[/MODEL_PROFILE]]',
+    '[[JOURNAL]]',
+    '[[JOURNAL:',
+    '<think>',
+    '<thinking>',
+    '<redacted_reasoning>',
+    '<reasoning>'
+  ]) {
+    const i = lower.indexOf(m.toLowerCase())
+    if (i >= 0) needleIdx.push(i)
+  }
+  if (needleIdx.length === 0) return text
+  return text.slice(0, Math.min(...needleIdx)).trimEnd()
 }
 
 /** @deprecated Use stripPartialProfileStreamTail */

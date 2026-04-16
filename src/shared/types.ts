@@ -109,6 +109,8 @@ export interface PromptDomainRow {
   id: string
   title: string
   keywords: string[]
+  /** Optional extra system instructions when this domain matches a user message (bounded). */
+  systemSuffix: string
   createdAt: number
   updatedAt: number
   messageCount: number
@@ -127,6 +129,11 @@ export interface MessageRow {
   completionTokens?: number | null
   promptTokensIsEstimate?: boolean | null
   completionTokensIsEstimate?: boolean | null
+}
+
+/** `messageAppend` may attach `promptDomainSuffix` for user messages when domain enhancement is on. */
+export type MessageAppendResponse = MessageRow & {
+  promptDomainSuffix?: string
 }
 
 /** Optional usage snapshot when appending the assistant message after a chat completion. */
@@ -275,10 +282,22 @@ export interface TrainJob {
   message?: string
   startedAt?: number
   finishedAt?: number
+  /** KB source ids when the dataset was exported from the knowledge base */
+  kbSourceIds?: string[]
+  /** User label for this fine-tune (used in filenames under models/finetunes) */
+  displayName?: string
+  /** JSONL path passed to the training script */
+  datasetPath?: string
+  /** Copied merged / exported GGUF under the models directory when present after training */
+  artifactPath?: string
 }
 
 /** Main → renderer while `runtime:start` is working (pull, GGUF import, server spawn). */
 export interface RuntimeLoadProgress {
+  /**
+   * High-level step. Includes `load_log` for raw llama-server stderr chunks (append-only in UI;
+   * `message` holds the text chunk, other fields optional).
+   */
   phase: string
   message: string
   /** 0–100 when known (e.g. Ollama layer pull or GGUF upload). */
