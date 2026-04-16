@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { IPC } from '@shared/ipc'
+import type { KnowledgeGraphAnalysisRunResponse } from '@shared/knowledgeGraphAnalysis'
 import type {
   KbSearchHit,
   PluginIntegrationReport,
@@ -93,7 +94,7 @@ contextBridge.exposeInMainWorld('api', {
   runtimeChat: (
     messages: { role: string; content: string }[],
     requestId: string,
-    opts?: { maxTokens?: number }
+    opts?: { maxTokens?: number; ollamaModel?: string; ollamaBaseUrl?: string }
   ) => invoke(IPC.RUNTIME_CHAT, { messages, requestId, ...opts }),
   conversationsList: () => invoke(IPC.CONVERSATIONS_LIST),
   conversationCreate: (title?: string) => invoke(IPC.CONVERSATION_CREATE, title),
@@ -114,7 +115,13 @@ contextBridge.exposeInMainWorld('api', {
       completionIsEstimate?: boolean
     }
   ) => invoke(IPC.MESSAGE_APPEND, cid, role, content, modelId, usage),
+  messageDelete: (conversationId: string, messageId: string) =>
+    invoke<{ ok: boolean }>(IPC.MESSAGE_DELETE, { conversationId, messageId }),
   promptDomainsList: () => invoke(IPC.PROMPT_DOMAINS_LIST),
+  promptDomainSetSuffix: (p: { domainId: string; systemSuffix: string }) =>
+    invoke<{ ok: true }>(IPC.PROMPT_DOMAIN_SET_SUFFIX, p),
+  trainBaseForFinetunePath: (artifactPath: string) =>
+    invoke<{ baseModelPath: string | null }>(IPC.TRAIN_BASE_FOR_FINETUNE_PATH, artifactPath),
   kbIngestText: (title: string, uri: string, body: string) => invoke(IPC.KB_INGEST_TEXT, title, uri, body),
   kbIngestConversation: (conversationId: string) => invoke(IPC.KB_INGEST_CONVERSATION, conversationId),
   kbIngestFile: () => invoke(IPC.KB_INGEST_FILE),
@@ -128,6 +135,8 @@ contextBridge.exposeInMainWorld('api', {
   kbDeleteSource: (sourceId: string) => invoke<{ ok: true }>(IPC.KB_DELETE_SOURCE, sourceId),
   kbExportWikiZip: () => invoke<WikiExportZipResult>(IPC.KB_EXPORT_WIKI_ZIP),
   kbKnowledgeGraph: () => invoke(IPC.KB_KNOWLEDGE_GRAPH),
+  kbGraphAnalysisRun: (opts?: { ingestReport?: boolean }) =>
+    invoke<KnowledgeGraphAnalysisRunResponse>(IPC.KB_GRAPH_ANALYSIS_RUN, opts ?? {}),
   kbWikiExtractTurn: (p: {
     conversationId: string
     conversationTitle?: string
@@ -136,9 +145,15 @@ contextBridge.exposeInMainWorld('api', {
   }) => invoke(IPC.KB_WIKI_EXTRACT_TURN, p),
   metricsSnapshot: (opts?: { persist?: boolean }) => invoke(IPC.METRICS_SNAPSHOT, opts),
   metricsHistory: (limit?: number) => invoke(IPC.METRICS_HISTORY, limit),
-  trainStart: (p: { baseModelPath: string; datasetPath: string; pythonPath?: string }) =>
-    invoke(IPC.TRAIN_START, p),
+  trainStart: (p: {
+    baseModelPath: string
+    datasetPath?: string
+    kbSourceIds?: string[]
+    displayName?: string
+    pythonPath?: string
+  }) => invoke(IPC.TRAIN_START, p),
   trainStatus: (id: string) => invoke(IPC.TRAIN_STATUS, id),
   trainListJobs: () => invoke(IPC.TRAIN_LIST_JOBS),
+  trainRescanArtifact: (jobId: string) => invoke(IPC.TRAIN_RESCAN_ARTIFACT, jobId),
   setHfToken: (token: string | null) => invoke(IPC.SECRETS_SET_HF_TOKEN, token)
 })
