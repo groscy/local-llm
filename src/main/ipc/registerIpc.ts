@@ -23,6 +23,13 @@ import { isValidStoredColorScheme } from '@shared/colorScheme'
 import type { RuntimeLoadProgress } from '@shared/types'
 import { is } from '@electron-toolkit/utils'
 import { IPC } from '@shared/ipc'
+import { MAX_PROMPT_DOMAIN_SUFFIX_CHARS } from '@shared/promptDomains'
+import { assertSelfHostedOllamaBaseUrl } from '@shared/agenticChat'
+import {
+  clampLlamaContextTokens,
+  LLAMA_CONTEXT_TOKENS_DEFAULT
+} from '@shared/llamaContext'
+import { llamaSamplingFromStore } from '../services/llamaChatOptions'
 import { hfSearch, hfModelDetail, hfRecommended } from '../services/hfService'
 import {
   startDownload,
@@ -34,6 +41,10 @@ import {
   hfResolveDownloadUrl
 } from '../services/downloadManager'
 import { createRuntime, type RuntimeAdapter } from '../services/runtime'
+import {
+  llamaChatMaxCompletionTokensFromStore,
+  resolveChatMaxCompletionTokens
+} from '../services/chatMaxTokens'
 import { installOllamaForPlatform } from '../services/ollamaInstaller'
 import {
   deleteOllamaModel,
@@ -42,9 +53,18 @@ import {
   probeOllamaReachable
 } from '../services/runtime/ollamaAdapter'
 import * as chatService from '../services/chatService'
-import { assignUserMessageToPromptDomains, listPromptDomains } from '../services/promptDomainService'
+import {
+  assignUserMessageToPromptDomains,
+  collectDomainSystemSuffixForMessage,
+  listPromptDomains,
+  updatePromptDomainSystemSuffix
+} from '../services/promptDomainService'
 import { recordChatRoundtripMs } from '../services/chatLatencyStats'
 import * as kbService from '../services/kbService'
+import {
+  analyzeKnowledgeGraph,
+  knowledgeGraphAnalysisToMarkdown
+} from '@shared/knowledgeGraphAnalysis'
 import {
   parseWikiExtractResponse,
   runWikiExtractChat,
@@ -53,10 +73,10 @@ import {
 import * as metricsService from '../services/metricsService'
 import * as trainOrchestrator from '../services/trainOrchestrator'
 import { logLine } from '../logger'
-import { resolveLlamaBinary } from '../services/llamaDetect'
+import { resolveLlamaBinary, validateLlamaServerBinary } from '../services/llamaDetect'
 import { collectHardwareSummary } from '../services/hardwareSummary'
 import { clearAllAppCaches, deleteAllChildrenInDirectory } from '../services/dataMaintenance'
-import { resetElectronStoreToFactory } from '../storeDefaults'
+import { migrateChatProfileSettings, resetElectronStoreToFactory } from '../storeDefaults'
 import { configureIntegrationServer } from '../services/integrationServer'
 import { getPluginReportHistory } from '../services/pluginIntegrationHub'
 import { listGgufModelsInDir } from '../services/localModelsScan'
@@ -79,8 +99,14 @@ const configSchema = z.object({
   /** Python executable for conversion (optional; default python / python3). */
   llamaPythonPath: z.string().max(4096).optional(),
   runtimeKind: z.enum(['llamacpp', 'ollama']).optional(),
+  /** Last model that was running (Ollama tag or local weight path). */
+  lastRuntimeModelPath: z.string().max(8192).optional(),
+  lastRuntimeModelKind: z.enum(['llamacpp', 'ollama']).optional(),
+  /** When true, next launch restores `lastRuntime*` and auto-starts the runtime after the wake overlay. */
+  resumeRuntimeOnLaunch: z.boolean().optional(),
   ollamaBaseUrl: z.string().optional(),
   llamaPort: z.number().optional(),
+  llamaContextTokens: z.number().int().min(2048).max(262_144).optional(),
   hfTokenEncrypted: z.string().optional(),
   metricsPinned: z.boolean().optional(),
   metricsRefreshMs: z.number().min(500).max(3_600_000).optional(),
@@ -105,12 +131,25 @@ const configSchema = z.object({
       message: 'Unknown color scheme id'
     }),
   chatMaxTokens: z.number().int().min(1).max(262_144).optional(),
+  /** When set, caps llama.cpp `max_tokens` / `-n` default instead of global `chatMaxTokens`. Clear with `null`. */
+  llamaChatMaxTokens: z.union([z.number().int().min(1).max(262_144), z.null()]).optional(),
+  chatHistoryMaxMessages: z.number().int().min(2).max(500).optional(),
+  chatDomainEnhancement: z.boolean().optional(),
+  llamaRagGrounding: z.boolean().optional(),
+  llamaTemperature: z.number().min(0).max(2).optional(),
+  llamaTopP: z.number().min(0).max(1).optional(),
+  llamaFrequencyPenalty: z.number().min(-2).max(2).optional(),
+  llamaPresencePenalty: z.number().min(-2).max(2).optional(),
   integrationListenEnabled: z.boolean().optional(),
   integrationPort: z.number().int().min(1024).max(65535).optional(),
   integrationToken: z.string().max(256).optional(),
   wikiAutoExtract: z.boolean().optional(),
   /** Bump when onboarding copy changes; user sees welcome until version matches latest in app. */
-  welcomeGuideVersion: z.number().int().min(0).max(99).optional()
+  welcomeGuideVersion: z.number().int().min(0).max(99).optional(),
+  /** Chat: planner spawns parallel Ollama workers (Ollama runtime only). */
+  agenticWorkersEnabled: z.boolean().optional(),
+  /** Optional second Ollama base URL for agent workers (remote GPU / larger models). */
+  agentRemoteOllamaUrl: z.union([z.string().max(2048), z.literal('')]).optional()
 })
 
 function trainingScriptPath(): string {
@@ -142,6 +181,7 @@ function ollamaTagConflictsWithLoaded(loaded: string, toDelete: string): boolean
 
 export function registerIpc(ctx: IpcContext): void {
   const { db, store, userData, getHfToken, setHfToken, getRuntime, setRuntime } = ctx
+  migrateChatProfileSettings(store)
 
   const modelsDir = (): string => {
     const m = (store.get('modelsDir') as string | undefined)?.trim()
@@ -193,6 +233,14 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(IPC.SET_CONFIG, (_e, raw: unknown) => {
     const parsed = configSchema.partial().safeParse(raw)
     if (!parsed.success) return { ok: false, error: parsed.error.message }
+    const remoteAgentUrl = parsed.data.agentRemoteOllamaUrl
+    if (typeof remoteAgentUrl === 'string' && remoteAgentUrl.trim()) {
+      try {
+        assertSelfHostedOllamaBaseUrl(remoteAgentUrl)
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
     const reloadIntegration = Object.keys(parsed.data).some(
       (k) => k === 'integrationListenEnabled' || k === 'integrationPort' || k === 'integrationToken'
     )
@@ -203,6 +251,10 @@ export function registerIpc(ctx: IpcContext): void {
       }
       if (k === 'modelsDir' && v === null) {
         store.delete('modelsDir')
+        return
+      }
+      if (k === 'llamaChatMaxTokens' && v === null) {
+        store.delete('llamaChatMaxTokens')
         return
       }
       store.set(k, v as never)
@@ -486,12 +538,21 @@ export function registerIpc(ctx: IpcContext): void {
     const resolved = resolveLlamaBinary(configured.trim() ? configured : undefined)
     const ollamaBase = (store.get('ollamaBaseUrl') as string | undefined) ?? 'http://127.0.0.1:11434'
     const ollamaReachable = await probeOllamaReachable(ollamaBase)
+    let llamaBinaryValid = false
+    let llamaValidateError: string | null = null
+    if (resolved) {
+      const v = await validateLlamaServerBinary(resolved)
+      llamaBinaryValid = v.ok
+      llamaValidateError = v.ok ? null : v.error
+    }
     return {
       llamaBinary: configured,
       ollamaBase,
       llamaResolvedPath: resolved ?? '',
       llamaDetected: Boolean(resolved),
       llamaConfiguredPathValid: configuredValid,
+      llamaBinaryValid,
+      llamaValidateError,
       ollamaReachable
     }
   })
@@ -532,6 +593,17 @@ export function registerIpc(ctx: IpcContext): void {
         opts.kind === 'llamacpp'
           ? resolveLlamaBinary(typeof configuredBin === 'string' ? configuredBin : undefined)
           : undefined
+      if (opts.kind === 'llamacpp') {
+        if (!binaryPath) {
+          throw new Error(
+            'No llama-server binary is configured. Open Run, set the path to llama-server (or install it on your PATH), then try again.'
+          )
+        }
+        const v = await validateLlamaServerBinary(binaryPath, { bypassCache: true })
+        if (!v.ok) {
+          throw new Error(v.error)
+        }
+      }
       const sendLoad = (p: RuntimeLoadProgress): void => {
         event.sender.send(IPC.RUNTIME_LOAD_PROGRESS, p)
       }
@@ -557,12 +629,23 @@ export function registerIpc(ctx: IpcContext): void {
         modelPathForLoad = r.loadPath
         displayModelPath = r.displayPath
       }
+      const rawCtx = store.get('llamaContextTokens')
+      const llamaContextTokens =
+        typeof rawCtx === 'number' && Number.isFinite(rawCtx)
+          ? clampLlamaContextTokens(rawCtx)
+          : LLAMA_CONTEXT_TOKENS_DEFAULT
       try {
         await adapter.start({
           modelPath: modelPathForLoad,
           displayModelPath,
           binaryPath,
           port: (store.get('llamaPort') as number | undefined) ?? 8080,
+          ...(opts.kind === 'llamacpp'
+            ? {
+                defaultPredictTokens: llamaChatMaxCompletionTokensFromStore(store),
+                contextTokens: llamaContextTokens
+              }
+            : {}),
           onLoadProgress: sendLoad
         })
       } catch (e) {
@@ -595,8 +678,10 @@ export function registerIpc(ctx: IpcContext): void {
       payload: {
         messages: { role: 'user' | 'assistant' | 'system'; content: string }[]
         requestId?: string
-        /** Optional cap for short calls (e.g. composer inline suggestion); clamped 1–128. */
+        /** When set, clamps to 1…262144. Composer suggestions pass small values (e.g. 96). */
         maxTokens?: number
+        ollamaModel?: string
+        ollamaBaseUrl?: string
       }
     ) => {
       const rt = getRuntime()
@@ -607,16 +692,22 @@ export function registerIpc(ctx: IpcContext): void {
           'llama-server is not running. It may have crashed while loading the model — open Run and press Start again, or verify the model file path and port.'
         )
       }
-      const rawOverride = payload.maxTokens
-      const chatMaxTokens =
-        typeof rawOverride === 'number' && Number.isFinite(rawOverride)
-          ? Math.min(128, Math.max(1, Math.floor(rawOverride)))
-          : (() => {
-              const rawMax = store.get('chatMaxTokens')
-              return typeof rawMax === 'number' && Number.isFinite(rawMax)
-                ? Math.min(262_144, Math.max(1, Math.floor(rawMax)))
-                : 512
-            })()
+      const chatMaxTokens = resolveChatMaxCompletionTokens(
+        store,
+        payload.maxTokens,
+        st.kind === 'llamacpp' ? 'llamacpp' : st.kind === 'ollama' ? 'ollama' : undefined
+      )
+      const ollamaModel =
+        typeof payload.ollamaModel === 'string' && payload.ollamaModel.trim() ? payload.ollamaModel.trim() : undefined
+      let ollamaBaseUrl: string | undefined
+      if (typeof payload.ollamaBaseUrl === 'string' && payload.ollamaBaseUrl.trim()) {
+        const u = payload.ollamaBaseUrl.trim().slice(0, 2048)
+        if (!/^https?:\/\//i.test(u)) {
+          throw new Error('Agent remote Ollama URL must start with http:// or https://')
+        }
+        assertSelfHostedOllamaBaseUrl(u)
+        ollamaBaseUrl = u
+      }
       const requestId = typeof payload.requestId === 'string' ? payload.requestId : ''
       const emit = (
         data:
@@ -631,8 +722,23 @@ export function registerIpc(ctx: IpcContext): void {
       const chatStarted = Date.now()
       try {
         if (requestId) emit({ kind: 'started' })
+        const samplingOpts =
+          st.kind === 'llamacpp'
+            ? (() => {
+                const s = llamaSamplingFromStore(store)
+                return {
+                  temperature: s.temperature,
+                  topP: s.topP,
+                  frequencyPenalty: s.frequencyPenalty,
+                  presencePenalty: s.presencePenalty
+                }
+              })()
+            : {}
         const reply = await rt.chat(payload.messages, {
           maxTokens: chatMaxTokens,
+          ...(ollamaModel ? { ollamaModel } : {}),
+          ...(ollamaBaseUrl ? { ollamaBaseUrl } : {}),
+          ...samplingOpts,
           ...(requestId
             ? {
                 onStreamChunk: (text: string) => emit({ kind: 'token', text }),
@@ -694,8 +800,54 @@ export function registerIpc(ctx: IpcContext): void {
             message: e instanceof Error ? e.message : String(e)
           })
         }
+        if (store.get('chatDomainEnhancement') === true) {
+          const suffix = collectDomainSystemSuffixForMessage(db, row.id).trim()
+          if (suffix) {
+            return { ...row, promptDomainSuffix: suffix }
+          }
+        }
       }
       return row
+    }
+  )
+
+  ipcMain.handle(
+    IPC.PROMPT_DOMAIN_SET_SUFFIX,
+    (_e, raw: unknown) => {
+      const parsed = z
+        .object({
+          domainId: z.string().min(1),
+          systemSuffix: z.string().max(MAX_PROMPT_DOMAIN_SUFFIX_CHARS)
+        })
+        .safeParse(raw)
+      if (!parsed.success) throw new Error('Invalid prompt domain suffix payload')
+      updatePromptDomainSystemSuffix(db, parsed.data.domainId, parsed.data.systemSuffix)
+      return { ok: true as const }
+    }
+  )
+
+  ipcMain.handle(IPC.TRAIN_BASE_FOR_FINETUNE_PATH, (_e, raw: unknown) => {
+    const p = typeof raw === 'string' ? raw.trim() : ''
+    if (!p) return { baseModelPath: null as string | null }
+    const base = trainOrchestrator.findBaseModelForFinetuneArtifact(db, p)
+    return { baseModelPath: base ?? null }
+  })
+
+  ipcMain.handle(
+    IPC.MESSAGE_DELETE,
+    (
+      _e,
+      payload: unknown
+    ) => {
+      const parsed = z
+        .object({
+          conversationId: z.string().min(1),
+          messageId: z.string().min(1)
+        })
+        .safeParse(payload)
+      if (!parsed.success) throw new Error('Invalid message delete payload')
+      const ok = chatService.deleteMessage(db, parsed.data.conversationId, parsed.data.messageId)
+      return { ok }
     }
   )
 
@@ -764,6 +916,30 @@ export function registerIpc(ctx: IpcContext): void {
   })
   ipcMain.handle(IPC.KB_KNOWLEDGE_GRAPH, () => kbService.getKnowledgeGraph(db))
 
+  ipcMain.handle(IPC.KB_GRAPH_ANALYSIS_RUN, (_e, raw: unknown) => {
+    const ingest =
+      raw &&
+      typeof raw === 'object' &&
+      (raw as { ingestReport?: unknown }).ingestReport === true
+    try {
+      const payload = kbService.getKnowledgeGraph(db)
+      const result = analyzeKnowledgeGraph(payload)
+      const markdown = knowledgeGraphAnalysisToMarkdown(payload, result)
+      let ingestedSourceId: string | undefined
+      if (ingest) {
+        const iso = new Date().toISOString().slice(0, 19).replace('T', ' ')
+        const title = `Graph analysis · ${iso}`
+        const uri = `analysis:kg:${Date.now()}`
+        const src = kbService.ingestText(db, title, uri, markdown, undefined, null)
+        ingestedSourceId = src.id
+      }
+      return { ok: true as const, result, markdown, ingestedSourceId }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return { ok: false as const, error: msg }
+    }
+  })
+
   ipcMain.handle(IPC.KB_WIKI_EXTRACT_TURN, async (_e, raw: unknown) => {
     const parsed = z
       .object({
@@ -824,18 +1000,37 @@ export function registerIpc(ctx: IpcContext): void {
   })
   ipcMain.handle(IPC.METRICS_HISTORY, (_e, limit?: number) => metricsService.recentHistory(db, limit ?? 60))
 
-  ipcMain.handle(
-    IPC.TRAIN_START,
-    (_e, opts: { baseModelPath: string; datasetPath: string; pythonPath?: string }) =>
-      trainOrchestrator.startTrainJob(db, userData, trainingScriptPath(), {
-        baseModelPath: opts.baseModelPath,
-        datasetPath: opts.datasetPath,
-        pythonPath: opts.pythonPath
-      })
-  )
+  ipcMain.handle(IPC.TRAIN_START, (_e, raw: unknown) => {
+    const p = raw as {
+      baseModelPath?: string
+      datasetPath?: string
+      kbSourceIds?: string[]
+      displayName?: string
+      pythonPath?: string
+    }
+    const base = typeof p.baseModelPath === 'string' ? p.baseModelPath.trim() : ''
+    if (!base) throw new Error('Base model path is required (GGUF or model id you fine-tune from).')
+    const kbSourceIds = Array.isArray(p.kbSourceIds)
+      ? p.kbSourceIds.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+      : undefined
+    return trainOrchestrator.startTrainJob(db, userData, trainingScriptPath(), {
+      baseModelPath: base,
+      datasetPath: typeof p.datasetPath === 'string' && p.datasetPath.trim() ? p.datasetPath.trim() : undefined,
+      kbSourceIds,
+      displayName: typeof p.displayName === 'string' ? p.displayName : undefined,
+      pythonPath: typeof p.pythonPath === 'string' && p.pythonPath.trim() ? p.pythonPath.trim() : undefined,
+      modelsDir: modelsDir()
+    })
+  })
 
   ipcMain.handle(IPC.TRAIN_STATUS, (_e, id: string) => trainOrchestrator.getTrainJob(db, id))
   ipcMain.handle(IPC.TRAIN_LIST_JOBS, () => trainOrchestrator.listTrainJobs(db))
+  ipcMain.handle(IPC.TRAIN_RESCAN_ARTIFACT, (_e, jobId: unknown) => {
+    if (typeof jobId !== 'string' || !jobId.trim()) throw new Error('Job id is required')
+    const r = trainOrchestrator.rescanTrainJobArtifacts(db, jobId.trim(), modelsDir())
+    if (!r) throw new Error('Train job not found')
+    return r
+  })
 
   /** Persist HF token with safeStorage */
   ipcMain.handle(IPC.INTEGRATION_PLUGIN_REPORTS_LIST, () => getPluginReportHistory())
