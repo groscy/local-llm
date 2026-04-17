@@ -1,158 +1,62 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { KnowledgeGraphNode, KnowledgeGraphPayload } from '@shared/types'
+import {
+  useCallback,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode
+} from 'react'
+import type { KnowledgeGraphAnalysisResult } from '@shared/knowledgeGraphAnalysis'
+import type { KnowledgeGraphEdgeKind, KnowledgeGraphNode, KnowledgeGraphPayload } from '@shared/types'
+import { buildKnowledgeGraphLayout, kgEdgePath, nodeRadius } from './knowledgeGraph/buildKnowledgeGraphLayout'
+import { useKnowledgeGraphViewport } from './knowledgeGraph/useKnowledgeGraphViewport'
 
-type Pos = { x: number; y: number }
-type Box = { x: number; y: number; w: number; h: number }
-
-function layoutGraph(
-  data: KnowledgeGraphPayload,
-  containerWidth: number
-): { positions: Map<string, Pos>; boxes: Map<string, Box>; width: number; height: number } {
-  const pad = 28
-  const wikiBoxW = 136
-  const wikiBoxH = 36
-  const wikiGapX = 14
-  const wikiRowGap = 22
-  const sourceR = 22
-  const sourceBoxW = 128
-  const sourceBoxH = sourceR * 2
-  const chunkW = 88
-  const chunkH = 24
-  const chunkGapY = 8
-  const chunkGapX = 10
-  const colGap = 14
-
-  const sources = data.nodes.filter((n) => n.kind === 'source')
-  const wikis = data.nodes.filter((n) => n.kind === 'wiki')
-  const chunksBySource = new Map<string, KnowledgeGraphNode[]>()
-  for (const n of data.nodes) {
-    if (n.kind === 'chunk' && n.sourceId) {
-      const arr = chunksBySource.get(n.sourceId) ?? []
-      arr.push(n)
-      chunksBySource.set(n.sourceId, arr)
-    }
-  }
-
-  const chunkColsFor = (n: number): number => {
-    if (n <= 8) return 1
-    if (n <= 20) return 2
-    return 3
-  }
-
-  const nCol = Math.max(sources.length, 1)
-  const minSourceTrack =
-    nCol > 24 ? 104 : nCol > 16 ? 118 : nCol > 10 ? 132 : 148
-
-  const positions = new Map<string, Pos>()
-  const boxes = new Map<string, Box>()
-
-  const innerFromContainer = Math.max(containerWidth - pad * 2, 200)
-  const minInnerForSources = nCol * minSourceTrack + (nCol - 1) * colGap
-  const innerW = Math.max(innerFromContainer, minInnerForSources)
-  const layoutWidth = innerW + pad * 2
-
-  let yTop = pad
-
-  if (wikis.length > 0) {
-    const wikiSlot = wikiBoxW + wikiGapX
-    const wikisPerRow = Math.max(1, Math.floor((innerW + wikiGapX) / wikiSlot))
-    for (let rowStart = 0; rowStart < wikis.length; rowStart += wikisPerRow) {
-      const row = wikis.slice(rowStart, rowStart + wikisPerRow)
-      const n = row.length
-      const rowContentW = n * wikiBoxW + (n - 1) * wikiGapX
-      const x0 = pad + Math.max(0, (innerW - rowContentW) / 2)
-      for (let i = 0; i < n; i++) {
-        const w = row[i]!
-        const cx = x0 + wikiBoxW / 2 + i * (wikiBoxW + wikiGapX)
-        const cy = yTop + wikiBoxH / 2
-        positions.set(w.id, { x: cx, y: cy })
-        boxes.set(w.id, {
-          x: cx - wikiBoxW / 2,
-          y: cy - wikiBoxH / 2,
-          w: wikiBoxW,
-          h: wikiBoxH
-        })
-      }
-      yTop += wikiBoxH + wikiRowGap
-    }
-    yTop += 8
-  } else {
-    yTop += 6
-  }
-
-  const colW = (innerW - colGap * (nCol - 1)) / nCol
-  const ySource = yTop + sourceR + 8
-
-  let deepest = ySource + sourceR
-
-  sources.forEach((s, i) => {
-    const x = pad + colW * i + colGap * i + colW / 2
-    positions.set(s.id, { x, y: ySource })
-    boxes.set(s.id, {
-      x: x - sourceBoxW / 2,
-      y: ySource - sourceR,
-      w: sourceBoxW,
-      h: sourceBoxH
-    })
-
-    const chunks = chunksBySource.get(s.id) ?? []
-    const cols = chunkColsFor(chunks.length)
-    const colStride = chunkW + chunkGapX
-    const blockHalf = ((cols - 1) * colStride) / 2
-    const rows = Math.ceil(chunks.length / cols)
-    let y = ySource + sourceR + 18
-    for (let idx = 0; idx < chunks.length; idx++) {
-      const ch = chunks[idx]!
-      const col = idx % cols
-      const row = Math.floor(idx / cols)
-      const xc = x - blockHalf + col * colStride
-      const yc = y + row * (chunkH + chunkGapY)
-      positions.set(ch.id, { x: xc, y: yc })
-      boxes.set(ch.id, {
-        x: xc - chunkW / 2,
-        y: yc - chunkH / 2,
-        w: chunkW,
-        h: chunkH
-      })
-      deepest = Math.max(deepest, yc + chunkH / 2)
-    }
-  })
-
-  const height = Math.max(340, deepest + pad + 48)
-  return { positions, boxes, width: layoutWidth, height }
-}
-
-function edgePath(
-  from: Pos,
-  to: Pos,
-  kind: string,
-  b1: Box,
-  b2: Box
-): string {
-  const dx = to.x - from.x
-  const dy = to.y - from.y
-  const len = Math.hypot(dx, dy) || 1
-  const ux = dx / len
-  const uy = dy / len
-  const start = {
-    x: from.x + ux * (Math.min(b1.w, b1.h) / 2 + 4),
-    y: from.y + uy * (Math.min(b1.w, b1.h) / 2 + 4)
-  }
-  const end = {
-    x: to.x - ux * (Math.min(b2.w, b2.h) / 2 + 4),
-    y: to.y - uy * (Math.min(b2.w, b2.h) / 2 + 4)
-  }
-  if (kind === 'related' && Math.abs(dy) < 8) {
-    const lift = 36
-    const midX = (start.x + end.x) / 2
-    return `M ${start.x} ${start.y} Q ${midX} ${start.y - lift} ${end.x} ${end.y}`
-  }
-  return `M ${start.x} ${start.y} L ${end.x} ${end.y}`
-}
+const CLUSTER_STROKE: string[] = [
+  'hsl(200 55% 52%)',
+  'hsl(280 45% 58%)',
+  'hsl(140 50% 42%)',
+  'hsl(32 85% 48%)',
+  'hsl(340 55% 52%)',
+  'hsl(175 45% 45%)',
+  'hsl(55 70% 42%)',
+  'hsl(220 40% 60%)'
+]
 
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s
   return `${s.slice(0, max - 1)}…`
+}
+
+function clusterStrokeForSource(
+  analysis: KnowledgeGraphAnalysisResult | null | undefined,
+  sourceId: string
+): string | undefined {
+  if (!analysis?.clusters?.length) return undefined
+  for (let i = 0; i < analysis.clusters.length; i++) {
+    const c = analysis.clusters[i]!
+    if (c.sourceIds.includes(sourceId)) return CLUSTER_STROKE[i % CLUSTER_STROKE.length]
+  }
+  return undefined
+}
+
+function hubSourceSet(analysis: KnowledgeGraphAnalysisResult | null | undefined): Set<string> {
+  const s = new Set<string>()
+  if (!analysis?.hubs) return s
+  for (const h of analysis.hubs) s.add(h.sourceId)
+  return s
+}
+
+export type KnowledgeGraphAnalysisPanelProps = {
+  busy: boolean
+  error: string | null
+  summary: string | null
+  markdown: string | null
+  ingestedId: string | null
+  result?: KnowledgeGraphAnalysisResult | null
 }
 
 export function KnowledgeGraphView(props: {
@@ -160,45 +64,65 @@ export function KnowledgeGraphView(props: {
   loading: boolean
   onRefresh: () => void
   onPickSource?: (sourceId: string) => void
-  /** When true, omit the toolbar title (parent supplies a section heading). */
   hideToolbarTitle?: boolean
-  /** Optional graph analysis job (cluster / hubs / refinements); wired from main process. */
-  graphAnalysis?: {
-    busy: boolean
-    error: string | null
-    summary: string | null
-    markdown: string | null
-    ingestedId: string | null
-  }
+  graphAnalysis?: KnowledgeGraphAnalysisPanelProps
   onRunGraphAnalysis?: (opts: { ingestReport: boolean }) => void
 }): ReactNode {
-  const { data, loading, onRefresh, onPickSource, hideToolbarTitle, graphAnalysis, onRunGraphAnalysis } =
-    props
-  const tbClass = `kg-toolbar${hideToolbarTitle ? ' kg-toolbar--embedded' : ''}`
+  const { data, loading, onRefresh, onPickSource, hideToolbarTitle, graphAnalysis, onRunGraphAnalysis } = props
   const analysisBusy = graphAnalysis?.busy ?? false
   const graphInitialLoad = loading && data == null
   const wrapRef = useRef<HTMLDivElement>(null)
-  const [w, setW] = useState(640)
+  const stageRef = useRef<HTMLDivElement>(null)
+  const [layoutW, setLayoutW] = useState(640)
+  const [wrapSize, setWrapSize] = useState({ w: 640, h: 420 })
   const [hoverId, setHoverId] = useState<string | null>(null)
-  const [zoom, setZoom] = useState(1)
+  const [collapsedSourceIds, setCollapsedSourceIds] = useState<Set<string>>(() => new Set())
+  const [edgeShow, setEdgeShow] = useState<Record<KnowledgeGraphEdgeKind, boolean>>({
+    contains: true,
+    indexes: true,
+    compiled_from: true,
+    related: false
+  })
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [analysisOpen, setAnalysisOpen] = useState(true)
+  const [minimapOpen, setMinimapOpen] = useState(true)
+  const [kbdFocusId, setKbdFocusId] = useState<string | null>(null)
+  const obsPatternId = useId().replace(/:/g, '')
 
   useLayoutEffect(() => {
     const el = wrapRef.current
     if (!el) return
     const ro = new ResizeObserver((entries) => {
       const cr = entries[0]?.contentRect
-      if (cr && cr.width > 40) setW(Math.floor(cr.width))
+      if (cr && cr.width > 40) {
+        setLayoutW(Math.floor(cr.width))
+        setWrapSize({ w: Math.floor(cr.width), h: Math.max(120, Math.floor(cr.height)) })
+      }
     })
     ro.observe(el)
     const rect = el.getBoundingClientRect()
-    if (rect.width > 40) setW(Math.floor(rect.width))
+    if (rect.width > 40) {
+      setLayoutW(Math.floor(rect.width))
+      setWrapSize({ w: Math.floor(rect.width), h: Math.max(120, Math.floor(rect.height)) })
+    }
     return () => ro.disconnect()
   }, [])
 
   const layout = useMemo(() => {
     if (!data || data.nodes.length === 0) return null
-    return layoutGraph(data, w)
-  }, [data, w])
+    return buildKnowledgeGraphLayout(data, {
+      containerWidth: layoutW,
+      collapsedSourceIds
+    })
+  }, [data, layoutW, collapsedSourceIds])
+
+  const resetKey = data ? `${data.nodes.length}-${data.edges.length}-${[...collapsedSourceIds].sort().join(',')}` : '0'
+
+  const vpApi = useKnowledgeGraphViewport(wrapRef, {
+    contentW: layout?.width ?? 1,
+    contentH: layout?.height ?? 1,
+    resetKey
+  })
 
   const graphCounts = useMemo(() => {
     if (!data) return null
@@ -209,45 +133,118 @@ export function KnowledgeGraphView(props: {
     return { sources, chunks, wikis, edges }
   }, [data])
 
+  const hubIds = useMemo(() => hubSourceSet(graphAnalysis?.result), [graphAnalysis?.result])
+
+  const kbdOrderIds = useMemo(() => {
+    if (!data || !layout) return [] as string[]
+    const pos = layout.positions
+    const wikis = data.nodes.filter((n) => n.kind === 'wiki').map((n) => n.id)
+    const sources = data.nodes.filter((n) => n.kind === 'source').map((n) => n.id)
+    const chunks = data.nodes
+      .filter((n) => n.kind === 'chunk' && n.sourceId && !collapsedSourceIds.has(n.sourceId) && pos.has(n.id))
+      .map((n) => n.id)
+    return [...wikis, ...sources, ...chunks]
+  }, [data, layout, collapsedSourceIds])
+
   useLayoutEffect(() => {
-    setZoom(1)
+    if (kbdFocusId && !kbdOrderIds.includes(kbdFocusId)) setKbdFocusId(null)
+  }, [kbdFocusId, kbdOrderIds])
+
+  const toggleSourceCollapse = useCallback((sourceId: string) => {
+    setCollapsedSourceIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(sourceId)) next.delete(sourceId)
+      else next.add(sourceId)
+      return next
+    })
+  }, [])
+
+  const collapseAllChunks = useCallback(() => {
+    if (!data) return
+    const all = data.nodes.filter((n) => n.kind === 'source').map((n) => n.id)
+    setCollapsedSourceIds(new Set(all))
   }, [data])
+
+  const expandAllChunks = useCallback(() => {
+    setCollapsedSourceIds(new Set())
+  }, [])
 
   const edgeHighlight = useCallback(
     (from: string, to: string): boolean => {
-      if (!hoverId) return false
-      return from === hoverId || to === hoverId
+      if (!hoverId && !kbdFocusId) return false
+      const h = hoverId ?? kbdFocusId
+      return from === h || to === h
     },
-    [hoverId]
+    [hoverId, kbdFocusId]
+  )
+
+  const relatedEdgeVisible = useCallback(
+    (from: string, to: string): boolean => {
+      if (edgeShow.related) return true
+      const h = hoverId ?? kbdFocusId
+      if (!h) return false
+      return from === h || to === h
+    },
+    [edgeShow.related, hoverId, kbdFocusId]
   )
 
   const onNodeClick = useCallback(
-    (node: KnowledgeGraphNode) => {
+    (node: KnowledgeGraphNode, e?: ReactMouseEvent) => {
+      if (node.kind === 'source' && e?.shiftKey) {
+        e.preventDefault()
+        toggleSourceCollapse(node.id)
+        return
+      }
       if (node.kind === 'source') onPickSource?.(node.id)
       else if (node.kind === 'chunk' && node.sourceId) onPickSource?.(node.sourceId)
       else if (node.kind === 'wiki' && node.id.startsWith('src:')) onPickSource?.(node.id.slice(4))
     },
-    [onPickSource]
+    [onPickSource, toggleSourceCollapse]
   )
 
-  const fitZoom = useCallback(() => {
-    const el = wrapRef.current
-    if (!el || !layout) return
-    const pad = 20
-    const zw = Math.max(120, el.clientWidth - pad)
-    const zh = Math.max(120, el.clientHeight - pad)
-    const sx = zw / layout.width
-    const sy = zh / layout.height
-    setZoom(Math.min(2.4, Math.max(0.1, Math.min(sx, sy))))
-  }, [layout])
+  const activateKbdFocus = useCallback(() => {
+    if (!data || !kbdFocusId) return
+    const node = data.nodes.find((n) => n.id === kbdFocusId)
+    if (node) onNodeClick(node)
+  }, [data, kbdFocusId, onNodeClick])
 
-  const analysisPanel =
+  const onStageKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (!kbdOrderIds.length) return
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+        e.preventDefault()
+        setKbdFocusId((cur) => {
+          if (!cur) return kbdOrderIds[0] ?? null
+          const i = kbdOrderIds.indexOf(cur)
+          if (i < 0) return kbdOrderIds[0] ?? null
+          return kbdOrderIds[Math.min(kbdOrderIds.length - 1, i + 1)] ?? null
+        })
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+        e.preventDefault()
+        setKbdFocusId((cur) => {
+          if (!cur) return kbdOrderIds[kbdOrderIds.length - 1] ?? null
+          const i = kbdOrderIds.indexOf(cur)
+          if (i < 0) return kbdOrderIds[0] ?? null
+          return kbdOrderIds[Math.max(0, i - 1)] ?? null
+        })
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        activateKbdFocus()
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        setKbdFocusId(null)
+      }
+    },
+    [kbdOrderIds, activateKbdFocus]
+  )
+
+  const analysisPanelInner =
     graphAnalysis &&
     (graphAnalysis.error ||
       graphAnalysis.summary ||
       graphAnalysis.markdown ||
       graphAnalysis.ingestedId) ? (
-      <div className="kg-analysis" aria-live="polite">
+      <>
         {graphAnalysis.error ? (
           <p className="kg-analysis-error" role="alert">
             {graphAnalysis.error}
@@ -263,15 +260,237 @@ export function KnowledgeGraphView(props: {
             <pre className="kg-analysis-md">{graphAnalysis.markdown}</pre>
           </details>
         ) : null}
+      </>
+    ) : null
+
+  const analysisPanel =
+    graphAnalysis && analysisPanelInner ? (
+      <div className="kg-analysis kg-analysis--collapsible" aria-live="polite">
+        <button
+          type="button"
+          className="btn-secondary btn-sm kg-analysis-toggle"
+          onClick={() => setAnalysisOpen((o) => !o)}
+          aria-expanded={analysisOpen}
+        >
+          {analysisOpen ? 'Hide analysis' : 'Show analysis'}
+        </button>
+        {analysisOpen ? <div className="kg-analysis-body">{analysisPanelInner}</div> : null}
       </div>
     ) : null
+
+  const minimapClick = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      e.stopPropagation()
+      if (!layout || !wrapRef.current) return
+      const el = e.currentTarget
+      const rect = el.getBoundingClientRect()
+      const mx = e.clientX - rect.left
+      const my = e.clientY - rect.top
+      const mw = 120
+      const mh = 86
+      const mm = Math.min(mw / layout.width, mh / layout.height)
+      const worldX = Math.max(0, Math.min(layout.width, mx / mm))
+      const worldY = Math.max(0, Math.min(layout.height, my / mm))
+      const vw = wrapRef.current.clientWidth
+      const vh = wrapRef.current.clientHeight
+      vpApi.setViewport((prev) => ({
+        scale: prev.scale,
+        tx: vw / 2 - worldX * prev.scale,
+        ty: vh / 2 - worldY * prev.scale
+      }))
+    },
+    [layout, vpApi]
+  )
+
+  const renderMinimap = () => {
+    if (!layout || !minimapOpen) return null
+    const { width: cw, height: ch } = layout
+    const mw = 120
+    const mh = 86
+    const mm = Math.min(mw / cw, mh / ch)
+    const wv = wrapSize.w
+    const hv = wrapSize.h
+    const { scale: zs, tx, ty } = vpApi.viewport
+    const worldLeft = -tx / zs
+    const worldTop = -ty / zs
+    const worldW = wv / zs
+    const worldH = hv / zs
+    const worldWm = cw * mm
+    const worldHm = ch * mm
+    const vx = Math.max(0, Math.min(worldWm - 4, worldLeft * mm))
+    const vy = Math.max(0, Math.min(worldHm - 4, worldTop * mm))
+    const vwClamped = Math.min(worldWm - vx, Math.max(4, worldW * mm))
+    const vhClamped = Math.min(worldHm - vy, Math.max(4, worldH * mm))
+    return (
+      <div
+        className="kg-minimap"
+        data-kg-no-pan=""
+        role="presentation"
+        onPointerDown={minimapClick}
+        title="Click to center view on point"
+      >
+        <svg width={mw + 2} height={mh + 2} viewBox={`0 0 ${mw + 2} ${mh + 2}`} className="kg-minimap-svg">
+          <rect x={0.5} y={0.5} width={worldWm} height={worldHm} className="kg-minimap-world" rx={2} />
+          <rect x={0.5 + vx} y={0.5 + vy} width={vwClamped} height={vhClamped} className="kg-minimap-vp" rx={1} />
+        </svg>
+      </div>
+    )
+  }
+
+  /** Floating controls inside the graph viewport (map-style). */
+  const renderMapOverlays = (): ReactNode => (
+    <div className="kg-map-overlay-root">
+      {graphCounts || !hideToolbarTitle ? (
+        <div
+          className="kg-map-interactive kg-map-chip kg-map-chip--info"
+          title="Nodes in this view (large libraries may be sampled)"
+        >
+          {!hideToolbarTitle ? <div className="kg-map-chip-heading">Knowledge graph</div> : null}
+          {graphCounts ? (
+            <div className="kg-map-chip-body">
+              <span className="kg-map-chip-stats">
+                {graphCounts.sources} src · {graphCounts.chunks} chk · {graphCounts.wikis} wiki · {graphCounts.edges} e
+              </span>
+              {data?.truncated ? (
+                <span className="kg-map-chip-sampled" title="Some items omitted for performance">
+                  Sampled
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="kg-map-interactive kg-map-rail kg-map-rail--zoom" role="toolbar" aria-label="Map zoom">
+        <button type="button" className="kg-map-rail-btn" onClick={() => vpApi.zoomIn()} title="Zoom in">
+          +
+        </button>
+        <button type="button" className="kg-map-rail-btn" onClick={() => vpApi.zoomOut()} title="Zoom out">
+          −
+        </button>
+        <button type="button" className="kg-map-rail-btn kg-map-rail-btn--fit" onClick={() => vpApi.fitToView()} title="Fit graph in view">
+          fit
+        </button>
+      </div>
+
+      <details className="kg-map-interactive kg-map-layers">
+        <summary className="kg-map-layers-trigger" title="Edges, minimap, chunks, analysis">
+          <span className="kg-map-layers-trigger-icon" aria-hidden>
+            ◫
+          </span>
+          <span className="kg-map-layers-trigger-label">Layers</span>
+        </summary>
+        <div
+          className="kg-map-layers-panel"
+          role="dialog"
+          aria-label="Graph layers and tools"
+          onWheel={(e) => e.stopPropagation()}
+        >
+          <p className="kg-map-layers-hint muted">Wheel zoom · drag background to pan</p>
+          <div className="kg-map-layers-section" role="group" aria-label="Edge types">
+            <span className="kg-map-layers-section-title">Edges</span>
+            <label className="kg-map-check">
+              <input
+                type="checkbox"
+                checked={edgeShow.contains}
+                onChange={() => setEdgeShow((s) => ({ ...s, contains: !s.contains }))}
+              />
+              contains
+            </label>
+            <label className="kg-map-check">
+              <input
+                type="checkbox"
+                checked={edgeShow.indexes}
+                onChange={() => setEdgeShow((s) => ({ ...s, indexes: !s.indexes }))}
+              />
+              indexes
+            </label>
+            <label className="kg-map-check">
+              <input
+                type="checkbox"
+                checked={edgeShow.compiled_from}
+                onChange={() => setEdgeShow((s) => ({ ...s, compiled_from: !s.compiled_from }))}
+              />
+              compiled
+            </label>
+            <label className="kg-map-check" title="When off, related edges show on hover or keyboard focus">
+              <input
+                type="checkbox"
+                checked={edgeShow.related}
+                onChange={() => setEdgeShow((s) => ({ ...s, related: !s.related }))}
+              />
+              related
+            </label>
+          </div>
+          {graphAnalysis?.result?.suggestedLinks?.length ? (
+            <label className="kg-map-check kg-map-check--solo">
+              <input type="checkbox" checked={showSuggestions} onChange={() => setShowSuggestions((v) => !v)} />
+              Show suggested links
+            </label>
+          ) : null}
+          <label className="kg-map-check kg-map-check--solo">
+            <input type="checkbox" checked={minimapOpen} onChange={() => setMinimapOpen((v) => !v)} />
+            Minimap
+          </label>
+          <div className="kg-map-layers-section">
+            <span className="kg-map-layers-section-title">Chunks</span>
+            <div className="kg-map-layers-actions">
+              <button type="button" className="kg-map-panel-btn" onClick={collapseAllChunks}>
+                Collapse all
+              </button>
+              <button type="button" className="kg-map-panel-btn" onClick={expandAllChunks}>
+                Expand all
+              </button>
+            </div>
+          </div>
+          <div className="kg-map-layers-section">
+            <span className="kg-map-layers-section-title">View</span>
+            <button type="button" className="kg-map-panel-btn" onClick={() => vpApi.resetZoom()}>
+              Reset zoom (100%)
+            </button>
+          </div>
+          <div className="kg-map-layers-section kg-map-layers-section--actions">
+            {onRunGraphAnalysis ? (
+              <>
+                <button
+                  type="button"
+                  className="kg-map-panel-btn kg-map-panel-btn--primary"
+                  disabled={loading || analysisBusy}
+                  onClick={() => onRunGraphAnalysis({ ingestReport: false })}
+                >
+                  {analysisBusy ? '…' : 'Analyze graph'}
+                </button>
+                <button
+                  type="button"
+                  className="kg-map-panel-btn"
+                  disabled={loading || analysisBusy}
+                  onClick={() => onRunGraphAnalysis({ ingestReport: true })}
+                >
+                  {analysisBusy ? '…' : 'Save report to library'}
+                </button>
+              </>
+            ) : null}
+            <button type="button" className="kg-map-panel-btn" onClick={onRefresh} disabled={loading}>
+              {loading ? '…' : 'Refresh graph'}
+            </button>
+          </div>
+        </div>
+      </details>
+
+      <div className="kg-map-interactive kg-map-bottombar" role="toolbar" aria-label="Refresh graph">
+        <button type="button" className="kg-map-fab" onClick={onRefresh} disabled={loading} title="Refresh graph data">
+          {loading ? '…' : '↻'}
+        </button>
+      </div>
+    </div>
+  )
 
   if (loading && !data) {
     return (
       <div className="kg-panel">
-        <div className={tbClass}>
+        <div className="kg-fallback-bar">
           {!hideToolbarTitle ? <span className="kg-toolbar-title">Knowledge graph</span> : null}
-          <div className="kg-toolbar-meta">
+          <div className="kg-fallback-bar-actions">
             {onRunGraphAnalysis ? (
               <>
                 <button
@@ -306,9 +525,9 @@ export function KnowledgeGraphView(props: {
   if (!data || data.nodes.length === 0) {
     return (
       <div className="kg-panel">
-        <div className={tbClass}>
+        <div className="kg-fallback-bar">
           {!hideToolbarTitle ? <span className="kg-toolbar-title">Knowledge graph</span> : null}
-          <div className="kg-toolbar-meta">
+          <div className="kg-fallback-bar-actions">
             {onRunGraphAnalysis ? (
               <>
                 <button
@@ -345,226 +564,259 @@ export function KnowledgeGraphView(props: {
   if (!layout) return null
 
   const { positions, boxes, width: layoutWidth, height } = layout
-  const scaledW = layoutWidth * zoom
-  const scaledH = height * zoom
+  const { tx, ty, scale: zs } = vpApi.viewport
+  const hideChunkLabels = zs < 0.44
+  const hideWikiLabels = zs < 0.34
+  const matrix = `translate(${tx},${ty}) scale(${zs})`
 
   return (
     <div className="kg-panel">
-      <div className={tbClass}>
-        {!hideToolbarTitle ? <span className="kg-toolbar-title">Knowledge graph</span> : null}
-        <div className="kg-toolbar-meta">
-          {graphCounts ? (
-            <span className="kg-toolbar-counts" title="Nodes shown in this view (large libraries may be sampled)">
-              {graphCounts.sources} sources · {graphCounts.chunks} chunk nodes · {graphCounts.wikis} wiki ·{' '}
-              {graphCounts.edges} edges
-            </span>
-          ) : null}
-          {data.truncated && (
-            <span className="kg-truncation-note" title="Some chunks, wiki pages, or cross-links are omitted to keep the graph fast">
-              Sampled
-            </span>
-          )}
-          <span className="kg-zoom-cluster" aria-label="Zoom">
-            <button type="button" className="btn-secondary btn-sm" onClick={() => fitZoom()} title="Fit graph to panel">
-              Fit
-            </button>
-            <button
-              type="button"
-              className="btn-secondary btn-sm"
-              onClick={() => setZoom((z) => Math.max(0.1, Math.round((z / 1.12) * 1000) / 1000))}
-              title="Zoom out"
-            >
-              −
-            </button>
-            <button
-              type="button"
-              className="btn-secondary btn-sm"
-              onClick={() => setZoom((z) => Math.min(2.5, Math.round(z * 1.12 * 1000) / 1000))}
-              title="Zoom in"
-            >
-              +
-            </button>
-            <button type="button" className="btn-secondary btn-sm" onClick={() => setZoom(1)} title="Reset zoom (100%)">
-              100%
-            </button>
-            <span className="kg-zoom-hint muted">Ctrl+wheel</span>
-          </span>
-          {onRunGraphAnalysis ? (
-            <>
-              <button
-                type="button"
-                className="btn-secondary btn-sm"
-                disabled={loading || analysisBusy}
-                onClick={() => onRunGraphAnalysis({ ingestReport: false })}
-              >
-                {analysisBusy ? '…' : 'Analyze graph'}
-              </button>
-              <button
-                type="button"
-                className="btn-secondary btn-sm"
-                disabled={loading || analysisBusy}
-                onClick={() => onRunGraphAnalysis({ ingestReport: true })}
-              >
-                {analysisBusy ? '…' : 'Save report to library'}
-              </button>
-            </>
-          ) : null}
-          <button type="button" className="btn-secondary btn-sm" onClick={onRefresh} disabled={loading}>
-            {loading ? '…' : 'Refresh'}
-          </button>
-        </div>
-      </div>
-
       <div
         ref={wrapRef}
-        className="kg-svg-wrap"
-        onWheel={(e) => {
-          if (!e.ctrlKey && !e.metaKey) return
-          e.preventDefault()
-          setZoom((z) => {
-            const next = e.deltaY < 0 ? z * 1.08 : z / 1.08
-            return Math.min(2.5, Math.max(0.1, Math.round(next * 1000) / 1000))
-          })
-        }}
+        className="kg-svg-wrap kg-svg-wrap--viewport"
+        onWheel={vpApi.onWheel}
+        onPointerDown={vpApi.onPointerDown}
+        onPointerMove={vpApi.onPointerMove}
+        onPointerUp={vpApi.onPointerUp}
+        onPointerLeave={vpApi.onPointerLeave}
+        onPointerCancel={vpApi.onPointerUp}
       >
         <div
-          className="kg-svg-scale-box"
-          style={{ width: scaledW, height: scaledH }}
+          ref={stageRef}
+          className="kg-graph-stage"
+          tabIndex={0}
+          onKeyDown={onStageKeyDown}
+          aria-label="Knowledge graph canvas. Use arrow keys to move focus, Enter to open topic."
         >
           <svg
-            className="kg-graph-svg"
-            width={layoutWidth}
-            height={height}
-            style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }}
-            viewBox={`0 0 ${layoutWidth} ${height}`}
+            className="kg-graph-svg kg-graph-svg--fill kg-graph-svg--obsidian"
+            width="100%"
+            height="100%"
             role="img"
+            aria-activedescendant={kbdFocusId ? `kg-node-${kbdFocusId}` : undefined}
             aria-label="Knowledge base structure: sources, indexed chunks, and wiki pages"
           >
-          <g className="kg-edges">
-            {data.edges.map((e, i) => {
-              const p1 = positions.get(e.from)
-              const p2 = positions.get(e.to)
-              const b1 = boxes.get(e.from)
-              const b2 = boxes.get(e.to)
-              if (!p1 || !p2 || !b1 || !b2) return null
-              const hi = edgeHighlight(e.from, e.to)
-              return (
-                <path
-                  key={`${e.from}-${e.to}-${e.kind}-${i}`}
-                  d={edgePath(p1, p2, e.kind, b1, b2)}
-                  className={`kg-edge kg-edge--${e.kind}${hi ? ' kg-edge--hi' : ''}`}
-                  fill="none"
-                />
-              )
-            })}
-          </g>
+            <defs>
+              <pattern id={`kgObsDots-${obsPatternId}`} patternUnits="userSpaceOnUse" width={20} height={20}>
+                <circle cx={1.2} cy={1.2} r={0.85} className="kg-obs-dot" />
+              </pattern>
+            </defs>
+            <g transform={matrix}>
+              <g className="kg-world-planes">
+                <rect x={0} y={0} width={layoutWidth} height={height} fill={`url(#kgObsDots-${obsPatternId})`} className="kg-obs-dots-layer" />
+                <rect x={0} y={0} width={layoutWidth} height={height} className="kg-world-bg" />
+              </g>
+              <g className="kg-edges">
+                {data.edges.map((e, i) => {
+                  const showEdge =
+                    e.kind === 'related'
+                      ? edgeShow.related || relatedEdgeVisible(e.from, e.to)
+                      : edgeShow[e.kind]
+                  if (!showEdge) return null
+                  const p1 = positions.get(e.from)
+                  const p2 = positions.get(e.to)
+                  const b1 = boxes.get(e.from)
+                  const b2 = boxes.get(e.to)
+                  if (!p1 || !p2 || !b1 || !b2) return null
+                  const hi = edgeHighlight(e.from, e.to)
+                  return (
+                    <path
+                      key={`${e.from}-${e.to}-${e.kind}-${i}`}
+                      d={kgEdgePath(p1, p2, e.kind, b1, b2)}
+                      className={`kg-edge kg-edge--${e.kind}${hi ? ' kg-edge--hi' : ''}`}
+                      fill="none"
+                    />
+                  )
+                })}
+                {showSuggestions && graphAnalysis?.result?.suggestedLinks
+                  ? graphAnalysis.result.suggestedLinks.map((s, i) => {
+                      const p1 = positions.get(s.fromSourceId)
+                      const p2 = positions.get(s.toSourceId)
+                      const b1 = boxes.get(s.fromSourceId)
+                      const b2 = boxes.get(s.toSourceId)
+                      if (!p1 || !p2 || !b1 || !b2) return null
+                      return (
+                        <path
+                          key={`sug-${s.fromSourceId}-${s.toSourceId}-${i}`}
+                          d={kgEdgePath(p1, p2, 'related', b1, b2)}
+                          className="kg-edge kg-edge--suggested"
+                          fill="none"
+                        />
+                      )
+                    })
+                  : null}
+              </g>
 
-          <g className="kg-nodes">
-            {data.nodes.map((n) => {
-              const p = positions.get(n.id)
-              const b = boxes.get(n.id)
-              if (!p || !b) return null
-              const hi = hoverId === n.id
-              const isOverflow = n.kind === 'chunk' && n.id.startsWith('kg-overflow:')
-              const label = truncate(n.label, n.kind === 'chunk' ? (isOverflow ? 12 : 16) : 26)
-              if (n.kind === 'wiki') {
-                return (
-                  <g
-                    key={n.id}
-                    className={`kg-node kg-node--wiki${hi ? ' kg-node--hi' : ''}`}
-                    style={{ cursor: onPickSource ? 'pointer' : 'default' }}
-                    onMouseEnter={() => setHoverId(n.id)}
-                    onMouseLeave={() => setHoverId(null)}
-                    onClick={() => onNodeClick(n)}
-                  >
-                    <rect
-                      x={b.x}
-                      y={b.y}
-                      width={b.w}
-                      height={b.h}
-                      rx={10}
-                      className="kg-shape"
-                    />
-                    <text x={p.x} y={p.y + 4} textAnchor="middle" className="kg-label">
-                      {label}
-                    </text>
-                    <title>{n.label}</title>
-                  </g>
-                )
-              }
-              if (n.kind === 'source') {
-                return (
-                  <g
-                    key={n.id}
-                    className={`kg-node kg-node--source${hi ? ' kg-node--hi' : ''}`}
-                    style={{ cursor: onPickSource ? 'pointer' : 'default' }}
-                    onMouseEnter={() => setHoverId(n.id)}
-                    onMouseLeave={() => setHoverId(null)}
-                    onClick={() => onNodeClick(n)}
-                  >
-                    <rect
-                      x={b.x}
-                      y={b.y}
-                      width={b.w}
-                      height={b.h}
-                      rx={12}
-                      className="kg-shape"
-                    />
-                    <text x={p.x} y={p.y + 5} textAnchor="middle" className="kg-label">
-                      {label}
-                    </text>
-                    <title>{n.label}</title>
-                  </g>
-                )
-              }
-              return (
-                <g
-                  key={n.id}
-                  className={`kg-node kg-node--chunk${isOverflow ? ' kg-node--overflow' : ''}${hi ? ' kg-node--hi' : ''}`}
-                  style={{ cursor: onPickSource ? 'pointer' : 'default' }}
-                  onMouseEnter={() => setHoverId(n.id)}
-                  onMouseLeave={() => setHoverId(null)}
-                  onClick={() => onNodeClick(n)}
-                >
-                  <rect x={b.x} y={b.y} width={b.w} height={b.h} rx={6} className="kg-shape" />
-                  <text x={p.x} y={p.y + 4} textAnchor="middle" className="kg-label kg-label--sm">
-                    {label}
-                  </text>
-                  <title>{n.sublabel ? `${n.label} — ${n.sublabel}` : n.label}</title>
-                </g>
-              )
-            })}
-          </g>
-        </svg>
+              <g className="kg-nodes">
+                {data.nodes.map((n) => {
+                  const p = positions.get(n.id)
+                  const b = boxes.get(n.id)
+                  if (!p || !b) return null
+                  const r = nodeRadius(n)
+                  const hi = hoverId === n.id || kbdFocusId === n.id
+                  const isOverflow = n.kind === 'chunk' && n.id.startsWith('kg-overflow:')
+                  const clusterStroke = n.kind === 'source' ? clusterStrokeForSource(graphAnalysis?.result, n.id) : undefined
+                  const isHub = n.kind === 'source' && hubIds.has(n.id)
+                  const showLabel =
+                    n.kind === 'chunk'
+                      ? !hideChunkLabels
+                      : n.kind === 'wiki'
+                        ? !hideWikiLabels
+                        : true
+                  const label = showLabel
+                    ? truncate(n.label, n.kind === 'chunk' ? (isOverflow ? 12 : 14) : 22)
+                    : n.kind === 'chunk'
+                      ? ''
+                      : truncate(n.label, 6)
+
+                  if (n.kind === 'wiki') {
+                    return (
+                      <g
+                        key={n.id}
+                        id={`kg-node-${n.id}`}
+                        className={`kg-node kg-node--wiki${hi ? ' kg-node--hi' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}`}
+                        style={{ cursor: onPickSource ? 'pointer' : 'default' }}
+                        onMouseEnter={() => setHoverId(n.id)}
+                        onMouseLeave={() => setHoverId(null)}
+                        onClick={() => onNodeClick(n)}
+                        tabIndex={-1}
+                        aria-label={n.label}
+                      >
+                        <circle cx={p.x} cy={p.y} r={r} className="kg-shape kg-node-dot" />
+                        {showLabel ? (
+                          <text x={p.x} y={p.y + r + 12} textAnchor="middle" className="kg-label kg-label-below">
+                            {label}
+                          </text>
+                        ) : null}
+                        <title>{n.label}</title>
+                      </g>
+                    )
+                  }
+                  if (n.kind === 'source') {
+                    const collapsed = collapsedSourceIds.has(n.id)
+                    return (
+                      <g
+                        key={n.id}
+                        id={`kg-node-${n.id}`}
+                        className={`kg-node kg-node--source${hi ? ' kg-node--hi' : ''}${isHub ? ' kg-node--hub' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}`}
+                        style={{ cursor: onPickSource ? 'pointer' : 'default' }}
+                        onMouseEnter={() => setHoverId(n.id)}
+                        onMouseLeave={() => setHoverId(null)}
+                        onClick={(ev) => onNodeClick(n, ev)}
+                        tabIndex={-1}
+                        aria-label={`${n.label}${collapsed ? ' (chunks collapsed)' : ''}. Shift+click to toggle chunks.`}
+                      >
+                        <circle
+                          cx={p.x}
+                          cy={p.y}
+                          r={r}
+                          className="kg-shape kg-node-dot"
+                          stroke={clusterStroke}
+                          strokeWidth={clusterStroke ? 2.4 : undefined}
+                        />
+                        <text x={p.x} y={p.y + r + 13} textAnchor="middle" className="kg-label kg-label-below kg-label-below--source">
+                          {truncate(n.label, 24)}
+                        </text>
+                        <g
+                          data-kg-no-pan=""
+                          className="kg-source-collapse-hit"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            toggleSourceCollapse(n.id)
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              e.stopPropagation()
+                              toggleSourceCollapse(n.id)
+                            }
+                          }}
+                          tabIndex={0}
+                          aria-label={collapsed ? 'Expand chunks' : 'Collapse chunks'}
+                        >
+                          <rect
+                            x={p.x + r - 15}
+                            y={p.y - r - 2}
+                            width={14}
+                            height={14}
+                            rx={3}
+                            className="kg-source-collapse-rect"
+                          />
+                          <text
+                            x={p.x + r - 8}
+                            y={p.y - r + 8}
+                            textAnchor="middle"
+                            className="kg-collapse-glyph"
+                          >
+                            {collapsed ? '+' : '−'}
+                          </text>
+                        </g>
+                        <title>{`${n.label} — Shift+click or use the corner control to show or hide chunks.`}</title>
+                      </g>
+                    )
+                  }
+                  return (
+                    <g
+                      key={n.id}
+                      id={`kg-node-${n.id}`}
+                      className={`kg-node kg-node--chunk${isOverflow ? ' kg-node--overflow' : ''}${hi ? ' kg-node--hi' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}`}
+                      style={{ cursor: onPickSource ? 'pointer' : 'default' }}
+                      onMouseEnter={() => setHoverId(n.id)}
+                      onMouseLeave={() => setHoverId(null)}
+                      onClick={() => onNodeClick(n)}
+                      tabIndex={-1}
+                      aria-label={n.sublabel ? `${n.label} — ${n.sublabel}` : n.label}
+                    >
+                      <circle cx={p.x} cy={p.y} r={r} className="kg-shape kg-node-dot" />
+                      {showLabel ? (
+                        <text x={p.x} y={p.y + r + 9} textAnchor="middle" className="kg-label kg-label-below kg-label-below--chunk">
+                          {label}
+                        </text>
+                      ) : null}
+                      <title>{n.sublabel ? `${n.label} — ${n.sublabel}` : n.label}</title>
+                    </g>
+                  )
+                })}
+              </g>
+            </g>
+          </svg>
+          {renderMinimap()}
         </div>
+        {renderMapOverlays()}
       </div>
 
-      <ul className="kg-legend" aria-label="Legend">
-        <li>
-          <span className="kg-legend-swatch kg-node--source" /> Source
-        </li>
-        <li>
-          <span className="kg-legend-swatch kg-node--chunk" /> Chunk
-        </li>
-        <li>
-          <span className="kg-legend-swatch kg-node--overflow" /> +N more chunks (sampled)
-        </li>
-        <li>
-          <span className="kg-legend-swatch kg-node--wiki" /> Wiki page
-        </li>
-        <li className="kg-legend-edges">
-          <span className="kg-legend-line kg-edge--contains" /> contains
-        </li>
-        <li className="kg-legend-edges">
-          <span className="kg-legend-line kg-edge--indexes" /> indexes
-        </li>
-        <li className="kg-legend-edges">
-          <span className="kg-legend-line kg-edge--compiled_from" /> compiled from source
-        </li>
-        <li className="kg-legend-edges">
-          <span className="kg-legend-line kg-edge--related" /> related title
-        </li>
-      </ul>
+      <details className="kg-legend-fold">
+        <summary className="kg-legend-summary">Legend</summary>
+        <ul className="kg-legend" aria-label="Legend">
+          <li>
+            <span className="kg-legend-swatch kg-node--source" /> Source
+          </li>
+          <li>
+            <span className="kg-legend-swatch kg-node--chunk" /> Chunk
+          </li>
+          <li>
+            <span className="kg-legend-swatch kg-node--overflow" /> +N more chunks (sampled)
+          </li>
+          <li>
+            <span className="kg-legend-swatch kg-node--wiki" /> Wiki page
+          </li>
+          <li className="kg-legend-edges">
+            <span className="kg-legend-line kg-edge--contains" /> contains
+          </li>
+          <li className="kg-legend-edges">
+            <span className="kg-legend-line kg-edge--indexes" /> indexes
+          </li>
+          <li className="kg-legend-edges">
+            <span className="kg-legend-line kg-edge--compiled_from" /> compiled from source
+          </li>
+          <li className="kg-legend-edges">
+            <span className="kg-legend-line kg-edge--related" /> related title
+          </li>
+          <li className="kg-legend-edges">
+            <span className="kg-legend-line kg-edge--suggested" /> suggested (analysis)
+          </li>
+        </ul>
+      </details>
 
       {analysisPanel}
     </div>

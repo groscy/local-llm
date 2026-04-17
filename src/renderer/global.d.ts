@@ -10,11 +10,14 @@ import type {
   RuntimeLoadProgress,
   RuntimeStatus,
   WikiChatHighlightTerm,
+  SaveIntellijPluginZipResult,
   WikiExportZipResult,
   WikiPagePayload,
   WikiTopic,
   PromptDomainRow
 } from '@shared/types'
+import type { IntegrationBridgeSelfTestResult } from '@shared/ideJourney'
+import type { ArchitectureRepositoryScanResponse } from '@shared/architectureRepository'
 
 export {}
 
@@ -27,10 +30,23 @@ type Api = {
     vectors: string
     platform: NodeJS.Platform
   }>
-  getConfig: () => Promise<Record<string, unknown> & { hfTokenSet?: boolean }>
+  openPathInExplorer: (absolutePath: string) => Promise<{ ok: boolean; error?: string }>
+  getConfig: () => Promise<
+    Record<string, unknown> & {
+      hfTokenSet?: boolean
+      showElectronDevMainView?: boolean
+      uiRole?: string
+      setupTourVersion?: number
+      typographyComfort?: string
+    }
+  >
   setConfig: (c: unknown) => Promise<{ ok: boolean; error?: string }>
   /** Native folder picker; returns absolute path or null if cancelled. */
   pickModelsDirectory: () => Promise<string | null>
+  /** Pick workspace root for Architecture Repository scan (does not persist until setConfig). */
+  pickArchitectureRepositoryRoot: () => Promise<string | null>
+  /** Bounded scan of `architectureRepositoryScanRoot` from settings. */
+  architectureRepositoryScan: () => Promise<ArchitectureRepositoryScanResponse>
   clearDownloadCache: () => Promise<{
     downloadsRemoved: number
     hfCacheRemoved: number
@@ -94,8 +110,11 @@ type Api = {
   /** Subscribe to streamed assistant tokens; correlate with `requestId` passed to `runtimeChat`. */
   onRuntimeChatProgress: (callback: (payload: RuntimeChatProgress) => void) => () => void
   integrationPluginReportsList: () => Promise<PluginIntegrationReport[]>
+  integrationBridgeSelfTest: (opts?: { smokeChat?: boolean }) => Promise<IntegrationBridgeSelfTestResult>
   onIntegrationPluginReport: (callback: (payload: PluginIntegrationReport) => void) => () => void
   openExternalUrl: (url: string) => Promise<{ ok: boolean }>
+  /** Save dialog: copy local/bundled Gradle ZIP when present, else download from GitHub latest. */
+  saveIntellijPluginZip: () => Promise<SaveIntellijPluginZipResult>
   runtimeStart: (p: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => Promise<RuntimeStatus>
   runtimeStop: () => Promise<RuntimeStatus>
   runtimeStatus: () => Promise<RuntimeStatus>

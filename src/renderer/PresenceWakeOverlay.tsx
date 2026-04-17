@@ -3,6 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 
 /** Minimum time the wake stays visible (intensity curve spans this duration when not blocked by runtime start). */
 const WAKE_DURATION_MS = 10_000
+/** Full-opacity fade-out of the wake layer before the main UI is shown. */
+const WAKE_OUTRO_MS = 520
+const WAKE_OUTRO_REDUCED_MS = 280
 const PARTICLE_COUNT = 56
 const SPARK_COUNT = 28
 const STARFIELD_COUNT = 140
@@ -148,6 +151,8 @@ export type PresenceWakeOverlayProps = {
   resumeRuntimeSession?: boolean
   /** Short status from the main process (load progress, server lines), shown when non-empty. */
   setupLiveDetail?: string | null
+  /** Product name shown at the top of the wake sequence. */
+  appTitle?: string
   onIntensityChange: (intensity: number) => void
   onDone: () => void
 }
@@ -159,6 +164,7 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
     setupRuntimeKind = null,
     resumeRuntimeSession = false,
     setupLiveDetail = null,
+    appTitle = 'Local LLM Desktop',
     onIntensityChange,
     onDone
   } = props
@@ -185,6 +191,8 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
   const earlyExitRef = useRef(false)
   const reducedTimerRef = useRef(0)
   const reducedIntervalRef = useRef(0)
+  const outroTimerRef = useRef(0)
+  const outroScheduledRef = useRef(false)
   const runtimeStartingRef = useRef(runtimeStarting)
 
   const setupLines = useMemo(
@@ -245,17 +253,36 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
     return () => mq.removeEventListener('change', onChange)
   }, [])
 
-  const finish = useCallback(() => {
+  const completeWake = useCallback(() => {
     if (doneRef.current) return
     doneRef.current = true
+    outroScheduledRef.current = false
+    window.clearTimeout(outroTimerRef.current)
+    outroTimerRef.current = 0
     window.clearInterval(reducedIntervalRef.current)
     reducedIntervalRef.current = 0
     onIntensityChange(0)
     onDone()
   }, [onDone, onIntensityChange])
 
+  const beginOutroAndComplete = useCallback(
+    (outroMs: number) => {
+      if (doneRef.current || outroScheduledRef.current) return
+      outroScheduledRef.current = true
+      cancelAnimationFrame(rafRef.current)
+      window.clearInterval(reducedIntervalRef.current)
+      window.clearTimeout(outroTimerRef.current)
+      setExiting(true)
+      outroTimerRef.current = window.setTimeout(() => {
+        outroTimerRef.current = 0
+        completeWake()
+      }, outroMs)
+    },
+    [completeWake]
+  )
+
   const startEarlyExit = useCallback(() => {
-    if (doneRef.current) return
+    if (doneRef.current || outroScheduledRef.current) return
     earlyExitRef.current = true
     window.clearTimeout(reducedTimerRef.current)
     reducedTimerRef.current = 0
@@ -265,7 +292,7 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
 
     if (reducedMotion) {
       onIntensityChange(0)
-      finish()
+      completeWake()
       return
     }
 
@@ -276,42 +303,48 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
     const easeOut = (): void => {
       const t = (performance.now() - t0) / 280
       if (t >= 1) {
-        finish()
+        completeWake()
         return
       }
       onIntensityChange(from * (1 - t))
       rafRef.current = requestAnimationFrame(easeOut)
     }
     rafRef.current = requestAnimationFrame(easeOut)
-  }, [finish, onIntensityChange, reducedMotion])
+  }, [completeWake, onIntensityChange, reducedMotion])
 
   useEffect(() => {
     doneRef.current = false
     earlyExitRef.current = false
+    outroScheduledRef.current = false
+    setExiting(false)
+    window.clearTimeout(outroTimerRef.current)
+    outroTimerRef.current = 0
     startRef.current = performance.now()
 
     if (reducedMotion) {
       onIntensityChange(0.38)
       reducedIntervalRef.current = window.setInterval(() => {
-        if (doneRef.current || earlyExitRef.current) return
+        if (doneRef.current || earlyExitRef.current || outroScheduledRef.current) return
         if (runtimeStartingRef.current) return
         const elapsed = performance.now() - startRef.current
         if (elapsed < WAKE_DURATION_MS) return
         window.clearInterval(reducedIntervalRef.current)
         reducedIntervalRef.current = 0
         onIntensityChange(0)
-        finish()
+        beginOutroAndComplete(WAKE_OUTRO_REDUCED_MS)
       }, 100)
       return () => {
         window.clearInterval(reducedIntervalRef.current)
         reducedIntervalRef.current = 0
         window.clearTimeout(reducedTimerRef.current)
+        window.clearTimeout(outroTimerRef.current)
+        outroTimerRef.current = 0
         cancelAnimationFrame(rafRef.current)
       }
     }
 
     const tick = (now: number): void => {
-      if (doneRef.current || earlyExitRef.current) return
+      if (doneRef.current || earlyExitRef.current || outroScheduledRef.current) return
       if (runtimeStartingRef.current) {
         const pulse = 0.38 + Math.sin(now / 900) * 0.12
         onIntensityChange(clamp01(pulse))
@@ -322,7 +355,7 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
       const u = Math.min(1, elapsed / WAKE_DURATION_MS)
       onIntensityChange(wakeIntensityAtProgress(u))
       if (elapsed >= WAKE_DURATION_MS) {
-        finish()
+        beginOutroAndComplete(WAKE_OUTRO_MS)
         return
       }
       rafRef.current = requestAnimationFrame(tick)
@@ -332,8 +365,10 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
       cancelAnimationFrame(rafRef.current)
       window.clearInterval(reducedIntervalRef.current)
       reducedIntervalRef.current = 0
+      window.clearTimeout(outroTimerRef.current)
+      outroTimerRef.current = 0
     }
-  }, [reducedMotion, onIntensityChange, finish])
+  }, [reducedMotion, onIntensityChange, beginOutroAndComplete])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -381,10 +416,13 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
       role="dialog"
       aria-modal="true"
       aria-busy={runtimeStarting}
-      aria-label="Starting Local LLM"
+      aria-labelledby="presence-wake-app-title"
       style={rootStyle}
       onPointerDown={onPointerDown}
     >
+      <h1 id="presence-wake-app-title" className="presence-wake-app-title">
+        {appTitle}
+      </h1>
       <div className="presence-wake-visual" aria-hidden="true">
         <div className="presence-wake-frost" />
         <div className="presence-wake-nebula presence-wake-nebula--a" />

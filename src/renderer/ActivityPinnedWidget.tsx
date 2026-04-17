@@ -25,6 +25,10 @@ function pluginKindLabel(kind: PluginIntegrationReport['kind']): string {
       return 'IDE apply cancelled'
     case 'send_cancelled':
       return 'IDE send cancelled'
+    case 'agent_step':
+      return 'IDE agent step'
+    case 'agent_stop':
+      return 'IDE agent stop'
     default:
       return kind
   }
