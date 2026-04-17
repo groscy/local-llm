@@ -73,7 +73,9 @@ const pluginReportBodySchema = z.object({
     'apply_completed',
     'apply_failed',
     'apply_cancelled',
-    'send_cancelled'
+    'send_cancelled',
+    'agent_step',
+    'agent_stop'
   ]),
   message: z.string().max(4000).optional(),
   meta: z.record(z.string(), pluginReportMetaValue).optional()

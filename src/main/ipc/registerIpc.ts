@@ -1,4 +1,12 @@
-import { ipcMain, dialog, safeStorage, BrowserWindow, shell, type MessageBoxOptions } from 'electron'
+import {
+  app,
+  ipcMain,
+  dialog,
+  safeStorage,
+  BrowserWindow,
+  shell,
+  type MessageBoxOptions
+} from 'electron'
 import { randomUUID } from 'crypto'
 import { basename, join, resolve } from 'path'
 
@@ -15,7 +23,49 @@ function llamaPathsDiffer(a: string, b: string): boolean {
     return a.trim() !== b.trim()
   }
 }
+
+/** Loopback HTTP client for IDE bridge self-test (same host as integration server). */
+async function localhostJsonRequest(
+  port: number,
+  path: string,
+  opts: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number } = {}
+): Promise<{ statusCode: number; body: string }> {
+  const method = opts.method ?? 'GET'
+  const headers: Record<string, string> = { ...opts.headers }
+  const body = opts.body
+  if (body && headers['Content-Length'] == null) {
+    headers['Content-Length'] = String(Buffer.byteLength(body, 'utf8'))
+  }
+  const timeoutMs = opts.timeoutMs ?? 8000
+  return await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: '127.0.0.1',
+        port,
+        path,
+        method,
+        headers
+      },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (c) => chunks.push(c as Buffer))
+        res.on('end', () => {
+          resolve({ statusCode: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+        })
+      }
+    )
+    req.on('error', reject)
+    req.setTimeout(timeoutMs, () => {
+      req.destroy()
+      reject(new Error('Request timed out'))
+    })
+    if (body) req.write(body)
+    req.end()
+  })
+}
+
 import { existsSync, mkdirSync, statSync, unlinkSync } from 'fs'
+import http from 'node:http'
 import type Store from 'electron-store'
 import { z } from 'zod'
 import type Database from 'better-sqlite3'
@@ -23,6 +73,12 @@ import { isValidStoredColorScheme } from '@shared/colorScheme'
 import type { RuntimeLoadProgress } from '@shared/types'
 import { is } from '@electron-toolkit/utils'
 import { IPC } from '@shared/ipc'
+import {
+  mergeIdeJourneyChecklist,
+  type BridgeSelfTestStep,
+  type IntegrationBridgeSelfTestResult,
+  type IntegrationBridgeSmokeChat
+} from '@shared/ideJourney'
 import { MAX_PROMPT_DOMAIN_SUFFIX_CHARS } from '@shared/promptDomains'
 import { assertSelfHostedOllamaBaseUrl } from '@shared/agenticChat'
 import {
@@ -76,7 +132,7 @@ import { logLine } from '../logger'
 import { resolveLlamaBinary, validateLlamaServerBinary } from '../services/llamaDetect'
 import { collectHardwareSummary } from '../services/hardwareSummary'
 import { clearAllAppCaches, deleteAllChildrenInDirectory } from '../services/dataMaintenance'
-import { migrateChatProfileSettings, resetElectronStoreToFactory } from '../storeDefaults'
+import { migrateChatProfileSettings, migrateRoleSetupIfNeeded, resetElectronStoreToFactory } from '../storeDefaults'
 import { configureIntegrationServer } from '../services/integrationServer'
 import { getPluginReportHistory } from '../services/pluginIntegrationHub'
 import { listGgufModelsInDir } from '../services/localModelsScan'
@@ -89,6 +145,8 @@ import {
   ensureAutoDetectedPythonInStore,
   resetPythonAutoDetectSession
 } from '../services/pythonDetect'
+import { scanArchitectureRepository } from '../services/architectureRepositoryScan'
+import { saveIntellijPluginZipWithDialog } from '../services/intellijPluginZip'
 
 const configSchema = z.object({
   /** Set to `null` to clear and use the app default under user data. */
@@ -114,6 +172,7 @@ const configSchema = z.object({
   activityPinned: z.boolean().optional(),
   issuesPinned: z.boolean().optional(),
   pinnedWidgetsSide: z.enum(['left', 'right', 'top', 'bottom']).optional(),
+  pinnedWidgetsBarCollapsed: z.boolean().optional(),
   pinnedWidgetsWidthPx: z.number().min(160).max(1400).optional(),
   pinnedWidgetsHeightPx: z.number().min(300).max(1200).optional(),
   pinnedWidgetWeights: z
@@ -130,6 +189,7 @@ const configSchema = z.object({
     .refine((s) => s == null || s === '' || isValidStoredColorScheme(s), {
       message: 'Unknown color scheme id'
     }),
+  typographyComfort: z.enum(['compact', 'balanced', 'relaxed', 'reader']).optional(),
   chatMaxTokens: z.number().int().min(1).max(262_144).optional(),
   /** When set, caps llama.cpp `max_tokens` / `-n` default instead of global `chatMaxTokens`. Clear with `null`. */
   llamaChatMaxTokens: z.union([z.number().int().min(1).max(262_144), z.null()]).optional(),
@@ -143,13 +203,28 @@ const configSchema = z.object({
   integrationListenEnabled: z.boolean().optional(),
   integrationPort: z.number().int().min(1024).max(65535).optional(),
   integrationToken: z.string().max(256).optional(),
+  ideJourneyChecklist: z
+    .object({
+      backendReady: z.boolean().optional(),
+      pluginInstalled: z.boolean().optional(),
+      intellijConfigured: z.boolean().optional(),
+      firstIdeChat: z.boolean().optional()
+    })
+    .optional(),
+  /** When true, successful IDE chat_completed reports mark checklist firstIdeChat. */
+  ideJourneyAutoChecklist: z.boolean().optional(),
   wikiAutoExtract: z.boolean().optional(),
   /** Bump when onboarding copy changes; user sees welcome until version matches latest in app. */
   welcomeGuideVersion: z.number().int().min(0).max(99).optional(),
+  uiRole: z.enum(['software_developer', 'software_architect', 'business_analyst', 'tester']).optional(),
+  /** First-run role tour; see `@shared/uiRole` SETUP_TOUR_LATEST. */
+  setupTourVersion: z.number().int().min(0).max(99).optional(),
   /** Chat: planner spawns parallel Ollama workers (Ollama runtime only). */
   agenticWorkersEnabled: z.boolean().optional(),
   /** Optional second Ollama base URL for agent workers (remote GPU / larger models). */
-  agentRemoteOllamaUrl: z.union([z.string().max(2048), z.literal('')]).optional()
+  agentRemoteOllamaUrl: z.union([z.string().max(2048), z.literal('')]).optional(),
+  /** Workspace folder for Architecture Repository bounded scan (Software architect UI). Clear with null or empty. */
+  architectureRepositoryScanRoot: z.union([z.string().min(1).max(8192), z.literal(''), z.null()]).optional()
 })
 
 function trainingScriptPath(): string {
@@ -182,6 +257,7 @@ function ollamaTagConflictsWithLoaded(loaded: string, toDelete: string): boolean
 export function registerIpc(ctx: IpcContext): void {
   const { db, store, userData, getHfToken, setHfToken, getRuntime, setRuntime } = ctx
   migrateChatProfileSettings(store)
+  migrateRoleSetupIfNeeded(store)
 
   const modelsDir = (): string => {
     const m = (store.get('modelsDir') as string | undefined)?.trim()
@@ -212,6 +288,20 @@ export function registerIpc(ctx: IpcContext): void {
     platform: process.platform
   }))
 
+  ipcMain.handle(IPC.OPEN_PATH_IN_EXPLORER, async (_e, raw: unknown) => {
+    const parsed = z.string().min(1).max(8192).safeParse(raw)
+    if (!parsed.success) return { ok: false, error: 'Invalid path' }
+    const target = parsed.data
+    try {
+      if (!existsSync(target)) return { ok: false, error: 'Path does not exist' }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+    const err = await shell.openPath(target)
+    if (err) return { ok: false, error: err }
+    return { ok: true }
+  })
+
   ipcMain.handle(IPC.HARDWARE_SUMMARY, (_e, destDir?: unknown) => {
     const base = modelsDir()
     let diskPath = base
@@ -224,9 +314,13 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle(IPC.GET_CONFIG, async () => {
     await ensureAutoDetectedPythonInStore(store)
+    migrateRoleSetupIfNeeded(store)
+    const showElectronDevMainView =
+      !app.isPackaged || String(process.env.LOCAL_LLM_FORCE_DEV_UI ?? '').trim() === '1'
     return {
       ...store.store,
-      hfTokenSet: !!getHfToken()
+      hfTokenSet: !!getHfToken(),
+      showElectronDevMainView
     }
   })
 
@@ -244,13 +338,25 @@ export function registerIpc(ctx: IpcContext): void {
     const reloadIntegration = Object.keys(parsed.data).some(
       (k) => k === 'integrationListenEnabled' || k === 'integrationPort' || k === 'integrationToken'
     )
-    Object.entries(parsed.data).forEach(([k, v]) => {
+    const configPatch = { ...parsed.data }
+    if (configPatch.ideJourneyChecklist !== undefined) {
+      store.set(
+        'ideJourneyChecklist',
+        mergeIdeJourneyChecklist(store.get('ideJourneyChecklist'), configPatch.ideJourneyChecklist)
+      )
+      delete configPatch.ideJourneyChecklist
+    }
+    Object.entries(configPatch).forEach(([k, v]) => {
       if (v === undefined || k === 'hfTokenEncrypted') return
       if (k === 'llamaPythonPath' && typeof v === 'string' && !v.trim()) {
         resetPythonAutoDetectSession()
       }
       if (k === 'modelsDir' && v === null) {
         store.delete('modelsDir')
+        return
+      }
+      if (k === 'architectureRepositoryScanRoot' && (v === null || v === '')) {
+        store.delete('architectureRepositoryScanRoot')
         return
       }
       if (k === 'llamaChatMaxTokens' && v === null) {
@@ -272,6 +378,35 @@ export function registerIpc(ctx: IpcContext): void {
       : await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
     return r.filePaths[0]
+  })
+
+  ipcMain.handle(IPC.ARCHITECTURE_REPO_PICK_ROOT, async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const r = win
+      ? await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
+      : await dialog.showOpenDialog({ properties: ['openDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return null
+    return r.filePaths[0]
+  })
+
+  ipcMain.handle(IPC.ARCHITECTURE_REPO_SCAN, () => {
+    const raw = store.get('architectureRepositoryScanRoot')
+    const root = typeof raw === 'string' ? raw.trim() : ''
+    if (!root) {
+      return {
+        ok: false,
+        error:
+          'Architecture Repository scan root is not set. Use “Choose workspace folder” to select a codebase directory.'
+      } as const
+    }
+    try {
+      const result = scanArchitectureRepository(root)
+      return { ok: true, result } as const
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      logLine('warn', 'architecture_repo_scan_failed', { root, error: msg })
+      return { ok: false, error: msg } as const
+    }
   })
 
   const confirmDestructivePayload = z.object({
@@ -574,6 +709,11 @@ export function registerIpc(ctx: IpcContext): void {
     }
     void shell.openExternal(parsed.data)
     return { ok: true as const }
+  })
+
+  ipcMain.handle(IPC.APP_SAVE_INTELLIJ_PLUGIN_ZIP, async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    return await saveIntellijPluginZipWithDialog(win)
   })
 
   ipcMain.handle(
@@ -1034,6 +1174,168 @@ export function registerIpc(ctx: IpcContext): void {
 
   /** Persist HF token with safeStorage */
   ipcMain.handle(IPC.INTEGRATION_PLUGIN_REPORTS_LIST, () => getPluginReportHistory())
+
+  ipcMain.handle(IPC.INTEGRATION_BRIDGE_SELF_TEST, async (_e, raw?: unknown): Promise<IntegrationBridgeSelfTestResult> => {
+    const smokeChat =
+      raw != null &&
+      typeof raw === 'object' &&
+      !Array.isArray(raw) &&
+      (raw as { smokeChat?: unknown }).smokeChat === true
+
+    const enabled = store.get('integrationListenEnabled') === true
+    const rawPort = store.get('integrationPort')
+    const port =
+      typeof rawPort === 'number' && Number.isFinite(rawPort)
+        ? Math.min(65535, Math.max(1024, Math.floor(rawPort)))
+        : 17373
+    const steps: BridgeSelfTestStep[] = []
+
+    if (!enabled) {
+      return {
+        ok: false,
+        summary: 'IDE HTTP bridge is disabled. Turn it on under Settings → Integrations.',
+        steps: [
+          {
+            id: 'bridge',
+            ok: false,
+            detail: 'integrationListenEnabled is false'
+          }
+        ],
+        smokeChat: smokeChat ? { ok: false, detail: 'Bridge disabled' } : null
+      }
+    }
+
+    const tokenRaw = store.get('integrationToken')
+    const token = typeof tokenRaw === 'string' && tokenRaw.trim() ? tokenRaw.trim() : ''
+    const authHeaders: Record<string, string> = {}
+    if (token) authHeaders.Authorization = `Bearer ${token}`
+
+    let healthRuntimeRunning = false
+    try {
+      const h = await localhostJsonRequest(port, '/health', { method: 'GET', timeoutMs: 5000 })
+      const ok = h.statusCode === 200
+      if (ok) {
+        try {
+          const j = JSON.parse(h.body) as { runtimeRunning?: boolean; runtimeKind?: string }
+          healthRuntimeRunning = Boolean(j.runtimeRunning)
+          const kind = typeof j.runtimeKind === 'string' ? j.runtimeKind : ''
+          steps.push({
+            id: 'health',
+            ok: true,
+            detail: `HTTP ${h.statusCode} · runtimeRunning=${healthRuntimeRunning}${kind ? ` · ${kind}` : ''}`
+          })
+        } catch {
+          steps.push({ id: 'health', ok: true, detail: `HTTP ${h.statusCode} (body not JSON)` })
+        }
+      } else {
+        steps.push({ id: 'health', ok: false, detail: `HTTP ${h.statusCode}` })
+      }
+    } catch (e) {
+      steps.push({
+        id: 'health',
+        ok: false,
+        detail: e instanceof Error ? e.message : String(e)
+      })
+    }
+
+    if (!steps.find((s) => s.id === 'health')?.ok) {
+      return {
+        ok: false,
+        summary: 'Health check failed — fix connection or enable the bridge.',
+        steps,
+        smokeChat: smokeChat ? { ok: false, detail: 'Skipped — health failed' } : null
+      }
+    }
+
+    try {
+      const r = await localhostJsonRequest(port, '/v1/runtime/status', {
+        method: 'GET',
+        headers: { ...authHeaders },
+        timeoutMs: 5000
+      })
+      const ok = r.statusCode === 200
+      let extra = ''
+      if (r.statusCode === 401) extra = ' — check bearer token matches this app and your client'
+      if (ok) {
+        try {
+          const j = JSON.parse(r.body) as { running?: boolean; kind?: string }
+          extra = ` · running=${Boolean(j.running)}${j.kind ? ` · ${j.kind}` : ''}`
+        } catch {
+          /* ignore */
+        }
+      }
+      steps.push({
+        id: 'runtime_status',
+        ok,
+        detail: `HTTP ${r.statusCode}${extra}`
+      })
+    } catch (e) {
+      steps.push({
+        id: 'runtime_status',
+        ok: false,
+        detail: e instanceof Error ? e.message : String(e)
+      })
+    }
+
+    let smoke: IntegrationBridgeSmokeChat | null = null
+    if (smokeChat) {
+      if (!healthRuntimeRunning) {
+        smoke = {
+          ok: false,
+          detail: 'Skipped — start the model runtime first (/health reports runtimeRunning).'
+        }
+      } else {
+        try {
+          const chatBody = JSON.stringify({
+            messages: [
+              { role: 'system', content: 'Reply with a single token.' },
+              { role: 'user', content: 'ping' }
+            ],
+            maxTokens: 1
+          })
+          const r = await localhostJsonRequest(port, '/v1/chat', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...authHeaders
+            },
+            body: chatBody,
+            timeoutMs: 120_000
+          })
+          const ok = r.statusCode === 200
+          let preview = ''
+          if (ok) {
+            try {
+              const j = JSON.parse(r.body) as { reply?: string }
+              if (typeof j.reply === 'string') preview = j.reply.replace(/\s+/g, ' ').trim().slice(0, 64)
+            } catch {
+              /* ignore */
+            }
+          }
+          smoke = {
+            ok,
+            httpStatus: r.statusCode,
+            detail: ok
+              ? `HTTP ${r.statusCode}${preview ? ` · ${preview}` : ''}`
+              : `HTTP ${r.statusCode} — ${r.body.replace(/\s+/g, ' ').trim().slice(0, 160)}`
+          }
+        } catch (e) {
+          smoke = { ok: false, detail: e instanceof Error ? e.message : String(e) }
+        }
+      }
+    }
+
+    const coreOk = steps.every((s) => s.ok)
+    const smokeOk = smoke == null || smoke.ok
+    const ok = coreOk && smokeOk
+    let summary = coreOk
+      ? 'Health and /v1/runtime/status succeeded.'
+      : 'One or more checks failed — see steps.'
+    if (smokeChat && smoke) {
+      summary += smoke.ok ? ' Smoke chat succeeded.' : ` Smoke chat: ${smoke.detail}`
+    }
+    return { ok, summary, steps, smokeChat: smokeChat ? smoke : null }
+  })
 
   ipcMain.handle(IPC.SECRETS_SET_HF_TOKEN, (_e, token: string | null) => {
     if (!token) {
