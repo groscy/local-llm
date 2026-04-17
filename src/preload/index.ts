@@ -6,11 +6,14 @@ import type {
   PluginIntegrationReport,
   RuntimeChatProgress,
   RuntimeLoadProgress,
+  SaveIntellijPluginZipResult,
   WikiChatHighlightTerm,
   WikiExportZipResult,
   WikiPagePayload,
   WikiTopic
 } from '@shared/types'
+import type { IntegrationBridgeSelfTestResult } from '@shared/ideJourney'
+import type { ArchitectureRepositoryScanResponse } from '@shared/architectureRepository'
 
 function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   return ipcRenderer.invoke(channel, ...args)
@@ -18,9 +21,14 @@ function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
 
 contextBridge.exposeInMainWorld('api', {
   getPaths: () => invoke(IPC.GET_PATHS),
+  openPathInExplorer: (absolutePath: string) =>
+    invoke<{ ok: boolean; error?: string }>(IPC.OPEN_PATH_IN_EXPLORER, absolutePath),
   getConfig: () => invoke(IPC.GET_CONFIG),
   setConfig: (c: unknown) => invoke(IPC.SET_CONFIG, c),
   pickModelsDirectory: () => invoke<string | null>(IPC.PICK_MODELS_DIRECTORY),
+  pickArchitectureRepositoryRoot: () => invoke<string | null>(IPC.ARCHITECTURE_REPO_PICK_ROOT),
+  architectureRepositoryScan: () =>
+    invoke<ArchitectureRepositoryScanResponse>(IPC.ARCHITECTURE_REPO_SCAN),
   clearDownloadCache: () =>
     invoke<{ downloadsRemoved: number; hfCacheRemoved: number; downloadsCancelled: number }>(
       IPC.CLEAR_DOWNLOAD_CACHE
@@ -71,6 +79,8 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener(channel, listener)
   },
   integrationPluginReportsList: () => invoke<PluginIntegrationReport[]>(IPC.INTEGRATION_PLUGIN_REPORTS_LIST),
+  integrationBridgeSelfTest: (opts?: { smokeChat?: boolean }) =>
+    invoke<IntegrationBridgeSelfTestResult>(IPC.INTEGRATION_BRIDGE_SELF_TEST, opts ?? {}),
   onIntegrationPluginReport: (callback: (payload: PluginIntegrationReport) => void) => {
     const channel = IPC.INTEGRATION_PLUGIN_REPORT
     const listener = (_e: IpcRendererEvent, payload: PluginIntegrationReport) => callback(payload)
@@ -78,6 +88,7 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener(channel, listener)
   },
   openExternalUrl: (url: string) => invoke(IPC.OPEN_EXTERNAL_URL, url),
+  saveIntellijPluginZip: () => invoke<SaveIntellijPluginZipResult>(IPC.APP_SAVE_INTELLIJ_PLUGIN_ZIP),
   runtimeStart: (p: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => invoke(IPC.RUNTIME_START, p),
   runtimeStop: () => invoke(IPC.RUNTIME_STOP),
   runtimeStatus: () => invoke(IPC.RUNTIME_STATUS),
