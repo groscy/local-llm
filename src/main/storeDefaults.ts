@@ -1,4 +1,12 @@
 import type Store from 'electron-store'
+import { defaultIdeJourneyChecklist, mergeIdeJourneyChecklist } from '@shared/ideJourney'
+import {
+  DEFAULT_UI_ROLE,
+  parseUiRole,
+  SETUP_TOUR_LATEST,
+  WELCOME_GUIDE_LATEST
+} from '@shared/uiRole'
+import { DEFAULT_TYPOGRAPHY_COMFORT, parseTypographyComfort } from '@shared/typographyComfort'
 
 /** Default keys written on first launch and after “factory reset”. */
 export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
@@ -11,12 +19,16 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   downloadsPinned: false,
   activityPinned: false,
   issuesPinned: false,
-  pinnedWidgetsSide: 'left',
+  pinnedWidgetsSide: 'right',
+  /** When true, the pinned widget rail shows only a slim strip until expanded. */
+  pinnedWidgetsBarCollapsed: true,
   pinnedWidgetsWidthPx: 308,
   pinnedWidgetsHeightPx: 360,
   /** Relative flex weights for metrics / downloads / activity when multiple pinned widgets are stacked. */
   pinnedWidgetWeights: { metrics: 1, downloads: 1, activity: 1, issues: 1 },
   colorScheme: 'violet',
+  /** Text scale & rhythm; see `@shared/typographyComfort` and `data-typography-comfort` in styles. */
+  typographyComfort: 'balanced',
   /** Upper bound on assistant completion length (Ollama `num_predict`; llama.cpp default unless `llamaChatMaxTokens` is set). */
   chatMaxTokens: 4096,
   /** Max prior user+assistant messages included in the API history (newest retained). */
@@ -36,9 +48,19 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   integrationListenEnabled: false,
   integrationPort: 17373,
   integrationToken: '',
+  /** User-checked steps for the IntelliJ plugin journey (shown in the Dev panel when unpackaged). */
+  ideJourneyChecklist: {
+    backendReady: false,
+    pluginInstalled: false,
+    intellijConfigured: false,
+    firstIdeChat: false
+  },
+  ideJourneyAutoChecklist: false,
   agenticWorkersEnabled: false,
   /** Self-hosted Ollama only (second machine you run); not third-party LLM APIs */
-  agentRemoteOllamaUrl: ''
+  agentRemoteOllamaUrl: '',
+  /** Workspace role for simplified nav (see `@shared/uiRole`). */
+  uiRole: DEFAULT_UI_ROLE
 }
 
 export function resetElectronStoreToFactory(store: Store<Record<string, unknown>>): void {
@@ -60,5 +82,45 @@ export function migrateChatProfileSettings(store: Store<Record<string, unknown>>
   }
   if (typeof store.get('chatDomainEnhancement') !== 'boolean') {
     store.set('chatDomainEnhancement', false)
+  }
+  if (!store.has('ideJourneyChecklist') || typeof store.get('ideJourneyChecklist') !== 'object') {
+    store.set('ideJourneyChecklist', defaultIdeJourneyChecklist())
+  } else {
+    store.set(
+      'ideJourneyChecklist',
+      mergeIdeJourneyChecklist(store.get('ideJourneyChecklist'), {})
+    )
+  }
+  if (typeof store.get('ideJourneyAutoChecklist') !== 'boolean') {
+    store.set('ideJourneyAutoChecklist', false)
+  }
+  if (!store.has('typographyComfort')) {
+    store.set('typographyComfort', DEFAULT_TYPOGRAPHY_COMFORT)
+  } else {
+    const raw = store.get('typographyComfort')
+    const next = parseTypographyComfort(raw)
+    if (raw !== next) store.set('typographyComfort', next)
+  }
+}
+
+/**
+ * `setupTourVersion` is intentionally not in `ELECTRON_STORE_DEFAULTS` so upgrades without the key
+ * can be distinguished: existing users who already finished the legacy welcome skip the tour.
+ */
+export function migrateRoleSetupIfNeeded(store: Store<Record<string, unknown>>): void {
+  const wvRaw = store.get('welcomeGuideVersion')
+  const wv = typeof wvRaw === 'number' ? wvRaw : 0
+
+  if (!store.has('setupTourVersion')) {
+    if (wv >= WELCOME_GUIDE_LATEST) {
+      store.set('setupTourVersion', SETUP_TOUR_LATEST)
+    } else {
+      store.set('setupTourVersion', 0)
+    }
+  }
+
+  const roleRaw = store.get('uiRole')
+  if (!parseUiRole(roleRaw)) {
+    store.set('uiRole', DEFAULT_UI_ROLE)
   }
 }
