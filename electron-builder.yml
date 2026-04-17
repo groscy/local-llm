@@ -19,6 +19,10 @@ asarUnpack:
   - "**/*.node"
 
 extraResources:
+  - from: integrations/intellij-plugin/build/distributions
+    to: intellij-plugin
+    filter:
+      - "local-llm-intellij-*.zip"
   - from: training
     to: training
     filter:

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Typecheck → electron-vite build → Linux release artifacts (.deb, AppImage, .zip).
+ * Typecheck → electron-vite build → IntelliJ plugin (Gradle) → Linux release artifacts (.deb, AppImage, .zip).
+ * Packaging needs **JDK 17+** on `PATH` for `npm run build:intellij-plugin`.
  *
  * Must run on **Linux** (or Linux container): `better-sqlite3` is compiled for the host OS.
  * On Windows/macOS, use GitHub Actions (`.github/workflows/build-linux.yml`) or Podman:
@@ -77,6 +78,7 @@ async function main() {
 
   run('Typecheck', npm, ['run', 'typecheck'])
   run('electron-vite build', npm, ['run', 'build'])
+  run('IntelliJ plugin (Gradle)', npm, ['run', 'build:intellij-plugin'])
 
   if (!existsSync(join(root, 'out', 'main', 'index.js'))) {
     console.error('Missing out/main/index.js after build — aborting.')

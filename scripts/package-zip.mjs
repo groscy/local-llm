@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Typecheck → electron-vite build → electron-builder **zip only** for the current OS (see `dist:installer` for NSIS/DMG/AppImage).
+ * Typecheck → electron-vite build → IntelliJ plugin (Gradle) → electron-builder **zip only** for the current OS (see `dist:installer` for NSIS/DMG/AppImage).
+ * Packaging needs **JDK 17+** on `PATH` for `npm run build:intellij-plugin`.
  *
  * Output: ./release/ when that folder can be cleared, otherwise ./release-builds/<timestamp>/
  * (Windows often locks release/win-unpacked — close Explorer / the app if you want a stable path).
@@ -65,6 +66,7 @@ async function pickOutputDirRelative() {
 async function main() {
   run('Typecheck', npm, ['run', 'typecheck'])
   run('electron-vite build', npm, ['run', 'build'])
+  run('IntelliJ plugin (Gradle)', npm, ['run', 'build:intellij-plugin'])
 
   if (!existsSync(join(root, 'out', 'main', 'index.js'))) {
     console.error('Missing out/main/index.js after build — aborting package step.')

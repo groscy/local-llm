@@ -24,6 +24,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends fakeroot rpm
 
+      - name: Setup JDK 17 (IntelliJ Gradle plugin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
       - name: Install dependencies
         run: npm ci
 
@@ -32,6 +38,9 @@ jobs:
 
       - name: Build app (electron-vite)
         run: npm run build
+
+      - name: Build IntelliJ plugin (Gradle)
+        run: npm run build:intellij-plugin
 
       - name: Package (electron-builder)
         env:
