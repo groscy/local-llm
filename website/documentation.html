@@ -67,6 +67,7 @@
             <li><a href="#metrics">Metrics &amp; pinned widgets</a></li>
             <li><a href="#train">Training</a></li>
             <li><a href="#settings">Settings &amp; confirmations</a></li>
+            <li><a href="#developer-journey">Developer journey: IntelliJ</a></li>
             <li><a href="#privacy">Privacy, data &amp; license</a></li>
             <li><a href="download.html#tooling">IDE plugin (IntelliJ)</a></li>
           </ul>
@@ -189,6 +190,42 @@
         <p>
           Destructive actions (for example deleting models, clearing caches, or factory reset) use the
           <strong>system confirmation dialog</strong> so they appear above other UI.
+        </p>
+
+        <h2 id="developer-journey">Developer journey: IntelliJ, local models, domain vocabulary</h2>
+        <p>
+          Use <strong>IntelliJ IDEA</strong> as the editor while <strong>Local LLM Desktop</strong> runs local inference
+          (<strong>Ollama</strong> or <strong>llama.cpp</strong>) and the optional <strong>localhost HTTP bridge</strong>.
+          Install the sample plugin from the repository (<a
+            href="https://github.com/localllm/local-llm-desktop/tree/main/integrations/intellij-plugin"
+            >integrations/intellij-plugin</a
+          >); enable <strong>IDE integration</strong> in the app and align port (default <code>17373</code>) and optional
+          bearer token with <strong>Settings → Tools → Local LLM Desktop</strong> in the IDE. Start the model
+          <strong>runtime</strong> in the desktop app first—the bridge does not start it for you. See
+          <a href="https://github.com/localllm/local-llm-desktop/blob/main/docs/intellij-integration.md"
+            >intellij-integration.md</a
+          >
+          for the API (<code>/health</code>, <code>/v1/chat</code>, <code>/v1/plugin/report</code>).
+        </p>
+        <p>
+          In the desktop app, use the left navigation <strong>IDE setup</strong> view for the same journey with live
+          bridge/runtime status, <strong>Test bridge</strong> (health + runtime status, optional one-token chat smoke test),
+          curl snippets, recent plugin activity, documentation links, and a saved checklist (with optional auto-mark from
+          plugin reports under Settings → Integrations).
+        </p>
+        <p>
+          For <strong>client-specific vocabulary</strong>: use the plugin’s <strong>Vocabulary…</strong> and
+          <strong>Include codebase knowledge graph</strong> plus file attachments in the <strong>Local LLM</strong> tool
+          window. Ingest glossaries and specs into the app’s <strong>knowledge base</strong> (above), query them in
+          <strong>desktop chat or wiki</strong>, then paste or attach distilled notes in the IDE—the bridge forwards only
+          the messages the plugin sends, without automatic knowledge-base RAG injection.
+        </p>
+        <p>
+          Step-by-step narrative, troubleshooting hints, and links to training: the
+          <a href="https://github.com/localllm/local-llm-desktop/blob/main/docs/USER-GUIDE.md#developer-journey-intellij"
+            >User Guide → Developer journey: IntelliJ</a
+          >
+          section.
         </p>
 
         <h2 id="privacy">Privacy, data &amp; license</h2>
