@@ -220,6 +220,11 @@ export type WikiExportZipResult =
   | { ok: true; path: string }
   | { ok: false; canceled: true }
 
+/** Save dialog for the JetBrains plugin distribution (local copy or GitHub latest). */
+export type SaveIntellijPluginZipResult =
+  | { ok: true; path: string; source: 'bundled' | 'local-build' | 'download' }
+  | { ok: false; canceled?: true; error?: string }
+
 /** Nodes and edges for the in-app knowledge graph visualization (sources, chunks, wiki pages). */
 export type KnowledgeGraphNodeKind = 'source' | 'chunk' | 'wiki'
 
@@ -325,6 +330,8 @@ export type PluginIntegrationReportKind =
   | 'apply_failed'
   | 'apply_cancelled'
   | 'send_cancelled'
+  | 'agent_step'
+  | 'agent_stop'
 
 /** Normalized report after the desktop app accepts a plugin POST (includes server receipt time). */
 export interface PluginIntegrationReport {

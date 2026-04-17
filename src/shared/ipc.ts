@@ -3,9 +3,15 @@
 export const IPC = {
   // App / config
   GET_PATHS: 'app:getPaths',
+  /** Open a folder (or file) in the system file manager / default handler. */
+  OPEN_PATH_IN_EXPLORER: 'app:openPathInExplorer',
   GET_CONFIG: 'app:getConfig',
   SET_CONFIG: 'app:setConfig',
   PICK_MODELS_DIRECTORY: 'app:pickModelsDirectory',
+  /** Folder picker for Architecture Repository workspace scan (TOGAF view; architect role). */
+  ARCHITECTURE_REPO_PICK_ROOT: 'app:architectureRepoPickRoot',
+  /** Bounded filesystem scan for Architecture Repository (uses persisted scan root). */
+  ARCHITECTURE_REPO_SCAN: 'app:architectureRepoScan',
   CLEAR_DOWNLOAD_CACHE: 'app:clearDownloadCache',
   CLEAR_ALL_CACHES: 'app:clearAllCaches',
   DELETE_ALL_MODELS: 'app:deleteAllModels',
@@ -52,6 +58,8 @@ export const IPC = {
   /** Main → renderer: streamed assistant tokens; correlate with `requestId` from `RUNTIME_CHAT`. */
   RUNTIME_CHAT_PROGRESS: 'runtime:chatProgress',
   OPEN_EXTERNAL_URL: 'shell:openExternalUrl',
+  /** Save dialog → copy bundled / dev-built plugin ZIP, or download from GitHub latest release. */
+  APP_SAVE_INTELLIJ_PLUGIN_ZIP: 'app:saveIntellijPluginZip',
 
   // Chat / persistence
   CONVERSATIONS_LIST: 'chat:conversationsList',
@@ -108,7 +116,9 @@ export const IPC = {
   /** Main → renderer: IDE plugin posted activity to the HTTP bridge. */
   INTEGRATION_PLUGIN_REPORT: 'integration:pluginReport',
   /** Renderer → main: last N reports (for initial load). */
-  INTEGRATION_PLUGIN_REPORTS_LIST: 'integration:pluginReportsList'
+  INTEGRATION_PLUGIN_REPORTS_LIST: 'integration:pluginReportsList',
+  /** Renderer → main: GET http://127.0.0.1:{port}/health from the main process (loopback self-test). */
+  INTEGRATION_BRIDGE_SELF_TEST: 'integration:bridgeSelfTest'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
