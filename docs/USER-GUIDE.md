@@ -216,6 +216,24 @@ Beyond the table below, **Settings** includes:
 - **IDE integration (localhost)** — optional **HTTP bridge** on **127.0.0.1** for editor plugins (port, optional bearer token); see [IntelliJ / IDE integration](./intellij-integration.md).
 - **Pinned widgets** — enable **metrics**, **downloads**, and/or **activity** pins; dock edge; refresh interval; strip size; relative weights when stacked.
 
+### Developer journey: IntelliJ
+
+Typical flow for coding in **IntelliJ IDEA** with **local** models and **client-specific** vocabulary:
+
+In the desktop app, open **IDE setup** in the left navigation for the same journey with **live** runtime and bridge status, **Test bridge** (loopback `GET /health` and `GET /v1/runtime/status`, optional **smoke** `POST /v1/chat` with `maxTokens: 1`), curl snippets, recent plugin activity, doc links, and a **checklist** stored in your local settings. Under **Settings → Integrations** you can enable **auto-mark** “first IDE chat” when the plugin posts a successful `chat_completed` report.
+
+1. **One-time setup** — Install the app and **Ollama** or **`llama-server`**, set **models directory** and (optional) **Hugging Face token**. Build or install the sample plugin from [`integrations/intellij-plugin/`](../integrations/intellij-plugin/README.md) (Gradle `buildPlugin`, then **Settings → Plugins → Install Plugin from Disk…**). Full HTTP details: [IntelliJ / IDE integration](./intellij-integration.md).
+
+2. **Each session** — Start **Local LLM Desktop**, load a model, **Start** the runtime from **Your AI (Run)**, then enable **IDE integration (localhost)** and match **port** (default `17373`) and optional **bearer token** in IntelliJ under **Settings → Tools → Local LLM Desktop**. The bridge does **not** start the runtime by itself; the plugin’s connection strip uses **`GET /health`** to show bridge vs runtime status.
+
+3. **In the IDE** — Use the **Local LLM** tool window for prompts; turn on **Include codebase knowledge graph** when you want Java/Kotlin structure in the **system** context; attach key files (for example OpenAPI or a glossary). **Tools → Local LLM Chat…** can prefill from the current selection. Optional **inline completion** and structured apply blocks (`LOCAL_LLM_PATCH` / `LOCAL_LLM_FILE`) are described in [IntelliJ / IDE integration](./intellij-integration.md). **`[CLARIFY]`** replies trigger follow-up dialogs in the plugin.
+
+4. **Domain vocabulary** — For terms that live in **code**, use the plugin’s **Vocabulary…** report (package-oriented scan). For **specs, glossaries, or exports**, ingest them into the app’s **knowledge base** (section 7) and use **in-app chat or wiki** to distill definitions you **paste** into the IDE or attach as files. The **`POST /v1/chat`** bridge forwards **only** the messages the plugin sends; it does **not** automatically inject knowledge-base RAG—plan context explicitly in the IDE or pull answers from the desktop first.
+
+5. **When answers are thin** — Add attachments, enable the graph for the relevant modules, narrow the task, or query knowledge in the desktop app before asking for code in IntelliJ.
+
+6. **Optional** — Pin **Activity** in the desktop app to see summaries the plugin posts to **`/v1/plugin/report`**. For heavier adaptation, see **Training** (section 8); the shipped script is a minimal stub until you extend it.
+
 Slide-over **panel widths and edges** for chat/knowledge are stored separately in the window (not in this reset table).
 
 **Destructive confirmations** (delete models, clear caches, factory reset, etc.) use the **operating system’s** message box so they layer above drawers and other UI.
