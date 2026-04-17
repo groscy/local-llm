@@ -10,6 +10,7 @@ object LocalLlmIntegrationProperties {
     private const val SPLIT_RATIO = "localLlm.toolWindow.splitRatio"
     private const val CONNECTION_DETAILS = "localLlm.connectionDetailsExpanded"
     private const val ADVANCED_EXPANDED = "localLlm.advancedOptionsExpanded"
+    private const val CONFIRM_BEFORE_APPLY = "localLlm.confirmBeforeFileApply"
 
     fun integrationPort(): Int {
         val props = PropertiesComponent.getInstance()
@@ -40,5 +41,13 @@ object LocalLlmIntegrationProperties {
 
     fun setAdvancedOptionsExpanded(value: Boolean) {
         PropertiesComponent.getInstance().setValue(ADVANCED_EXPANDED, value, true)
+    }
+
+    /** When true, chat and agent runs show a confirmation dialog before writing parsed file edits. */
+    fun confirmBeforeFileApply(): Boolean =
+        PropertiesComponent.getInstance().getBoolean(CONFIRM_BEFORE_APPLY, false)
+
+    fun setConfirmBeforeFileApply(value: Boolean) {
+        PropertiesComponent.getInstance().setValue(CONFIRM_BEFORE_APPLY, value, false)
     }
 }

@@ -5,7 +5,7 @@
 
     <description><![CDATA[
     Talks to the <b>local-llm-desktop</b> HTTP bridge on 127.0.0.1 (enable under Settings in the desktop app). Shows live <b>connection / health</b> in the tool window (GET /health).
-    Includes a <b>Local LLM</b> tool window: prompt the local model, optionally attach a structural <b>knowledge graph</b>
+    Includes a <b>Local LLM</b> tool window: prompt the local model, a multi-step <b>Run agent</b> mode (read/search tools then optional file apply), optionally attach a structural <b>knowledge graph</b>
     built from Java (PSI) and Kotlin (<b>text heuristics</b>, no Kotlin K1 PSI — compatible with Kotlin <b>K2</b> mode),
     optional <b>automatic apply</b> of model file edits (structured blocks or path-tagged code fences) into editors, a <b>domain vocabulary</b> view (terms grouped by package domain),
     and follow-up when the model asks for clarification (<code>[CLARIFY]</code> protocol).

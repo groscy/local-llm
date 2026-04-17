@@ -8,6 +8,12 @@ package com.localllm.intellij
  * - [chat]: `POST /v1/chat` — optional `Authorization: Bearer <token>` when the app has a token set.
  * - [postPluginReport]: `POST /v1/plugin/report` — same auth as chat; `kind` must match the desktop Zod enum (see [PluginReportKind]).
  * - [fetchRuntimeStatus]: `GET /v1/runtime/status` — same auth as chat; optional richer model info for the IDE UI.
+ *
+ * **Future bridge (RFC):** agent mode today loops `POST /v1/chat` from the IDE. Optional upgrades without breaking
+ * existing clients: (1) SSE or chunked streaming for token-by-token UI; (2) optional `tools` array + tool-call
+ * messages in the JSON body, forwarded to llama.cpp/Ollama native APIs; (3) dedicated `POST /v1/agent/stream` for
+ * server-side loops (usually inferior to IDE-side tools for PSI/editor access). Coordinate schema changes with
+ * [src/main/services/integrationServer.ts] `chatBodySchema` and desktop runtime adapters.
  */
 import java.io.IOException
 import java.net.ConnectException

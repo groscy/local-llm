@@ -11,4 +11,8 @@ object PluginReportKind {
     const val APPLY_FAILED = "apply_failed"
     const val APPLY_CANCELLED = "apply_cancelled"
     const val SEND_CANCELLED = "send_cancelled"
+    /** Agent loop executed a tool batch (must match desktop `pluginReportBodySchema`). */
+    const val AGENT_STEP = "agent_step"
+    /** Agent loop ended (reason in message / meta). */
+    const val AGENT_STOP = "agent_stop"
 }

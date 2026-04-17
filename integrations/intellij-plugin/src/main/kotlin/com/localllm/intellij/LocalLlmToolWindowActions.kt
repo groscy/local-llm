@@ -14,6 +14,7 @@ internal object LocalLlmToolWindowActions {
         g.add(LocalLlmSendAction())
         g.add(LocalLlmResendAction())
         g.add(LocalLlmClearConversationAction())
+        g.add(LocalLlmRunAgentAction())
         g.addSeparator()
         g.add(LocalLlmRefreshBridgeAction())
         g.add(LocalLlmVocabularyAction())
@@ -41,6 +42,23 @@ private class LocalLlmSendAction : DumbAwareAction(
 
     override fun actionPerformed(e: AnActionEvent) {
         toolWindowPanel(e)?.sendToModel()
+    }
+}
+
+private class LocalLlmRunAgentAction : DumbAwareAction(
+    "Run agent",
+    "Multi-step agent: tools (read/search/graph) then optional file apply from the compose prompt",
+    AllIcons.Actions.Run_anything
+) {
+    override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
+
+    override fun update(e: AnActionEvent) {
+        val p = toolWindowPanel(e)
+        e.presentation.isEnabled = p != null && !p.isSending
+    }
+
+    override fun actionPerformed(e: AnActionEvent) {
+        toolWindowPanel(e)?.runAgent()
     }
 }
 

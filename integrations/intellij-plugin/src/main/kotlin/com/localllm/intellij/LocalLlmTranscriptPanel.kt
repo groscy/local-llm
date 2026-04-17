@@ -1,5 +1,6 @@
 package com.localllm.intellij
 
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.ui.HyperlinkLabel
@@ -12,7 +13,9 @@ import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 import java.awt.CardLayout
-import java.awt.FlowLayout
+import java.awt.Component
+import javax.swing.Box
+import javax.swing.BoxLayout
 import javax.swing.JPanel
 import javax.swing.ScrollPaneConstants
 
@@ -38,10 +41,27 @@ class LocalLlmTranscriptPanel(private val project: Project) : JPanel(BorderLayou
         }
     }
 
-    private val linkRow = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+    private val desktopIdeSetupLink = HyperlinkLabel("IntelliJ bridge guide in the desktop app").apply {
+        addHyperlinkListener {
+            LocalLlmNotifications.notify(
+                project,
+                "IntelliJ bridge in Local LLM Desktop",
+                "Open the Local LLM Desktop window. From Settings → Integrations, enable the bridge and review the checklist. In unpackaged (development) builds, open the Dev view for the full journey, paths, and Test bridge.",
+                NotificationType.INFORMATION
+            )
+        }
+    }
+
+    private val linkRow = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
         border = JBUI.Borders.empty(0, 0, 8, 0)
+        alignmentX = Component.LEFT_ALIGNMENT
+        settingsLink.alignmentX = Component.LEFT_ALIGNMENT
+        desktopIdeSetupLink.alignmentX = Component.LEFT_ALIGNMENT
         add(settingsLink)
+        add(Box.createVerticalStrut(JBUI.scale(6)))
+        add(desktopIdeSetupLink)
     }
 
     private val emptyWrap = JPanel(BorderLayout()).apply {

@@ -5,6 +5,10 @@ import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.actionSystem.DataProvider
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.progress.ProcessCanceledException
+import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.ui.JBSplitter
@@ -150,6 +154,58 @@ class LocalLlmToolWindowPanel(private val project: Project) :
         isSending = true
         syncToolbarActions()
         chatController.sendToModel()
+    }
+
+    fun runAgent() {
+        if (isSending || project.isDisposed) return
+        val goal = compose.promptArea.text.trim()
+        if (goal.isBlank()) {
+            com.intellij.openapi.ui.Messages.showWarningDialog(
+                project,
+                "Enter an agent goal in the compose area (same as a chat prompt).",
+                "Local LLM Agent"
+            )
+            return
+        }
+        isSending = true
+        syncToolbarActions()
+        val files = compose.snapshotFiles()
+        val port = LocalLlmIntegrationProperties.integrationPort()
+        val token = LocalLlmIntegrationProperties.integrationToken()
+        transcript.appendSection("Agent goal", goal + if (files.isNotEmpty()) "\n\n— ${files.size} attachment(s) —" else "")
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Local LLM Agent", true) {
+            override fun run(indicator: ProgressIndicator) {
+                try {
+                    AgentOrchestrator.run(
+                        project = project,
+                        userGoal = goal,
+                        referencedFiles = files,
+                        applyStructuredEdits = compose.applyStructuredEdits.isSelected,
+                        indicator = indicator,
+                        port = port,
+                        token = token,
+                        onLog = { line ->
+                            ApplicationManager.getApplication().invokeLater {
+                                if (!project.isDisposed) transcript.append(line)
+                            }
+                        },
+                        notifyDesktop = { kind, message, meta ->
+                            LocalLlmPluginReports.postAsync(project, kind, message, meta)
+                        },
+                        onFinished = { success ->
+                            ApplicationManager.getApplication().invokeLater {
+                                applyFinishSendTurn(success)
+                            }
+                        }
+                    )
+                } catch (_: ProcessCanceledException) {
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!project.isDisposed) transcript.append("(Agent cancelled.)\n\n")
+                        applyFinishSendTurn(false)
+                    }
+                }
+            }
+        })
     }
 
     fun resendLastMessage() {

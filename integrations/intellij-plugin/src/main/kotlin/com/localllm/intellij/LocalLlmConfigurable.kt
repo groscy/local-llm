@@ -19,6 +19,7 @@ class LocalLlmConfigurable : Configurable {
     private val portField = JBTextField()
     private val tokenField = JBTextField()
     private val inlineCompletionCheckbox = JCheckBox("Enable gray inline completion from local model (typing + Tab-trigger)")
+    private val confirmApplyCheckbox = JCheckBox("Confirm before applying file edits (chat and agent)")
     private val testButton = JButton("Test connection").apply {
         toolTipText = "GET /health on 127.0.0.1 and, if OK, GET /v1/runtime/status (uses fields above; Apply not required)"
     }
@@ -46,6 +47,7 @@ class LocalLlmConfigurable : Configurable {
             .addComponent(testButton)
             .addVerticalGap(8)
             .addComponent(inlineCompletionCheckbox)
+            .addComponent(confirmApplyCheckbox)
             .panel
         form.border = JBUI.Borders.empty(0, 0, 8, 0)
 
@@ -108,7 +110,8 @@ class LocalLlmConfigurable : Configurable {
         val p = PropertiesComponent.getInstance()
         return portField.text != p.getValue("localLlm.integrationPort", "17373") ||
             tokenField.text != (p.getValue("localLlm.integrationToken") ?: "") ||
-            inlineCompletionCheckbox.isSelected != p.getBoolean(LocalLlmInlineCompletionProvider.INLINE_ENABLED_KEY, true)
+            inlineCompletionCheckbox.isSelected != p.getBoolean(LocalLlmInlineCompletionProvider.INLINE_ENABLED_KEY, true) ||
+            confirmApplyCheckbox.isSelected != LocalLlmIntegrationProperties.confirmBeforeFileApply()
     }
 
     override fun apply() {
@@ -116,6 +119,7 @@ class LocalLlmConfigurable : Configurable {
         p.setValue("localLlm.integrationPort", portField.text.ifBlank { "17373" })
         p.setValue("localLlm.integrationToken", tokenField.text)
         p.setValue(LocalLlmInlineCompletionProvider.INLINE_ENABLED_KEY, inlineCompletionCheckbox.isSelected, true)
+        LocalLlmIntegrationProperties.setConfirmBeforeFileApply(confirmApplyCheckbox.isSelected)
     }
 
     override fun reset() {
@@ -123,6 +127,7 @@ class LocalLlmConfigurable : Configurable {
         portField.text = p.getValue("localLlm.integrationPort", "17373")
         tokenField.text = p.getValue("localLlm.integrationToken") ?: ""
         inlineCompletionCheckbox.isSelected = p.getBoolean(LocalLlmInlineCompletionProvider.INLINE_ENABLED_KEY, true)
+        confirmApplyCheckbox.isSelected = LocalLlmIntegrationProperties.confirmBeforeFileApply()
     }
 
     override fun disposeUIResources() {

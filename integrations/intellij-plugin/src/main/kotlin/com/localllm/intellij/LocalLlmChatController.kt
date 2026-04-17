@@ -1,9 +1,6 @@
 package com.localllm.intellij
 
-import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.command.WriteCommandAction
-import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
@@ -198,11 +195,7 @@ class LocalLlmChatController(
     }
 
     private fun notifyDesktop(kind: String, message: String?, meta: Map<String, Any?> = emptyMap()) {
-        val port = LocalLlmIntegrationProperties.integrationPort()
-        val token = LocalLlmIntegrationProperties.integrationToken()
-        ApplicationManager.getApplication().executeOnPooledThread {
-            LocalLlmHttpClient.postPluginReport(port, token, "intellij", kind, message, meta)
-        }
+        LocalLlmPluginReports.postAsync(project, kind, message, meta)
     }
 
     private fun formatTokenUsageLine(
@@ -358,80 +351,20 @@ class LocalLlmChatController(
         endSendTurn(false)
     }
 
-    private fun collectEditsFromModelReply(modelReply: String): List<StructuredApplyParser.StructuredEdit> {
-        val structured = StructuredApplyParser.parseStructuredEdits(modelReply)
-        if (structured.isNotEmpty()) return structured
-        return MarkdownFenceFileExtractor.parseFencedFullFiles(modelReply)
-    }
-
     private fun offerApplyStructuredEdits(
         modelReply: String,
         referencedFiles: List<VirtualFile>,
         onDone: () -> Unit
     ) {
-        if (!compose.applyStructuredEdits.isSelected) {
-            onDone()
-            return
-        }
-        var edits = collectEditsFromModelReply(modelReply)
-        if (edits.isEmpty()) {
-            edits = ImplicitAttachmentApply.inferEdits(project, modelReply, referencedFiles)
-        }
-        if (edits.isEmpty()) {
-            onDone()
-            return
-        }
-        ApplicationManager.getApplication().invokeLater {
-            try {
-                val results = WriteCommandAction.writeCommandAction(project).compute<List<ProjectFileApplyService.ApplyResult>, RuntimeException> {
-                    ProjectFileApplyService.applyStructuredEdits(project, edits)
-                }
-                val lines = results.joinToString("\n") { r ->
-                    if (r.ok) "  ✓ ${r.path}" else "  ✗ ${r.path}: ${r.message}"
-                }
-                transcript.appendSection("Apply results", lines)
-                val okN = results.count { it.ok }
-                val failN = results.size - okN
-                notifyDesktop(
-                    PluginReportKind.APPLY_COMPLETED,
-                    "${project.name}: $okN ok, $failN failed",
-                    mapOf(
-                        "project" to project.name,
-                        "filesTotal" to results.size,
-                        "filesOk" to okN,
-                        "filesFailed" to failN
-                    )
-                )
-                val type = if (failN > 0) NotificationType.WARNING else NotificationType.INFORMATION
-                LocalLlmNotifications.notify(
-                    project,
-                    "Local LLM — apply",
-                    "$okN file(s) updated, $failN failed. See transcript for details.",
-                    type
-                )
-                val anyFail = results.any { !it.ok }
-                if (anyFail) {
-                    Messages.showWarningDialog(
-                        project,
-                        "Some edits could not be applied. See the conversation log for details.",
-                        "Local LLM"
-                    )
-                }
-                val base = project.basePath
-                if (base != null) {
-                    val okResults = results.filter { it.ok }
-                    okResults.forEachIndexed { idx, r ->
-                        val target = ProjectFileApplyService.resolveUnderProject(base, r.path) ?: return@forEachIndexed
-                        val vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(target.toFile()) ?: return@forEachIndexed
-                        FileEditorManager.getInstance(project).openFile(vf, idx == 0)
-                    }
-                }
-            } catch (e: Exception) {
-                notifyDesktop(PluginReportKind.APPLY_FAILED, e.message?.take(200), mapOf("project" to project.name))
-                transcript.append("Apply error: ${e.message ?: e}\n\n")
-                Messages.showErrorDialog(project, e.message ?: e.toString(), "Local LLM")
-            }
-            onDone()
-        }
+        LocalLlmApplyCoordinator.applyEditsIfAny(
+            project = project,
+            applyEnabled = compose.applyStructuredEdits.isSelected,
+            modelReply = modelReply,
+            referencedFiles = referencedFiles,
+            appendTranscript = { line -> if (!project.isDisposed) transcript.append(line) },
+            appendTranscriptSection = { title, body -> if (!project.isDisposed) transcript.appendSection(title, body) },
+            notifyDesktop = { kind, message, meta -> notifyDesktop(kind, message, meta) },
+            onComplete = onDone
+        )
     }
 }
