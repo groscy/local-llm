@@ -9,7 +9,7 @@ const history: PluginIntegrationReport[] = []
 /**
  * Stores IDE plugin reports and pushes them to all open renderer windows.
  */
-export function appendPluginReport(entry: Omit<PluginIntegrationReport, 'receivedAt'>): void {
+export function appendPluginReport(entry: Omit<PluginIntegrationReport, 'receivedAt'>): PluginIntegrationReport {
   const full: PluginIntegrationReport = { ...entry, receivedAt: Date.now() }
   history.push(full)
   if (history.length > MAX_HISTORY) {
@@ -25,6 +25,7 @@ export function appendPluginReport(entry: Omit<PluginIntegrationReport, 'receive
       w.webContents.send(IPC.INTEGRATION_PLUGIN_REPORT, full)
     }
   }
+  return full
 }
 
 export function getPluginReportHistory(): PluginIntegrationReport[] {

@@ -4,6 +4,8 @@ import { z } from 'zod'
 import type { ChatMessage, RuntimeAdapter } from './runtime/types'
 import { recordChatRoundtripMs } from './chatLatencyStats'
 import { appendPluginReport } from './pluginIntegrationHub'
+import { upsertCodebaseFromPluginReport } from './codebaseFormalStore'
+import { appendLearningEvent } from './trainingWorkflowStore'
 import { resolveChatMaxCompletionTokens } from './chatMaxTokens'
 import { llamaSamplingFromStore } from './llamaChatOptions'
 import { logLine } from '../logger'
@@ -75,7 +77,8 @@ const pluginReportBodySchema = z.object({
     'apply_cancelled',
     'send_cancelled',
     'agent_step',
-    'agent_stop'
+    'agent_stop',
+    'workspace_seen'
   ]),
   message: z.string().max(4000).optional(),
   meta: z.record(z.string(), pluginReportMetaValue).optional()
@@ -96,9 +99,10 @@ export function stopIntegrationServer(): void {
 export function configureIntegrationServer(ctx: {
   store: Store<Record<string, unknown>>
   getRuntime: () => RuntimeAdapter | null
+  getDb?: () => import('better-sqlite3').Database | null
 }): void {
   stopIntegrationServer()
-  const { store, getRuntime } = ctx
+  const { store, getRuntime, getDb } = ctx
 
   const enabled = store.get('integrationListenEnabled') === true
   if (!enabled) {
@@ -228,12 +232,30 @@ export function configureIntegrationServer(ctx: {
           return
         }
         const d = parsed.data
-        appendPluginReport({
+        const full = appendPluginReport({
           source: d.source,
           kind: d.kind,
           message: d.message,
           meta: d.meta
         })
+        try {
+          const db = getDb?.()
+          if (db) {
+            appendLearningEvent(db, {
+              source: 'intellij-plugin',
+              actor: d.source,
+              interactionType: 'plugin_report',
+              payloadRef: `plugin:${full.receivedAt}:${d.kind}`,
+              summary: d.message?.slice(0, 280) || `${d.kind} from ${d.source}`,
+              details: { kind: d.kind, meta: d.meta ?? {} }
+            })
+          }
+        } catch (e) {
+          logLine('warn', 'integration_learning_event_failed', {
+            error: e instanceof Error ? e.message : String(e)
+          })
+        }
+        upsertCodebaseFromPluginReport(store, full)
         sendJson(res, 200, { ok: true })
         return
       }
