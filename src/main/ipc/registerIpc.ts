@@ -155,6 +155,15 @@ import {
 import { scanArchitectureRepository } from '../services/architectureRepositoryScan'
 import { saveIntellijPluginZipWithDialog } from '../services/intellijPluginZip'
 import {
+  appendLearningEvent,
+  buildManifestFromApproved,
+  listDomainModelVersions,
+  listDomainProfiles,
+  listEvidenceCards,
+  upsertDomainProfile,
+  updateEvidenceCardStatus
+} from '../services/trainingWorkflowStore'
+import {
   addFormalProfile,
   addManualCodebase,
   appendFormalRun,
@@ -162,8 +171,14 @@ import {
   removeCodebase,
   removeFormalProfile,
   updateCodebase,
+  updateFormalProfile,
   updateFormalRun
 } from '../services/codebaseFormalStore'
+import {
+  attachFormalRunLlmAdvisory,
+  shouldAutoInterpretFormalRun,
+  shouldIncludeKbContext
+} from '../services/formalVerificationInterpret'
 import {
   expandCommandTemplate,
   finalizeRunRow,
@@ -260,7 +275,9 @@ const configSchema = z.object({
   /** Optional second Ollama base URL for agent workers (remote GPU / larger models). */
   agentRemoteOllamaUrl: z.union([z.string().max(2048), z.literal('')]).optional(),
   /** Workspace folder for Architecture Repository bounded scan (Software architect UI). Clear with null or empty. */
-  architectureRepositoryScanRoot: z.union([z.string().min(1).max(8192), z.literal(''), z.null()]).optional()
+  architectureRepositoryScanRoot: z.union([z.string().min(1).max(8192), z.literal(''), z.null()]).optional(),
+  formalVerificationInterpretWithLlm: z.boolean().optional(),
+  formalVerificationInterpretIncludeKb: z.boolean().optional()
 })
 
 function trainingScriptPath(): string {
@@ -313,6 +330,22 @@ export function registerIpc(ctx: IpcContext): void {
     const d = join(userData, 'models')
     if (!existsSync(d)) mkdirSync(d, { recursive: true })
     return d
+  }
+
+  const safeRecordLearningEvent = (args: {
+    source: 'electron' | 'intellij-plugin'
+    actor: string
+    interactionType: 'chat_turn' | 'wiki_extract' | 'deep_learn' | 'plugin_report' | 'tool_outcome'
+    payloadRef: string
+    summary: string
+    details?: Record<string, unknown>
+    domainId?: string | null
+  }): void => {
+    try {
+      appendLearningEvent(db, args)
+    } catch (e) {
+      logLine('warn', 'learning_event_append_failed', { error: e instanceof Error ? e.message : String(e) })
+    }
   }
 
   ipcMain.handle(IPC.GET_PATHS, () => ({
@@ -406,7 +439,11 @@ export function registerIpc(ctx: IpcContext): void {
       store.set(k, v as never)
     })
     if (reloadIntegration) {
-      configureIntegrationServer({ store, getRuntime })
+      configureIntegrationServer({
+        store,
+        getRuntime,
+        getDb: () => db
+      })
     }
     return { ok: true }
   })
@@ -450,6 +487,7 @@ export function registerIpc(ctx: IpcContext): void {
   })
 
   const formalVerificationLocks = new Set<string>()
+  const formalInterpretLocks = new Set<string>()
 
   function sendFormalVerificationProgress(payload: FormalVerificationProgressPayload): void {
     for (const w of BrowserWindow.getAllWindows()) {
@@ -511,7 +549,8 @@ export function registerIpc(ctx: IpcContext): void {
     commandTemplate: z.string().min(1).max(8000),
     spawnMode: z.enum(['shell', 'exec']).optional(),
     timeoutMs: z.number().int().min(1000).max(3_600_000).optional(),
-    expectedExitCodes: z.array(z.number().int()).min(1).max(24).optional()
+    expectedExitCodes: z.array(z.number().int()).min(1).max(24).optional(),
+    interpretWithLlm: z.boolean().optional()
   })
 
   ipcMain.handle(IPC.CODEBASE_FORMAL_PROFILE_ADD, (_e, raw: unknown) => {
@@ -523,9 +562,25 @@ export function registerIpc(ctx: IpcContext): void {
       commandTemplate: parsed.data.commandTemplate,
       spawnMode: parsed.data.spawnMode ?? (process.platform === 'win32' ? 'shell' : 'exec'),
       timeoutMs: parsed.data.timeoutMs ?? DEFAULT_FORMAL_TOOL_TIMEOUT_MS,
-      expectedExitCodes: parsed.data.expectedExitCodes ?? [0]
+      expectedExitCodes: parsed.data.expectedExitCodes ?? [0],
+      ...(typeof parsed.data.interpretWithLlm === 'boolean' ? { interpretWithLlm: parsed.data.interpretWithLlm } : {})
     }
     addFormalProfile(store, profile)
+    return { ok: true as const, profile }
+  })
+
+  const formalProfileUpdateSchema = z.object({
+    id: z.string().uuid(),
+    interpretWithLlm: z.enum(['inherit', 'on', 'off'])
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_PROFILE_UPDATE, (_e, raw: unknown) => {
+    const parsed = formalProfileUpdateSchema.safeParse(raw)
+    if (!parsed.success) return { ok: false as const, error: 'Invalid payload' }
+    const profile = updateFormalProfile(store, parsed.data.id, {
+      interpretWithLlm: parsed.data.interpretWithLlm
+    })
+    if (!profile) return { ok: false as const, error: 'Profile not found.' }
     return { ok: true as const, profile }
   })
 
@@ -558,6 +613,47 @@ export function registerIpc(ctx: IpcContext): void {
       run
     }
     return { ok: true as const, json: JSON.stringify(payload, null, 2) }
+  })
+
+  const formalInterpretRunSchema = z.object({
+    runId: z.string().uuid(),
+    includeContext: z.boolean().optional()
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_INTERPRET_RUN, async (_e, raw: unknown) => {
+    const parsed = formalInterpretRunSchema.safeParse(raw)
+    if (!parsed.success) return { ok: false as const, error: 'Invalid payload' }
+    const runId = parsed.data.runId
+    if (formalInterpretLocks.has(runId)) {
+      return { ok: false as const, error: 'Interpretation already in progress for this run.' }
+    }
+    formalInterpretLocks.add(runId)
+    try {
+      const bundle = readCodebaseFormalBundle(store)
+      const run = bundle.formalVerificationRuns.find((r) => r.id === runId)
+      if (!run) return { ok: false as const, error: 'Run not found.' }
+      if (run.status === 'running') {
+        return { ok: false as const, error: 'Run is still in progress.' }
+      }
+      const profile = bundle.formalToolProfiles.find((p) => p.id === run.profileId)
+      const codebase = bundle.codebases.find((c) => c.id === run.codebaseId)
+      if (!profile || !codebase) return { ok: false as const, error: 'Profile or codebase missing.' }
+      const includeContext = parsed.data.includeContext === true
+      const next = await attachFormalRunLlmAdvisory({
+        store,
+        db,
+        getRuntime,
+        run,
+        profile,
+        codebase,
+        includeContext
+      })
+      updateFormalRun(store, next)
+      sendFormalVerificationProgress({ runId, phase: 'finished', run: next })
+      return { ok: true as const, run: next }
+    } finally {
+      formalInterpretLocks.delete(runId)
+    }
   })
 
   const formalRunStartSchema = z.object({
@@ -604,6 +700,19 @@ export function registerIpc(ctx: IpcContext): void {
     sendFormalVerificationProgress({ runId, phase: 'started', run: baseRun })
 
     void (async () => {
+      const maybeInterpret = async (run: FormalVerificationRun): Promise<FormalVerificationRun> => {
+        if (!shouldAutoInterpretFormalRun(store, profile)) return run
+        const includeContext = shouldIncludeKbContext(store)
+        return attachFormalRunLlmAdvisory({
+          store,
+          db,
+          getRuntime,
+          run,
+          profile,
+          codebase,
+          includeContext
+        })
+      }
       try {
         const expectedExitCodes =
           profile.expectedExitCodes.length > 0 ? profile.expectedExitCodes : [0]
@@ -618,12 +727,14 @@ export function registerIpc(ctx: IpcContext): void {
           timeoutMs,
           expectedExitCodes
         })
-        const final = finalizeRunRow(baseRun, result)
+        let final = finalizeRunRow(baseRun, result)
+        updateFormalRun(store, final)
+        final = await maybeInterpret(final)
         updateFormalRun(store, final)
         sendFormalVerificationProgress({ runId, phase: 'finished', run: final })
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
-        const failed: FormalVerificationRun = {
+        let failed: FormalVerificationRun = {
           ...baseRun,
           finishedAt: Date.now(),
           status: 'failed',
@@ -631,6 +742,8 @@ export function registerIpc(ctx: IpcContext): void {
           stdout: '',
           stderr: msg.slice(0, 8000)
         }
+        updateFormalRun(store, failed)
+        failed = await maybeInterpret(failed)
         updateFormalRun(store, failed)
         sendFormalVerificationProgress({ runId, phase: 'finished', run: failed })
       } finally {
@@ -1165,6 +1278,14 @@ export function registerIpc(ctx: IpcContext): void {
     ) => {
       const row = chatService.appendMessage(db, cid, role, content, modelId, usage)
       if (role === 'user') {
+        safeRecordLearningEvent({
+          source: 'electron',
+          actor: 'user',
+          interactionType: 'chat_turn',
+          payloadRef: `chat:${cid}:${row.id}`,
+          summary: content.slice(0, 260),
+          details: { role }
+        })
         try {
           assignUserMessageToPromptDomains(db, row.id, content)
         } catch (e) {
@@ -1178,6 +1299,16 @@ export function registerIpc(ctx: IpcContext): void {
             return { ...row, promptDomainSuffix: suffix }
           }
         }
+      }
+      if (role === 'assistant') {
+        safeRecordLearningEvent({
+          source: 'electron',
+          actor: 'assistant',
+          interactionType: 'chat_turn',
+          payloadRef: `chat:${cid}:${row.id}`,
+          summary: content.slice(0, 260),
+          details: { role, modelId: modelId ?? null }
+        })
       }
       return row
     }
@@ -1363,6 +1494,14 @@ export function registerIpc(ctx: IpcContext): void {
         undefined,
         parsed.data.conversationId
       )
+      safeRecordLearningEvent({
+        source: 'electron',
+        actor: 'assistant',
+        interactionType: 'wiki_extract',
+        payloadRef: `kb:${source.id}`,
+        summary: `Wiki extract: ${displayTitle}`,
+        details: { conversationId: parsed.data.conversationId }
+      })
       logLine('info', 'wiki_extract_ingested', { sourceId: source.id, conversationId: parsed.data.conversationId })
       return { ok: true as const, skipped: false, sourceId: source.id, title: displayTitle }
     } catch (e) {
@@ -1447,6 +1586,14 @@ export function registerIpc(ctx: IpcContext): void {
         sourceId: r.sourceId,
         conversationId: parsed.data.conversationId
       })
+      safeRecordLearningEvent({
+        source: 'electron',
+        actor: 'assistant',
+        interactionType: 'deep_learn',
+        payloadRef: `kb:${r.sourceId}`,
+        summary: `Deep learn: ${r.title}`,
+        details: { conversationId: parsed.data.conversationId, roundsUsed: r.roundsUsed }
+      })
       return {
         ok: true as const,
         sourceId: r.sourceId,
@@ -1508,6 +1655,7 @@ export function registerIpc(ctx: IpcContext): void {
       kbSourceIds?: string[]
       displayName?: string
       pythonPath?: string
+      domainId?: string
     }
     const base = typeof p.baseModelPath === 'string' ? p.baseModelPath.trim() : ''
     if (!base) throw new Error('Base model path is required (GGUF or model id you fine-tune from).')
@@ -1519,6 +1667,7 @@ export function registerIpc(ctx: IpcContext): void {
       datasetPath: typeof p.datasetPath === 'string' && p.datasetPath.trim() ? p.datasetPath.trim() : undefined,
       kbSourceIds,
       displayName: typeof p.displayName === 'string' ? p.displayName : undefined,
+      domainId: typeof p.domainId === 'string' && p.domainId.trim() ? p.domainId.trim() : undefined,
       pythonPath: typeof p.pythonPath === 'string' && p.pythonPath.trim() ? p.pythonPath.trim() : undefined,
       modelsDir: modelsDir()
     })
@@ -1531,6 +1680,73 @@ export function registerIpc(ctx: IpcContext): void {
     const r = trainOrchestrator.rescanTrainJobArtifacts(db, jobId.trim(), modelsDir())
     if (!r) throw new Error('Train job not found')
     return r
+  })
+  ipcMain.handle(IPC.TRAIN_REVIEW_QUEUE, (_e, raw?: unknown) => {
+    const p = z
+      .object({
+        status: z.enum(['pending', 'approved', 'rejected']).optional(),
+        domainId: z.string().uuid().optional(),
+        limit: z.number().int().min(1).max(400).optional()
+      })
+      .safeParse(raw ?? {})
+    if (!p.success) return listEvidenceCards(db, { limit: 120 })
+    return listEvidenceCards(db, {
+      status: p.data.status,
+      domainId: p.data.domainId,
+      limit: p.data.limit
+    })
+  })
+  ipcMain.handle(IPC.TRAIN_REVIEW_SET_STATUS, (_e, raw: unknown) => {
+    const p = z
+      .object({
+        cardId: z.string().uuid(),
+        status: z.enum(['pending', 'approved', 'rejected'])
+      })
+      .safeParse(raw)
+    if (!p.success) throw new Error('Invalid review status payload')
+    const next = updateEvidenceCardStatus(db, p.data.cardId, p.data.status)
+    if (!next) throw new Error('Evidence card not found')
+    return next
+  })
+  ipcMain.handle(IPC.TRAIN_MANIFEST_PREVIEW, (_e, raw: unknown) => {
+    const p = z
+      .object({
+        id: z.string().uuid().optional(),
+        domainId: z.string().uuid().optional(),
+        baseModelPath: z.string().min(1),
+        datasetPath: z.string().min(1),
+        outputDir: z.string().min(1),
+        sourceIds: z.array(z.string().min(1)).optional()
+      })
+      .safeParse(raw)
+    if (!p.success) throw new Error('Invalid manifest preview payload')
+    return buildManifestFromApproved(db, {
+      id: p.data.id ?? randomUUID(),
+      domainId: p.data.domainId ?? null,
+      baseModelPath: p.data.baseModelPath,
+      datasetPath: p.data.datasetPath,
+      outputDir: p.data.outputDir,
+      sourceIds: p.data.sourceIds
+    })
+  })
+  ipcMain.handle(IPC.TRAIN_DOMAIN_PROFILES_LIST, () => listDomainProfiles(db))
+  ipcMain.handle(IPC.TRAIN_DOMAIN_PROFILE_UPSERT, (_e, raw: unknown) => {
+    const p = z
+      .object({
+        id: z.string().uuid().optional(),
+        name: z.string().min(1).max(200),
+        terminology: z.array(z.string().min(1).max(64)).max(120),
+        objective: z.string().max(1000).default(''),
+        allowedSources: z.array(z.enum(['electron', 'intellij-plugin'])).min(1).max(2),
+        retentionDays: z.number().int().min(1).max(3650).default(90)
+      })
+      .safeParse(raw)
+    if (!p.success) throw new Error('Invalid domain profile payload')
+    return upsertDomainProfile(db, p.data)
+  })
+  ipcMain.handle(IPC.TRAIN_DOMAIN_MODEL_VERSIONS, (_e, raw?: unknown) => {
+    const p = z.object({ domainId: z.string().uuid().optional() }).safeParse(raw ?? {})
+    return listDomainModelVersions(db, p.success ? p.data.domainId : undefined)
   })
 
   /** Persist HF token with safeStorage */
@@ -1715,5 +1931,9 @@ export function registerIpc(ctx: IpcContext): void {
     return { ok: true }
   })
 
-  configureIntegrationServer({ store, getRuntime })
+  configureIntegrationServer({
+    store,
+    getRuntime,
+    getDb: () => db
+  })
 }
