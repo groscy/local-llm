@@ -24,24 +24,29 @@ export function useKnowledgeGraphViewport(wrapRef: RefObject<HTMLDivElement | nu
   const { contentW, contentH, resetKey } = opts
   const [vp, setVp] = useState<KgViewport>({ scale: 1, tx: 0, ty: 0 })
   const panRef = useRef<{ active: boolean; sx: number; sy: number; tx0: number; ty0: number } | null>(null)
+  /** Latest graph dimensions (avoids refitting the viewport on every layout tweak, e.g. gravity slider). */
+  const contentDimsRef = useRef({ w: contentW, h: contentH })
+  contentDimsRef.current = { w: contentW, h: contentH }
 
   const fitToView = useCallback(() => {
     const el = wrapRef.current
-    if (!el || contentW <= 0 || contentH <= 0) return
+    const { w: cw, h: ch } = contentDimsRef.current
+    if (!el || cw <= 0 || ch <= 0) return
     const pad = 24
     const vw = Math.max(80, el.clientWidth - pad)
     const vh = Math.max(80, el.clientHeight - pad)
-    const sx = vw / contentW
-    const sy = vh / contentH
+    const sx = vw / cw
+    const sy = vh / ch
     const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, Math.min(sx, sy)))
-    const tx = (el.clientWidth - contentW * scale) / 2
-    const ty = (el.clientHeight - contentH * scale) / 2
+    const tx = (el.clientWidth - cw * scale) / 2
+    const ty = (el.clientHeight - ch * scale) / 2
     setVp({ scale, tx, ty })
-  }, [wrapRef, contentW, contentH])
+  }, [wrapRef])
 
   useLayoutEffect(() => {
-    if (contentW > 4 && contentH > 4) fitToView()
-  }, [resetKey, fitToView, contentW, contentH])
+    const { w, h } = contentDimsRef.current
+    if (w > 4 && h > 4) fitToView()
+  }, [resetKey, fitToView])
 
   const zoomAt = useCallback((clientX: number, clientY: number, nextScale: number) => {
     const el = wrapRef.current

@@ -6,6 +6,7 @@ export type KgBox = { x: number; y: number; w: number; h: number }
 export type KnowledgeGraphLayoutOptions = {
   containerWidth: number
   collapsedSourceIds?: ReadonlySet<string>
+  clusterMode?: 'related' | 'domain'
 }
 
 export type KnowledgeGraphLayoutResult = {
@@ -57,7 +58,7 @@ export function buildKnowledgeGraphLayout(
   data: KnowledgeGraphPayload,
   opts: KnowledgeGraphLayoutOptions
 ): KnowledgeGraphLayoutResult {
-  const { containerWidth, collapsedSourceIds = new Set<string>() } = opts
+  const { containerWidth, collapsedSourceIds = new Set<string>(), clusterMode = 'related' } = opts
   const pad = 40
   const wikiR = 11
   const wikiGap = 28
@@ -79,19 +80,27 @@ export function buildKnowledgeGraphLayout(
     }
   }
 
-  const uf = new UnionFind()
-  for (const s of sources) uf.find(s.id)
-  for (const e of data.edges) {
-    if (e.kind !== 'related') continue
-    if (sourceIds.has(e.from) && sourceIds.has(e.to)) uf.union(e.from, e.to)
-  }
-
   const clusterMap = new Map<string, string[]>()
-  for (const s of sources) {
-    const root = uf.find(s.id)
-    const arr = clusterMap.get(root) ?? []
-    arr.push(s.id)
-    clusterMap.set(root, arr)
+  if (clusterMode === 'domain') {
+    for (const s of sources) {
+      const key = s.domainId?.trim() || 'domain:unscoped'
+      const arr = clusterMap.get(key) ?? []
+      arr.push(s.id)
+      clusterMap.set(key, arr)
+    }
+  } else {
+    const uf = new UnionFind()
+    for (const s of sources) uf.find(s.id)
+    for (const e of data.edges) {
+      if (e.kind !== 'related') continue
+      if (sourceIds.has(e.from) && sourceIds.has(e.to)) uf.union(e.from, e.to)
+    }
+    for (const s of sources) {
+      const root = uf.find(s.id)
+      const arr = clusterMap.get(root) ?? []
+      arr.push(s.id)
+      clusterMap.set(root, arr)
+    }
   }
 
   const clusters = [...clusterMap.values()].sort((a, b) => b.length - a.length)

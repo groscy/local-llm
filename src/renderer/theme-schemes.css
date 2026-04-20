@@ -28,13 +28,9 @@ html[data-color-scheme='dark-charcoal-teal'] {
   --danger: #f08090;
   --danger-text: #ffd0d8;
   --neutral-indicator: #7a8a9c;
-  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-cta: color-mix(in srgb, var(--accent) 88%, var(--accent-bright));
   --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
-  --gradient-danger: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--danger) 45%, #301018) 0%,
-    var(--danger) 100%
-  );
+  --gradient-danger: color-mix(in srgb, var(--danger) 88%, #301018);
   --chart-line-memory: var(--accent);
   --chart-line-cpu: var(--wiki-accent);
   --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 35%, #7eb8ff);
@@ -84,13 +80,9 @@ html[data-color-scheme='black-oled-blue'] {
   --danger: #ff8a80;
   --danger-text: #ffd4d0;
   --neutral-indicator: #78909c;
-  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-cta: color-mix(in srgb, var(--accent) 88%, var(--accent-bright));
   --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
-  --gradient-danger: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--danger) 40%, #280808) 0%,
-    var(--danger) 100%
-  );
+  --gradient-danger: color-mix(in srgb, var(--danger) 88%, #280808);
   --chart-line-memory: var(--accent);
   --chart-line-cpu: var(--wiki-accent);
   --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 40%, #90caf9);
@@ -142,13 +134,9 @@ html[data-color-scheme='light-warm-slate'] {
   --danger: #b83232;
   --danger-text: #7f1d1d;
   --neutral-indicator: #64748b;
-  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-cta: color-mix(in srgb, var(--accent) 88%, var(--accent-bright));
   --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
-  --gradient-danger: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--danger) 35%, #fde8e8) 0%,
-    var(--danger) 100%
-  );
+  --gradient-danger: color-mix(in srgb, var(--danger) 82%, #5a1212);
   --chart-line-memory: var(--accent);
   --chart-line-cpu: var(--wiki-accent);
   --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 45%, #5b8fc7);
@@ -243,9 +231,9 @@ html[data-color-scheme='solarized-light'] {
   --danger: #dc322f;
   --danger-text: #9b1c1c;
   --neutral-indicator: #839496;
-  --gradient-cta: linear-gradient(135deg, var(--accent) 0%, #2aa198 100%);
+  --gradient-cta: color-mix(in srgb, var(--accent) 52%, #2aa198);
   --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
-  --gradient-danger: linear-gradient(135deg, color-mix(in srgb, var(--danger) 30%, #fff5f5) 0%, var(--danger) 100%);
+  --gradient-danger: color-mix(in srgb, var(--danger) 82%, #6a1816);
   --chart-line-memory: var(--accent);
   --chart-line-cpu: var(--wiki-accent);
   --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 40%, #6c71c4);
@@ -340,13 +328,9 @@ html[data-color-scheme='solarized-dark'] {
   --danger: #dc322f;
   --danger-text: #ffb4b0;
   --neutral-indicator: #839496;
-  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-cta: color-mix(in srgb, var(--accent) 88%, var(--accent-bright));
   --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
-  --gradient-danger: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--danger) 45%, #3b0a0a) 0%,
-    var(--danger) 100%
-  );
+  --gradient-danger: color-mix(in srgb, var(--danger) 88%, #3b0a0a);
   --chart-line-memory: var(--accent);
   --chart-line-cpu: var(--wiki-accent);
   --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 38%, #6c71c4);
@@ -396,13 +380,9 @@ html[data-color-scheme='cvd-rg-blue-amber'] {
   --danger: #da77f2;
   --danger-text: #eebefa;
   --neutral-indicator: #8a9ab8;
-  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-cta: color-mix(in srgb, var(--accent) 88%, var(--accent-bright));
   --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
-  --gradient-danger: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--danger) 40%, #2d1048) 0%,
-    var(--danger) 100%
-  );
+  --gradient-danger: color-mix(in srgb, var(--danger) 88%, #2d1048);
   --chart-line-memory: var(--accent);
   --chart-line-cpu: var(--wiki-accent);
   --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 35%, #9775fa);
@@ -452,13 +432,9 @@ html[data-color-scheme='cvd-by-violet-amber'] {
   --danger: #ff6b6b;
   --danger-text: #ffc9c9;
   --neutral-indicator: #a894c4;
-  --gradient-cta: linear-gradient(135deg, var(--accent-bright) 0%, var(--accent) 100%);
+  --gradient-cta: color-mix(in srgb, var(--accent) 88%, var(--accent-bright));
   --gradient-progress: linear-gradient(90deg, var(--accent), var(--wiki-accent));
-  --gradient-danger: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--danger) 42%, #3a1010) 0%,
-    var(--danger) 100%
-  );
+  --gradient-danger: color-mix(in srgb, var(--danger) 88%, #3a1010);
   --chart-line-memory: var(--accent);
   --chart-line-cpu: var(--wiki-accent);
   --chart-line-gpu-mem: color-mix(in srgb, var(--accent) 38%, #51cf66);

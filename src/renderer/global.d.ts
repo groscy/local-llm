@@ -1,6 +1,11 @@
 import type { KnowledgeGraphAnalysisRunResponse } from '@shared/knowledgeGraphAnalysis'
 import type {
+  DomainModelVersion,
+  DomainProfile,
+  DeepLearnRunProgress,
+  DeepLearnRunResult,
   DownloadRow,
+  EvidenceCard,
   HardwareSummary,
   KbSearchHit,
   KnowledgeGraphPayload,
@@ -9,6 +14,7 @@ import type {
   RuntimeChatProgress,
   RuntimeLoadProgress,
   RuntimeStatus,
+  TrainingManifest,
   WikiChatHighlightTerm,
   SaveIntellijPluginZipResult,
   WikiExportZipResult,
@@ -18,6 +24,14 @@ import type {
 } from '@shared/types'
 import type { IntegrationBridgeSelfTestResult } from '@shared/ideJourney'
 import type { ArchitectureRepositoryScanResponse } from '@shared/architectureRepository'
+import type { AppUpdateStatusPayload } from '@shared/appUpdate'
+import type {
+  CodebaseFormalBundle,
+  CodebaseRecord,
+  FormalToolProfile,
+  FormalVerificationProgressPayload,
+  FormalVerificationRun
+} from '@shared/codebaseRegistry'
 
 export {}
 
@@ -29,7 +43,12 @@ type Api = {
     db: string
     vectors: string
     platform: NodeJS.Platform
+    appVersion: string
+    /** True when `electron-updater` can run (packaged app, not dev). */
+    updatesSupported: boolean
   }>
+  checkForUpdates: () => Promise<{ ok: boolean; error?: string }>
+  onAppUpdateStatus: (callback: (payload: AppUpdateStatusPayload) => void) => () => void
   openPathInExplorer: (absolutePath: string) => Promise<{ ok: boolean; error?: string }>
   getConfig: () => Promise<
     Record<string, unknown> & {
@@ -38,6 +57,12 @@ type Api = {
       uiRole?: string
       setupTourVersion?: number
       typographyComfort?: string
+      typographyFontFamily?: string
+      typographyLineHeightFactor?: number
+      typographyLetterSpacingExtraEm?: number
+      typographyWordSpacingEm?: number
+      formalVerificationInterpretWithLlm?: boolean
+      formalVerificationInterpretIncludeKb?: boolean
     }
   >
   setConfig: (c: unknown) => Promise<{ ok: boolean; error?: string }>
@@ -112,6 +137,45 @@ type Api = {
   integrationPluginReportsList: () => Promise<PluginIntegrationReport[]>
   integrationBridgeSelfTest: (opts?: { smokeChat?: boolean }) => Promise<IntegrationBridgeSelfTestResult>
   onIntegrationPluginReport: (callback: (payload: PluginIntegrationReport) => void) => () => void
+  codebaseFormalGet: () => Promise<CodebaseFormalBundle>
+  codebaseFormalPickRoot: () => Promise<string | null>
+  codebaseFormalAdd: (p: {
+    rootPath: string
+    displayName?: string
+  }) => Promise<{ ok: true; record: CodebaseRecord } | { ok: false; error: string }>
+  codebaseFormalUpdate: (p: {
+    id: string
+    displayName?: string
+    disabled?: boolean
+  }) => Promise<{ ok: true; record: CodebaseRecord } | { ok: false; error: string }>
+  codebaseFormalRemove: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>
+  codebaseFormalProfileAdd: (p: {
+    label: string
+    commandTemplate: string
+    spawnMode?: 'shell' | 'exec'
+    timeoutMs?: number
+    expectedExitCodes?: number[]
+    interpretWithLlm?: boolean
+  }) => Promise<{ ok: true; profile: FormalToolProfile } | { ok: false; error: string }>
+  codebaseFormalProfileUpdate: (p: {
+    id: string
+    interpretWithLlm: 'inherit' | 'on' | 'off'
+  }) => Promise<{ ok: true; profile: FormalToolProfile } | { ok: false; error: string }>
+  codebaseFormalProfileRemove: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>
+  codebaseFormalRunStart: (p: {
+    codebaseId: string
+    profileId: string
+  }) => Promise<{ ok: true; runId: string } | { ok: false; error: string }>
+  codebaseFormalRunList: () => Promise<FormalVerificationRun[]>
+  codebaseFormalRunGet: (runId: string) => Promise<FormalVerificationRun | null>
+  codebaseFormalRunExportJson: (runId: string) => Promise<{ ok: true; json: string } | { ok: false; error: string }>
+  codebaseFormalInterpretRun: (p: {
+    runId: string
+    includeContext?: boolean
+  }) => Promise<{ ok: true; run: FormalVerificationRun } | { ok: false; error: string }>
+  onCodebaseFormalVerificationProgress: (
+    callback: (payload: FormalVerificationProgressPayload) => void
+  ) => () => void
   openExternalUrl: (url: string) => Promise<{ ok: boolean }>
   /** Save dialog: copy local/bundled Gradle ZIP when present, else download from GitHub latest. */
   saveIntellijPluginZip: () => Promise<SaveIntellijPluginZipResult>
@@ -167,6 +231,7 @@ type Api = {
   kbWikiPage: (sourceId: string) => Promise<WikiPagePayload>
   kbWikiHighlightTerms: () => Promise<WikiChatHighlightTerm[]>
   kbDeleteSource: (sourceId: string) => Promise<{ ok: true }>
+  kbResetWikiAndKeywords: () => Promise<{ sourcesRemoved: number; promptDomainsRemoved: number }>
   kbExportWikiZip: () => Promise<WikiExportZipResult>
   kbKnowledgeGraph: () => Promise<KnowledgeGraphPayload>
   kbGraphAnalysisRun: (opts?: { ingestReport?: boolean }) => Promise<KnowledgeGraphAnalysisRunResponse>
@@ -176,6 +241,20 @@ type Api = {
     userMessage: string
     assistantMessage: string
   }) => Promise<WikiExtractTurnResult>
+  kbDeepLearnRun: (p: {
+    jobId: string
+    conversationId: string
+    subject: string
+    userMessage: string
+    approvedFetchUrls: string[]
+  }) => Promise<DeepLearnRunResult>
+  kbDeepLearnCancel: (p: { jobId: string }) => Promise<{ ok: boolean }>
+  kbDeepLearnResume: (p: {
+    jobId: string
+    action: 'continue' | 'finish'
+    followUp?: string
+  }) => Promise<{ ok: boolean }>
+  onDeepLearnProgress: (callback: (payload: DeepLearnRunProgress) => void) => () => void
   metricsSnapshot: (opts?: { persist?: boolean }) => Promise<unknown>
   metricsHistory: (limit?: number) => Promise<unknown[]>
   trainStart: (p: {
@@ -183,11 +262,36 @@ type Api = {
     datasetPath?: string
     kbSourceIds?: string[]
     displayName?: string
+    domainId?: string
     pythonPath?: string
   }) => Promise<unknown>
   trainStatus: (id: string) => Promise<unknown>
   trainListJobs: () => Promise<unknown[]>
   trainRescanArtifact: (jobId: string) => Promise<unknown>
+  trainReviewQueue: (opts?: {
+    status?: 'pending' | 'approved' | 'rejected'
+    domainId?: string
+    limit?: number
+  }) => Promise<EvidenceCard[]>
+  trainReviewSetStatus: (p: { cardId: string; status: 'pending' | 'approved' | 'rejected' }) => Promise<EvidenceCard>
+  trainManifestPreview: (p: {
+    id?: string
+    domainId?: string
+    baseModelPath: string
+    datasetPath: string
+    outputDir: string
+    sourceIds?: string[]
+  }) => Promise<TrainingManifest>
+  trainDomainProfilesList: () => Promise<DomainProfile[]>
+  trainDomainProfileUpsert: (p: {
+    id?: string
+    name: string
+    terminology: string[]
+    objective: string
+    allowedSources: ('electron' | 'intellij-plugin')[]
+    retentionDays: number
+  }) => Promise<DomainProfile>
+  trainDomainModelVersions: (opts?: { domainId?: string }) => Promise<DomainModelVersion[]>
   setHfToken: (token: string | null) => Promise<{ ok: boolean; warn?: string }>
 }
 

@@ -2,8 +2,11 @@ import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { useCallback, useMemo, useState, type ReactElement } from 'react'
 import type { ArchitectureRepositoryScanResult } from '@shared/architectureRepository'
-import type { HardwareSummary } from '@shared/types'
-import { formatBytes } from './downloadProgressUi'
+import type { HardwareSummary, WikiTopic } from '@shared/types'
+import {
+  renderObservedArchitectureEvidence,
+  type ArchitectureEvidenceProps
+} from './architectureRepositoryEvidence'
 import { MermaidDiagram } from './MermaidDiagram'
 import { ArchRepositoryOverviewDiagram } from './ArchRepositoryOverviewDiagram'
 import {
@@ -112,7 +115,8 @@ export type ArchitectureRepositoryViewProps = {
   onClearScanRoot: () => Promise<void>
   integrationListenEnabled: boolean
   integrationPort: number
-  wikiTopicCount: number
+  integrationTokenConfigured: boolean
+  wikiTopics: WikiTopic[]
   kgNodeCount: number
   kgEdgeCount: number
   kgLoading: boolean
@@ -120,6 +124,8 @@ export type ArchitectureRepositoryViewProps = {
   onRefreshKnowledgeGraph: () => void
   hardwareSummary: HardwareSummary | null
   modelsDefaultPath: string | null
+  trainJobCount: number
+  pluginReportCount: number
 }
 
 export function ArchitectureRepositoryView(props: ArchitectureRepositoryViewProps): ReactElement {
@@ -167,101 +173,46 @@ export function ArchitectureRepositoryView(props: ArchitectureRepositoryViewProp
     setSelected(id)
   }, [])
 
-  const liveBlock = (
-    <section className="arch-repo-live panel-like">
-      <h3 className="settings-section-title">
-        <i className="fa-solid fa-wave-square" aria-hidden style={{ marginRight: 8, opacity: 0.75 }} />
-        Live architecture data
-      </h3>
-      <p className="muted" style={{ marginTop: 0 }}>
-        These inputs are drawn from the running application state and your knowledge base, expressed using Architecture
-        Repository catalog language.
-      </p>
-      <div className="arch-repo-live-grid">
-        <div>
-          <h4 className="arch-repo-subheading">Technology Architecture — integration</h4>
-          <table className="arch-repo-table">
-            <tbody>
-              <tr>
-                <th scope="row">Integration listen</th>
-                <td>{props.integrationListenEnabled ? 'Enabled' : 'Disabled'}</td>
-              </tr>
-              <tr>
-                <th scope="row">Integration port</th>
-                <td>
-                  <code className="inline-code">{props.integrationPort}</code>
-                </td>
-              </tr>
-              <tr>
-                <th scope="row">Models directory (default)</th>
-                <td className="arch-repo-path-cell">{props.modelsDefaultPath ?? '—'}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div>
-          <h4 className="arch-repo-subheading">Data Architecture — knowledge graph</h4>
-          {props.kgLoading ? (
-            <p className="muted">Loading knowledge graph…</p>
-          ) : (
-            <table className="arch-repo-table">
-              <tbody>
-                <tr>
-                  <th scope="row">Wiki topics (count)</th>
-                  <td>{props.wikiTopicCount}</td>
-                </tr>
-                <tr>
-                  <th scope="row">Graph nodes</th>
-                  <td>{props.kgNodeCount}</td>
-                </tr>
-                <tr>
-                  <th scope="row">Graph edges</th>
-                  <td>{props.kgEdgeCount}</td>
-                </tr>
-                <tr>
-                  <th scope="row">Graph payload truncated</th>
-                  <td>{props.kgTruncated ? 'Yes' : 'No'}</td>
-                </tr>
-              </tbody>
-            </table>
-          )}
-          <button type="button" className="btn-secondary arch-repo-refresh-kg" onClick={() => props.onRefreshKnowledgeGraph()}>
-            Refresh knowledge graph
-          </button>
-        </div>
-        <div>
-          <h4 className="arch-repo-subheading">Technology Architecture — workstation</h4>
-          {!props.hardwareSummary ? (
-            <p className="muted">Hardware summary not loaded yet (open Run or Stats once to populate).</p>
-          ) : (
-            <table className="arch-repo-table">
-              <tbody>
-                <tr>
-                  <th scope="row">Logical CPUs</th>
-                  <td>{props.hardwareSummary.logicalCores}</td>
-                </tr>
-                <tr>
-                  <th scope="row">Total RAM</th>
-                  <td>{formatBytes(props.hardwareSummary.totalRamBytes)}</td>
-                </tr>
-                <tr>
-                  <th scope="row">Free RAM</th>
-                  <td>{formatBytes(props.hardwareSummary.freeRamBytes)}</td>
-                </tr>
-                <tr>
-                  <th scope="row">Download volume free</th>
-                  <td>
-                    {props.hardwareSummary.downloadVolumeFreeBytes != null
-                      ? formatBytes(props.hardwareSummary.downloadVolumeFreeBytes)
-                      : '—'}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          )}
-        </div>
-      </div>
-    </section>
+  const evidenceProps: ArchitectureEvidenceProps = useMemo(
+    () => ({
+      integrationListenEnabled: props.integrationListenEnabled,
+      integrationPort: props.integrationPort,
+      integrationTokenConfigured: props.integrationTokenConfigured,
+      wikiTopics: props.wikiTopics,
+      kgNodeCount: props.kgNodeCount,
+      kgEdgeCount: props.kgEdgeCount,
+      kgLoading: props.kgLoading,
+      kgTruncated: props.kgTruncated,
+      onRefreshKnowledgeGraph: props.onRefreshKnowledgeGraph,
+      hardwareSummary: props.hardwareSummary,
+      modelsDefaultPath: props.modelsDefaultPath,
+      scanRoot: props.scanRoot,
+      scanResult,
+      trainJobCount: props.trainJobCount,
+      pluginReportCount: props.pluginReportCount
+    }),
+    [
+      props.integrationListenEnabled,
+      props.integrationPort,
+      props.integrationTokenConfigured,
+      props.wikiTopics,
+      props.kgNodeCount,
+      props.kgEdgeCount,
+      props.kgLoading,
+      props.kgTruncated,
+      props.onRefreshKnowledgeGraph,
+      props.hardwareSummary,
+      props.modelsDefaultPath,
+      props.scanRoot,
+      props.trainJobCount,
+      props.pluginReportCount,
+      scanResult
+    ]
+  )
+
+  const observedEvidencePanel = useMemo(
+    () => renderObservedArchitectureEvidence(selected, evidenceProps),
+    [selected, evidenceProps]
   )
 
   const scanWorkspacePanel =
@@ -272,8 +223,8 @@ export function ArchitectureRepositoryView(props: ArchitectureRepositoryViewProp
           Application Architecture — workspace evidence
         </h3>
         <p className="muted" style={{ marginTop: 0 }}>
-          Select a codebase root. The scan is bounded (depth, skipped vendor trees, symlink directories skipped) and
-          intended as **architecture evidence**, not a full static-analysis workbench.
+          Select a codebase root. The scan is bounded (depth, skipped vendor trees, symlink directories skipped). Results
+          describe the **workspace you selected** as session evidence for this chapter, not the tool hosting this view.
         </p>
         <div className="arch-repo-scan-actions">
           <button type="button" className="btn-secondary" onClick={() => void props.onChooseScanRoot()}>
@@ -362,13 +313,8 @@ export function ArchitectureRepositoryView(props: ArchitectureRepositoryViewProp
             )}
           </div>
         ) : null}
-        {liveBlock}
       </section>
     ) : null
-
-  /** Application catalog embeds live data inside the scan panel; overview focuses on the map; other pages show live data below markdown. */
-  const liveBelowMarkdown =
-    selected !== 'application_architecture_catalog' && selected !== 'architecture_repository_overview'
 
   return (
     <div className="architecture-repository-view">
@@ -441,7 +387,7 @@ export function ArchitectureRepositoryView(props: ArchitectureRepositoryViewProp
             <RepositoryMarkdown markdown={TOGAF_REPOSITORY_MARKDOWN[selected]} />
           )}
           {scanWorkspacePanel}
-          {liveBelowMarkdown ? <div style={{ marginTop: 16 }}>{liveBlock}</div> : null}
+          {observedEvidencePanel ? <div style={{ marginTop: 16 }}>{observedEvidencePanel}</div> : null}
           <footer className="arch-repo-footer muted">
             TOGAF is a trademark of The Open Group. This view uses TOGAF-aligned terminology for a local architecture
             repository; it is not a certified ADM tool.

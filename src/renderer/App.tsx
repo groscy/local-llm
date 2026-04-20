@@ -13,7 +13,11 @@ import {
 import type { AppBlockingIssue } from '@shared/appBlockingIssues'
 import type {
   DownloadRow,
+  DomainModelVersion,
+  DomainProfile,
   HardwareSummary,
+  DeepLearnExplorePath,
+  EvidenceCard,
   HfModelDetail,
   HfModelSummary,
   KbSearchHit,
@@ -25,14 +29,15 @@ import type {
   WikiChatHighlightTerm,
   WikiGlossaryEntry,
   WikiRelatedSource,
-  WikiSourceKind,
   WikiTopic,
+  WikiSourceKind,
   PromptDomainRow,
   KbSource,
   TrainJob,
   MessageRow,
   MessageAppendResponse
 } from '@shared/types'
+import type { AppUpdateStatusPayload } from '@shared/appUpdate'
 import type { KnowledgeGraphAnalysisResult } from '@shared/knowledgeGraphAnalysis'
 import { MAX_PROMPT_DOMAIN_SUFFIX_CHARS } from '@shared/promptDomains'
 import { hfResolveRevision, pickPrimaryHubWeightFile } from '@shared/hfGgufPick'
@@ -67,6 +72,29 @@ import {
   type TypographyComfortId
 } from '@shared/typographyComfort'
 import {
+  DEFAULT_TYPOGRAPHY_FONT_FAMILY,
+  DEFAULT_TYPOGRAPHY_LETTER_SPACING_EXTRA_EM,
+  DEFAULT_TYPOGRAPHY_LINE_HEIGHT_FACTOR,
+  DEFAULT_TYPOGRAPHY_WORD_SPACING_EM,
+  TYPOGRAPHY_FONT_FAMILY_IDS,
+  TYPOGRAPHY_FONT_FAMILY_LABELS,
+  TYPOGRAPHY_LETTER_EXTRA_EM_MAX,
+  TYPOGRAPHY_LETTER_EXTRA_EM_MIN,
+  TYPOGRAPHY_LINE_HEIGHT_FACTOR_MAX,
+  TYPOGRAPHY_LINE_HEIGHT_FACTOR_MIN,
+  TYPOGRAPHY_WORD_SPACING_EM_MAX,
+  clampTypographyLetterSpacingExtraEm,
+  clampTypographyLineHeightFactor,
+  clampTypographyWordSpacingEm,
+  parseTypographyFontFamily,
+  parseTypographyLetterSpacingExtraEm,
+  parseTypographyLineHeightFactor,
+  parseTypographyWordSpacingEm,
+  type TypographyFontFamilyId
+} from '@shared/typographyTune'
+import { applyTypographyFineTuneToDocument } from './typographyTuneDom'
+import { applyColorSchemeToDocument } from './colorSchemeDom'
+import {
   appendJournalTexts,
   CHAT_MINIMAL_SYSTEM_PROMPT,
   defaultModelProfile,
@@ -90,6 +118,8 @@ import {
   ragReplyMissingSnippetCitations,
   sliceChatHistoryMessages
 } from '@shared/chatContextBudget'
+import { postProcessAssistantChatMarkdown } from '@shared/chatResponsePostProcess'
+import { parseDeepLearnIntent } from '@shared/deepLearnIntent'
 import { DownloadProgressBar, downloadRowProgressPct, fileNameFromPath, formatBytes } from './downloadProgressUi'
 import { ActivityPinnedWidget, type ActivityChatTokens } from './ActivityPinnedWidget'
 import type { ActivityTokenHistoryPoint } from './ActivityTokenSessionChart'
@@ -108,9 +138,12 @@ import { buildWikiTocGroupsFromRoot, WikiArticleTocNav, type WikiTocGroup } from
 import { ElectronDevDashboard } from './ElectronDevDashboard'
 import { TrainMainView } from './TrainMainView'
 import { ArchitectureRepositoryView } from './ArchitectureRepositoryView'
+import { CodebaseFormalSettingsSection } from './CodebaseFormalSettingsSection'
+import { CodebaseLandscapeView } from './CodebaseLandscapeView'
 import { ViewToastRegion } from './ViewToastRegion'
 import { notifyWhenBackground, setViewToastNavigation } from './viewToastBus'
 import { SetupRoleTour, type SetupTourFinishPayload } from './SetupRoleTour'
+import { WIKI_KIND_LABELS, WIKI_KIND_ORDER, groupWikiTopicsByKind, wikiSidebarRowsForKind } from '@shared/wikiSourceGroups'
 import { defaultIdeJourneyChecklist, mergeIdeJourneyChecklist, type IdeJourneyChecklist } from '@shared/ideJourney'
 import {
   WELCOME_GUIDE_LATEST,
@@ -125,6 +158,7 @@ import {
   type UiRole,
   type AppMainView,
   type ToolDrawerId,
+  UI_ROLE_CARD_BLURBS,
   UI_ROLE_IDS,
   UI_ROLE_LABELS
 } from '@shared/uiRole'
@@ -146,6 +180,72 @@ function WikiEntryRemoveButton(props: { ariaLabel: string; onPress: () => void }
   )
 }
 
+/** One kind bucket in the wiki sidebar: chat notes with the same keyword render as a nested group. */
+function WikiLibraryKindRows(props: {
+  kind: WikiSourceKind
+  topics: WikiTopic[]
+  compact?: boolean
+  wikiSelectedId: string | null
+  onOpenPage: (sourceId: string) => void
+  onRequestRemove: (id: string, title: string) => void
+}): ReactElement {
+  const rows = wikiSidebarRowsForKind(props.kind, props.topics)
+  const groupMod = props.compact ? ' wiki-sidebar-note-group--compact' : ''
+
+  return (
+    <>
+      {rows.map((row) =>
+        row.rowKind === 'topic' ? (
+          <div key={row.topic.id} className="wiki-library-entry">
+            <button
+              type="button"
+              className={`wiki-topic-btn ${props.wikiSelectedId === row.topic.id ? 'active' : ''}`}
+              onClick={() => props.onOpenPage(row.topic.id)}
+            >
+              {row.topic.title}
+              <span className="wiki-topic-meta">{row.topic.chunkCount} sections indexed</span>
+            </button>
+            <WikiEntryRemoveButton
+              ariaLabel={`Remove ${row.topic.title} from wiki`}
+              onPress={() => props.onRequestRemove(row.topic.id, row.topic.title)}
+            />
+          </div>
+        ) : (
+          <details key={row.groupKey} className={`wiki-sidebar-note-group${groupMod}`} open>
+            <summary className="wiki-sidebar-note-group-summary">
+              <span className="wiki-sidebar-note-group-title">{row.label}</span>
+              <span className="wiki-topic-meta">{row.topics.length} notes</span>
+            </summary>
+            <div
+              className="wiki-sidebar-note-group-entries"
+              role="group"
+              aria-label={`${row.label}: ${row.topics.length} chat notes`}
+            >
+              {row.topics.map((t, i) => (
+                <div key={t.id} className="wiki-library-entry wiki-library-entry--nested">
+                  <button
+                    type="button"
+                    className={`wiki-topic-btn ${props.wikiSelectedId === t.id ? 'active' : ''}`}
+                    onClick={() => props.onOpenPage(t.id)}
+                    aria-label={`${row.label}, note ${i + 1} of ${row.topics.length}, ${t.chunkCount} sections indexed`}
+                  >
+                    <span className="wiki-sidebar-note-index">#{i + 1}</span>
+                    <span className="wiki-topic-meta">{t.chunkCount} sections indexed</span>
+                  </button>
+                  <WikiEntryRemoveButton
+                    ariaLabel={`Remove ${row.label} (note ${i + 1} of ${row.topics.length}) from wiki`}
+                    onPress={() => props.onRequestRemove(t.id, t.title)}
+                  />
+                </div>
+              ))}
+            </div>
+          </details>
+        )
+      )}
+    </>
+  )
+}
+
 const PRESENCE_WAKE_SHOWN_SESSION_KEY = 'localLlm:presenceWakeShown:v1'
 const AUTO_RESUME_ONCE_SESSION_KEY = 'localLlm:autoResumeOnce:v1'
 
@@ -161,24 +261,6 @@ function clampLlamaConsoleHeight(h: number): number {
   const lo = Math.min(LLAMA_CONSOLE_H_MIN, max)
   if (!Number.isFinite(h)) return Math.min(LLAMA_CONSOLE_H_DEFAULT, max)
   return Math.min(max, Math.max(lo, Math.round(h)))
-}
-
-const WIKI_KIND_ORDER: WikiSourceKind[] = ['document', 'extracted_note', 'saved_chat', 'other']
-const WIKI_KIND_LABELS: Record<WikiSourceKind, string> = {
-  document: 'Documents',
-  extracted_note: 'Chat notes',
-  saved_chat: 'Saved chats',
-  other: 'Other'
-}
-
-function groupWikiTopicsByKind(topics: WikiTopic[]): Map<WikiSourceKind, WikiTopic[]> {
-  const m = new Map<WikiSourceKind, WikiTopic[]>()
-  for (const k of WIKI_KIND_ORDER) m.set(k, [])
-  for (const t of topics) {
-    const bucket = m.get(t.kind) ?? m.get('other')!
-    bucket.push(t)
-  }
-  return m
 }
 
 const COMPOSER_INLINE_SUGGEST_SYSTEM =
@@ -237,14 +319,6 @@ function formatRefreshLabel(ms: number): string {
   if (ms >= 60_000 && ms % 60_000 === 0) return `${ms / 60_000} min`
   if (ms >= 1000 && ms % 1000 === 0) return `${ms / 1000}s`
   return `${ms}ms`
-}
-
-function applyColorSchemeToDocument(id: ColorSchemeId): void {
-  if (id === 'violet') {
-    document.documentElement.removeAttribute('data-color-scheme')
-  } else {
-    document.documentElement.setAttribute('data-color-scheme', id)
-  }
 }
 
 function applyTypographyComfortToDocument(id: TypographyComfortId): void {
@@ -419,6 +493,12 @@ function settingsPluginKindLabel(kind: PluginIntegrationReport['kind']): string 
       return 'IDE apply cancelled'
     case 'send_cancelled':
       return 'IDE send cancelled'
+    case 'agent_step':
+      return 'IDE agent step'
+    case 'agent_stop':
+      return 'IDE agent stop'
+    case 'workspace_seen':
+      return 'IDE workspace'
     default:
       return kind
   }
@@ -1072,6 +1152,8 @@ export default function App(): React.ReactElement {
   const [drawer, setDrawer] = useState<ToolDrawer>(null)
 
   const [paths, setPaths] = useState<Awaited<ReturnType<typeof window.api.getPaths>> | null>(null)
+  const [appUpdateLine, setAppUpdateLine] = useState<string | null>(null)
+  const [appUpdateBusy, setAppUpdateBusy] = useState(false)
   const winPlatform = paths?.platform === 'win32'
   const [hfQuery, setHfQuery] = useState('llama gguf')
   const [hfResults, setHfResults] = useState<HfModelSummary[]>([])
@@ -1332,6 +1414,7 @@ export default function App(): React.ReactElement {
   const [wikiExportBusy, setWikiExportBusy] = useState(false)
   const [wikiTocGroups, setWikiTocGroups] = useState<WikiTocGroup[]>([])
   const wikiSearchSeqRef = useRef(0)
+  const wikiMainSearchInputRef = useRef<HTMLInputElement>(null)
   const [kgPayload, setKgPayload] = useState<KnowledgeGraphPayload | null>(null)
   const [kgLoading, setKgLoading] = useState(false)
   const [kgAnalysisBusy, setKgAnalysisBusy] = useState(false)
@@ -1340,8 +1423,6 @@ export default function App(): React.ReactElement {
   const [kgAnalysisMarkdown, setKgAnalysisMarkdown] = useState<string | null>(null)
   const [kgAnalysisIngestedId, setKgAnalysisIngestedId] = useState<string | null>(null)
   const [kgAnalysisResult, setKgAnalysisResult] = useState<KnowledgeGraphAnalysisResult | null>(null)
-  /** After switching from Chat to Wiki, scroll the knowledge graph section into view. */
-  const [wikiKgScrollPending, setWikiKgScrollPending] = useState(false)
 
   const [metricsBundle, setMetricsBundle] = useState<{
     snapshot: unknown
@@ -1371,11 +1452,46 @@ export default function App(): React.ReactElement {
   const [trainKbSelected, setTrainKbSelected] = useState<Record<string, boolean>>({})
   const [trainDisplayName, setTrainDisplayName] = useState('')
   const [trainStartBusy, setTrainStartBusy] = useState(false)
+  const [trainDomainProfiles, setTrainDomainProfiles] = useState<DomainProfile[]>([])
+  const [trainSelectedDomainId, setTrainSelectedDomainId] = useState('')
+  const [trainReviewQueue, setTrainReviewQueue] = useState<EvidenceCard[]>([])
+  const [trainManifestPreviewMarkdown, setTrainManifestPreviewMarkdown] = useState<string | null>(null)
+  const [trainDomainModelVersions, setTrainDomainModelVersions] = useState<DomainModelVersion[]>([])
   const [hfTokenInput, setHfTokenInput] = useState('')
   const [colorScheme, setColorScheme] = useState<ColorSchemeId>(DEFAULT_COLOR_SCHEME)
   const [typographyComfort, setTypographyComfort] = useState<TypographyComfortId>(DEFAULT_TYPOGRAPHY_COMFORT)
+  const [typographyFontFamily, setTypographyFontFamily] =
+    useState<TypographyFontFamilyId>(DEFAULT_TYPOGRAPHY_FONT_FAMILY)
+  const [typographyLineHeightFactor, setTypographyLineHeightFactor] = useState(
+    DEFAULT_TYPOGRAPHY_LINE_HEIGHT_FACTOR
+  )
+  const [typographyLetterSpacingExtraEm, setTypographyLetterSpacingExtraEm] = useState(
+    DEFAULT_TYPOGRAPHY_LETTER_SPACING_EXTRA_EM
+  )
+  const [typographyWordSpacingEm, setTypographyWordSpacingEm] = useState(DEFAULT_TYPOGRAPHY_WORD_SPACING_EM)
+  /** Live values for persisting sliders on `pointerup` (avoids stale React state in the same gesture). */
+  const typographyFontLiveRef = useRef<TypographyFontFamilyId>(DEFAULT_TYPOGRAPHY_FONT_FAMILY)
+  const typographyLineHeightLiveRef = useRef(DEFAULT_TYPOGRAPHY_LINE_HEIGHT_FACTOR)
+  const typographyLetterExtraLiveRef = useRef(DEFAULT_TYPOGRAPHY_LETTER_SPACING_EXTRA_EM)
+  const typographyWordSpacingLiveRef = useRef(DEFAULT_TYPOGRAPHY_WORD_SPACING_EM)
   const [chatMaxTokensDraft, setChatMaxTokensDraft] = useState(String(CHAT_MAX_TOKENS_DEFAULT))
   const [wikiAutoExtract, setWikiAutoExtract] = useState(true)
+  const [chatResponsePostProcess, setChatResponsePostProcess] = useState(true)
+  const [deepLearnEnabled, setDeepLearnEnabled] = useState(true)
+  const [deepLearnMaxRoundsDraft, setDeepLearnMaxRoundsDraft] = useState('5')
+  const [deepLearnMaxFetchBytesDraft, setDeepLearnMaxFetchBytesDraft] = useState('1500000')
+  type DeepLearnPanelState = {
+    jobId: string
+    label: string
+    awaiting?: {
+      paths: DeepLearnExplorePath[]
+      roundCompleted: number
+      maxRounds: number
+      canContinueMore: boolean
+      modelSuggestsDone: boolean
+    }
+  }
+  const [deepLearnUi, setDeepLearnUi] = useState<DeepLearnPanelState | null>(null)
   const [agenticWorkersEnabled, setAgenticWorkersEnabled] = useState(false)
   const [agentRemoteOllamaUrlDraft, setAgentRemoteOllamaUrlDraft] = useState('')
   const [integrationListenEnabled, setIntegrationListenEnabled] = useState(false)
@@ -1389,12 +1505,12 @@ export default function App(): React.ReactElement {
   const [modelsInstallPathDraft, setModelsInstallPathDraft] = useState('')
   const [modelsDirSaveErr, setModelsDirSaveErr] = useState<string | null>(null)
   const [settingsMaintenanceBusy, setSettingsMaintenanceBusy] = useState<
-    false | 'caches' | 'models' | 'factory'
+    false | 'caches' | 'models' | 'factory' | 'wikiReset'
   >(false)
   const [settingsMaintenanceMessage, setSettingsMaintenanceMessage] = useState<string | null>(null)
-  const [settingsConfirmKind, setSettingsConfirmKind] = useState<null | 'caches' | 'models' | 'factory'>(
-    null
-  )
+  const [settingsConfirmKind, setSettingsConfirmKind] = useState<
+    null | 'caches' | 'models' | 'factory' | 'wikiReset'
+  >(null)
   const [settingsNav, setSettingsNav] = useState<SettingsNavId>('general')
   const [ollamaBaseUrlDraft, setOllamaBaseUrlDraft] = useState(OLLAMA_BASE_DEFAULT)
   const [llamaPortDraft, setLlamaPortDraft] = useState(String(LLAMA_PORT_DEFAULT))
@@ -1794,6 +1910,18 @@ export default function App(): React.ReactElement {
     setDestDir((d) => d || p.modelsDefault)
   }, [])
 
+  const runCheckForUpdates = useCallback(async () => {
+    setAppUpdateBusy(true)
+    try {
+      const r = await window.api.checkForUpdates()
+      if (!r.ok) {
+        setAppUpdateLine(r.error ?? 'Could not check for updates.')
+      }
+    } finally {
+      setAppUpdateBusy(false)
+    }
+  }, [])
+
   const loadConversations = useCallback(async () => {
     const c = await window.api.conversationsList()
     setConversations(c as { id: string; title: string }[])
@@ -1831,6 +1959,14 @@ export default function App(): React.ReactElement {
     setWikiTocGroups(buildWikiTocGroupsFromRoot(root))
   }, [])
 
+  const refreshPromptDomains = useCallback(async () => {
+    try {
+      setPromptDomains(await window.api.promptDomainsList())
+    } catch {
+      setPromptDomains([])
+    }
+  }, [])
+
   const loadWiki = useCallback(async () => {
     setWikiTopics(await window.api.kbWikiTopics())
     try {
@@ -1838,12 +1974,14 @@ export default function App(): React.ReactElement {
     } catch {
       setWikiHighlightTerms([])
     }
-    try {
-      setPromptDomains(await window.api.promptDomainsList())
-    } catch {
-      setPromptDomains([])
+    await refreshPromptDomains()
+  }, [refreshPromptDomains])
+
+  useEffect(() => {
+    if (drawer === 'settings' && settingsNav === 'chat') {
+      void refreshPromptDomains()
     }
-  }, [])
+  }, [drawer, settingsNav, refreshPromptDomains])
 
   useEffect(() => {
     setPromptDomainSuffixDrafts((prev) => {
@@ -1888,6 +2026,12 @@ export default function App(): React.ReactElement {
       window.clearTimeout(t)
     }
   }, [wikiSearchQuery, mainView])
+
+  useEffect(() => {
+    if (mainView !== 'wiki' || wikiTitle.trim().length > 0) return
+    const id = window.requestAnimationFrame(() => wikiMainSearchInputRef.current?.focus())
+    return () => window.cancelAnimationFrame(id)
+  }, [mainView, wikiTitle])
 
   useEffect(() => {
     const q = ragQuery.trim()
@@ -1967,49 +2111,16 @@ export default function App(): React.ReactElement {
     [loadKnowledgeGraph, loadWiki]
   )
 
-  const focusKnowledgeGraphSection = useCallback((): void => {
-    const el = document.getElementById('wiki-knowledge-graph-heading')
-    el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    if (el instanceof HTMLElement) {
-      el.focus({ preventScroll: true })
-    }
-  }, [])
-
   const openKnowledgeGraph = useCallback(() => {
+    setMainView('knowledgeGraph')
     void loadKnowledgeGraph()
-    if (mainView !== 'wiki') {
-      setMainView('wiki')
-      void loadWiki()
-      setWikiKgScrollPending(true)
-    } else {
-      window.setTimeout(() => focusKnowledgeGraphSection(), 50)
-    }
-  }, [mainView, loadWiki, loadKnowledgeGraph, focusKnowledgeGraphSection])
-
-  useLayoutEffect(() => {
-    if (!wikiKgScrollPending || mainView !== 'wiki') return
-    const t = window.setTimeout(() => {
-      focusKnowledgeGraphSection()
-      setWikiKgScrollPending(false)
-    }, 120)
-    return () => window.clearTimeout(t)
-  }, [wikiKgScrollPending, mainView, focusKnowledgeGraphSection])
+  }, [loadKnowledgeGraph])
 
   useEffect(() => {
-    if (mainView !== 'wiki') setWikiKgScrollPending(false)
-  }, [mainView])
-
-  useEffect(() => {
-    if (mainView === 'wiki') {
+    if (mainView === 'knowledgeGraph' || mainView === 'architectureRepository') {
       void loadKnowledgeGraph()
     }
   }, [mainView, wikiTopics.length, loadKnowledgeGraph])
-
-  useEffect(() => {
-    if (mainView === 'architectureRepository') {
-      void loadKnowledgeGraph()
-    }
-  }, [mainView, loadKnowledgeGraph])
 
   useEffect(() => {
     if (!wikiTitle.trim()) setWikiTocGroups([])
@@ -2099,6 +2210,20 @@ export default function App(): React.ReactElement {
     setDrawer('settings')
   }, [])
 
+  const openTrainChatForAugment = useCallback(() => {
+    setMainView('chat')
+    setKbChatPanelCollapsed(false)
+  }, [])
+
+  const openTrainWiki = useCallback(() => {
+    setMainView('wiki')
+    void loadWiki()
+  }, [loadWiki])
+
+  const openTrainPromptDomainSettings = useCallback(() => {
+    openSettings('chat')
+  }, [openSettings])
+
   const patchIdeJourneyChecklist = useCallback(async (patch: Partial<IdeJourneyChecklist>) => {
     setIdeJourneyChecklist((prev) => mergeIdeJourneyChecklist(prev, patch))
     const r = await window.api.setConfig({ ideJourneyChecklist: patch })
@@ -2180,6 +2305,7 @@ export default function App(): React.ReactElement {
       const pin = lay.defaultPinnedWidgets ?? {}
       const r = await window.api.setConfig({
         uiRole: p.uiRole,
+        colorScheme: p.colorScheme,
         setupTourVersion: SETUP_TOUR_LATEST,
         welcomeGuideVersion: WELCOME_GUIDE_LATEST,
         ...pin
@@ -2189,18 +2315,23 @@ export default function App(): React.ReactElement {
         return
       }
       setUiRole(p.uiRole)
+      setColorScheme(p.colorScheme)
+      applyColorSchemeToDocument(p.colorScheme)
       setSetupTourOpen(false)
       const target: MainView = p.mainView ?? layoutDefaultMainArea(lay)
       if (target === 'wiki') {
         setMainView('wiki')
         void loadWiki()
+      } else if (target === 'knowledgeGraph') {
+        setMainView('knowledgeGraph')
+        void loadKnowledgeGraph()
       } else {
         setMainView(target)
       }
       if (p.openDrawer) setDrawer(p.openDrawer)
       else setDrawer(null)
     },
-    [loadWiki]
+    [loadKnowledgeGraph, loadWiki]
   )
 
   const rerunSetupTour = useCallback(async () => {
@@ -2552,6 +2683,42 @@ export default function App(): React.ReactElement {
     }
   }, [])
 
+  const runResetWikiAndKeywords = useCallback(async () => {
+    setSettingsConfirmKind(null)
+    setSettingsMaintenanceMessage(null)
+    setErr(null)
+    setSettingsMaintenanceBusy('wikiReset')
+    try {
+      if (typeof window.api.kbResetWikiAndKeywords !== 'function') {
+        setErr('Reset wiki is unavailable. Rebuild the app so preload includes kbResetWikiAndKeywords.')
+        return
+      }
+      const r = await window.api.kbResetWikiAndKeywords()
+      setWikiSelectedId(null)
+      setWikiTitle('')
+      setWikiBody('')
+      setWikiGlossary([])
+      setWikiRelated([])
+      setWikiSearchQuery('')
+      setWikiSearchHits([])
+      setPromptDomains([])
+      setPromptDomainSuffixDrafts({})
+      setRagSnippets([])
+      setRagQuery('')
+      setTrainKbSelected({})
+      await loadWiki()
+      void window.api.promptDomainsList().then(setPromptDomains).catch(() => {})
+      void loadKnowledgeGraph()
+      setSettingsMaintenanceMessage(
+        `Removed ${r.sourcesRemoved} knowledge source${r.sourcesRemoved === 1 ? '' : 's'} (wiki entries, chunks, and search index) and cleared ${r.promptDomainsRemoved} prompt domain${r.promptDomainsRemoved === 1 ? '' : 's'} (including all domain–message links). Chats and model files were not changed.`
+      )
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setSettingsMaintenanceBusy(false)
+    }
+  }, [loadKnowledgeGraph, loadWiki])
+
   useEffect(() => {
     const mq720 = window.matchMedia('(min-width: 721px)')
     const mq1100 = window.matchMedia('(min-width: 1101px)')
@@ -2614,10 +2781,32 @@ export default function App(): React.ReactElement {
       const comfort = parseTypographyComfort(c.typographyComfort)
       setTypographyComfort(comfort)
       applyTypographyComfortToDocument(comfort)
+      const font = parseTypographyFontFamily(c.typographyFontFamily)
+      const lh = parseTypographyLineHeightFactor(c.typographyLineHeightFactor)
+      const le = parseTypographyLetterSpacingExtraEm(c.typographyLetterSpacingExtraEm)
+      const ws = parseTypographyWordSpacingEm(c.typographyWordSpacingEm)
+      typographyFontLiveRef.current = font
+      typographyLineHeightLiveRef.current = lh
+      typographyLetterExtraLiveRef.current = le
+      typographyWordSpacingLiveRef.current = ws
+      setTypographyFontFamily(font)
+      setTypographyLineHeightFactor(lh)
+      setTypographyLetterSpacingExtraEm(le)
+      setTypographyWordSpacingEm(ws)
       if (typeof c.chatMaxTokens === 'number') {
         setChatMaxTokensDraft(String(clampChatMaxTokens(c.chatMaxTokens)))
       }
       setWikiAutoExtract(c.wikiAutoExtract !== false)
+      setChatResponsePostProcess(c.chatResponsePostProcess !== false)
+      setDeepLearnEnabled(c.deepLearnEnabled !== false)
+      if (typeof c.deepLearnMaxRounds === 'number' && Number.isFinite(c.deepLearnMaxRounds)) {
+        setDeepLearnMaxRoundsDraft(String(Math.min(24, Math.max(1, Math.floor(c.deepLearnMaxRounds)))))
+      }
+      if (typeof c.deepLearnMaxFetchBytes === 'number' && Number.isFinite(c.deepLearnMaxFetchBytes)) {
+        setDeepLearnMaxFetchBytesDraft(
+          String(Math.min(8_000_000, Math.max(4096, Math.floor(c.deepLearnMaxFetchBytes))))
+        )
+      }
       if (typeof c.agenticWorkersEnabled === 'boolean') setAgenticWorkersEnabled(c.agenticWorkersEnabled)
       if (typeof c.agentRemoteOllamaUrl === 'string') setAgentRemoteOllamaUrlDraft(c.agentRemoteOllamaUrl)
       if (typeof c.integrationListenEnabled === 'boolean') setIntegrationListenEnabled(c.integrationListenEnabled)
@@ -2694,6 +2883,38 @@ export default function App(): React.ReactElement {
   }, [refreshPaths, loadConversations, loadWiki, refreshRuntimeStatus, applyRuntimeInstallPaths])
 
   useEffect(() => {
+    return window.api.onAppUpdateStatus((p: AppUpdateStatusPayload) => {
+      if (p.phase === 'idle') {
+        setAppUpdateLine(null)
+        return
+      }
+      if (p.phase === 'checking') {
+        setAppUpdateLine('Checking for updates…')
+        return
+      }
+      if (p.phase === 'not_available') {
+        setAppUpdateLine(`You're up to date (v${p.currentVersion}).`)
+        return
+      }
+      if (p.phase === 'available') {
+        setAppUpdateLine(`Update v${p.version} is available; downloading…`)
+        return
+      }
+      if (p.phase === 'downloading') {
+        setAppUpdateLine(`Downloading update… ${Math.round(p.percent)}%`)
+        return
+      }
+      if (p.phase === 'downloaded') {
+        setAppUpdateLine(`Update v${p.version} is ready. Confirm the restart dialog to finish installing.`)
+        return
+      }
+      if (p.phase === 'error') {
+        setAppUpdateLine(p.message)
+      }
+    })
+  }, [])
+
+  useEffect(() => {
     const next = clampMainViewForLayout(mainView, roleLayoutResolved, devShellChrome)
     if (next !== mainView) setMainView(next)
   }, [mainView, roleLayoutResolved, devShellChrome])
@@ -2701,6 +2922,15 @@ export default function App(): React.ReactElement {
   useLayoutEffect(() => {
     setViewToastNavigation({ activeMainView: mainView, openDrawer: drawer })
   }, [mainView, drawer])
+
+  useLayoutEffect(() => {
+    applyTypographyFineTuneToDocument({
+      fontFamily: typographyFontFamily,
+      lineHeightFactor: typographyLineHeightFactor,
+      letterSpacingExtraEm: typographyLetterSpacingExtraEm,
+      wordSpacingEm: typographyWordSpacingEm
+    })
+  }, [typographyFontFamily, typographyLineHeightFactor, typographyLetterSpacingExtraEm, typographyWordSpacingEm])
 
   useEffect(() => {
     const onVis = (): void => {
@@ -2785,6 +3015,13 @@ export default function App(): React.ReactElement {
       window.clearInterval(modelsId)
     }
   }, [drawer, refreshRunDrawer, refreshRunDrawerQuick, refreshLocalModelFiles])
+
+  useEffect(() => {
+    if (!setupTourOpen) return
+    void refreshRunDrawerQuick()
+    const id = window.setInterval(() => void refreshRunDrawerQuick(), 2000)
+    return () => window.clearInterval(id)
+  }, [setupTourOpen, refreshRunDrawerQuick])
 
   useEffect(() => {
     if (drawer !== 'runtime') return
@@ -2930,6 +3167,15 @@ export default function App(): React.ReactElement {
     setTypographyComfort(id)
     applyTypographyComfortToDocument(id)
     await window.api.setConfig({ typographyComfort: id })
+  }, [])
+
+  const persistTypographyTuneConfig = useCallback(() => {
+    void window.api.setConfig({
+      typographyFontFamily: typographyFontLiveRef.current,
+      typographyLineHeightFactor: typographyLineHeightLiveRef.current,
+      typographyLetterSpacingExtraEm: typographyLetterExtraLiveRef.current,
+      typographyWordSpacingEm: typographyWordSpacingLiveRef.current
+    })
   }, [])
 
   useEffect(() => {
@@ -3350,6 +3596,15 @@ export default function App(): React.ReactElement {
     if (drawer === 'train' || mainView === 'train') {
       void window.api.trainListJobs().then((j) => setTrainJobs(j as TrainJob[]))
       void window.api.kbSources().then((s) => setTrainKbSources((s as KbSource[]) ?? []))
+      void window.api
+        .kbWikiTopics()
+        .then((t) => setWikiTopics((t as WikiTopic[]) ?? []))
+        .catch(() => {})
+      void window.api.promptDomainsList().then(setPromptDomains).catch(() => {})
+      void window.api.trainReviewQueue({ limit: 120 }).then((rows) => setTrainReviewQueue(rows)).catch(() => {})
+      void window.api.trainDomainProfilesList().then((rows) => setTrainDomainProfiles(rows)).catch(() => {})
+      void window.api.trainDomainModelVersions().then((rows) => setTrainDomainModelVersions(rows)).catch(() => {})
+      void refreshLocalModelFiles()
     }
     if (drawer === 'hf') {
       setHfLibraryMode('recommended')
@@ -3368,6 +3623,21 @@ export default function App(): React.ReactElement {
         .finally(() => setRecommendedLoading(false))
     }
   }, [drawer, mainView, refreshDownloadsList, refreshLocalModelFiles, refreshOllamaChatTags])
+
+  useEffect(() => {
+    if (!(drawer === 'train' || mainView === 'train')) return
+    void window.api
+      .trainReviewQueue({
+        limit: 120,
+        ...(trainSelectedDomainId ? { domainId: trainSelectedDomainId } : {})
+      })
+      .then((rows) => setTrainReviewQueue(rows))
+      .catch(() => {})
+    void window.api
+      .trainDomainModelVersions(trainSelectedDomainId ? { domainId: trainSelectedDomainId } : {})
+      .then((rows) => setTrainDomainModelVersions(rows))
+      .catch(() => {})
+  }, [drawer, mainView, trainSelectedDomainId])
 
   useEffect(() => {
     if (drawer !== 'hf') return
@@ -3823,6 +4093,19 @@ export default function App(): React.ReactElement {
     if (picked) setModelsInstallPathDraft(picked)
   }
 
+  function deepLearnResume(jobId: string, action: 'continue' | 'finish', followUp?: string): void {
+    void window.api.kbDeepLearnResume({ jobId, action, followUp })
+    setDeepLearnUi((prev) =>
+      prev && prev.jobId === jobId
+        ? {
+            ...prev,
+            awaiting: undefined,
+            label: action === 'finish' ? 'Finishing and saving…' : 'Continuing research…'
+          }
+        : prev
+    )
+  }
+
   async function sendChat(override?: { text?: string }): Promise<void> {
     const userText = typeof override?.text === 'string' ? override.text.trim() : draft.trim()
     if (!convId || !userText || chatSending) return
@@ -3915,13 +4198,18 @@ export default function App(): React.ReactElement {
     }
     setChatTurnNotice(notices.length > 0 ? notices.join(' ') : null)
 
-    async function finishAssistantMessage(replyRaw: string): Promise<void> {
+    async function finishAssistantMessage(
+      replyRaw: string,
+      opts?: { skipWikiExtract?: boolean }
+    ): Promise<void> {
       const { visible: replyVisible, patches: ambiancePatches, journalTexts } = stripModelProfileMarkers(replyRaw)
+      const replyFinal =
+        chatResponsePostProcess !== false ? postProcessAssistantChatMarkdown(replyVisible) : replyVisible
       const snap = activityChatTokensRef.current
       await window.api.messageAppend(
         conversationId,
         'assistant',
-        replyVisible,
+        replyFinal,
         undefined,
         snap
           ? {
@@ -3957,19 +4245,142 @@ export default function App(): React.ReactElement {
         return next
       })
       const convTitle = conversations.find((c) => c.id === conversationId)?.title
-      void window.api
-        .kbWikiExtractTurn({
-          conversationId: conversationId,
-          conversationTitle: convTitle,
-          userMessage: userText,
-          assistantMessage: replyVisible
+      if (!opts?.skipWikiExtract) {
+        void window.api
+          .kbWikiExtractTurn({
+            conversationId: conversationId,
+            conversationTitle: convTitle,
+            userMessage: userText,
+            assistantMessage: replyFinal
+          })
+          .then((r) => {
+            if (r.ok && r.skipped === false && r.sourceId) void loadWiki()
+          })
+          .catch(() => {
+            /* extraction is best-effort */
+          })
+      }
+    }
+
+    const deepIntent = parseDeepLearnIntent(userText)
+    if (deepIntent.isDeepLearn && deepLearnEnabled) {
+      const parsedRounds = parseInt(deepLearnMaxRoundsDraft.trim(), 10)
+      const roundsCap = Math.min(24, Math.max(1, Number.isFinite(parsedRounds) ? parsedRounds : 5))
+      const urlLines =
+        deepIntent.candidateUrls.length > 0
+          ? deepIntent.candidateUrls.map((u) => `• ${u}`).join('\n')
+          : '(No http(s) links in this message — nothing will be downloaded.)'
+      const detail = [
+        `Topic: ${deepIntent.subject}`,
+        '',
+        `This runs up to ${roundsCap} research pass(es) on your local model (each pass uses completion tokens from Settings → Max response tokens).`,
+        '',
+        deepIntent.candidateUrls.length > 0
+          ? 'The app will request these URLs from the main process only after you confirm. Localhost and private-network hosts are blocked.\n\n' + urlLines
+          : urlLines
+      ].join('\n')
+      const startOk = await window.api.confirmDestructive({
+        message: 'Start deep research and save a wiki article?',
+        detail,
+        confirmLabel: 'Start deep research'
+      })
+      if (startOk) {
+        const jobId =
+          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+        setChatSending(true)
+        setStreamingReplyStartedAt(Date.now())
+        setChatStreamBuffer('')
+        setDeepLearnUi({ jobId, label: 'Starting deep research…' })
+        activityChatTokensRef.current = null
+        setActivityChatTokens(null)
+        const offDl = window.api.onDeepLearnProgress((ev) => {
+          if (ev.jobId !== jobId) return
+          if (ev.kind === 'fetch') {
+            setDeepLearnUi({ jobId, label: `Fetching ${ev.url}…`, awaiting: undefined })
+          } else if (ev.kind === 'round') {
+            setDeepLearnUi({
+              jobId,
+              label: `Research round ${ev.round}/${ev.maxRounds}…`,
+              awaiting: undefined
+            })
+          } else if (ev.kind === 'roundAwaitChoice') {
+            setDeepLearnUi({
+              jobId,
+              label: `Round ${ev.roundCompleted} complete${
+                ev.modelSuggestsDone ? ' — model suggests wrapping up' : ''
+              }. Choose how to proceed.`,
+              awaiting: {
+                paths: ev.explorePaths,
+                roundCompleted: ev.roundCompleted,
+                maxRounds: ev.maxRounds,
+                canContinueMore: ev.canContinueMore,
+                modelSuggestsDone: ev.modelSuggestsDone
+              }
+            })
+          } else if (ev.kind === 'ingest') {
+            setDeepLearnUi({ jobId, label: 'Saving to knowledge wiki…', awaiting: undefined })
+          } else if (ev.kind === 'cancelled') {
+            setDeepLearnUi({ jobId, label: 'Cancelled.', awaiting: undefined })
+          }
         })
-        .then((r) => {
-          if (r.ok && r.skipped === false && r.sourceId) void loadWiki()
-        })
-        .catch(() => {
-          /* extraction is best-effort */
-        })
+        try {
+          const res = await window.api.kbDeepLearnRun({
+            jobId,
+            conversationId,
+            subject: deepIntent.subject,
+            userMessage: userText,
+            approvedFetchUrls: deepIntent.candidateUrls
+          })
+          if (res.ok) {
+            const fetchNote =
+              res.fetchErrors && res.fetchErrors.length
+                ? `\n\nSome URLs failed to download (see the **Fetch notes** section in the new wiki page):\n${res.fetchErrors.map((e) => `- ${e}`).join('\n')}`
+                : ''
+            const exploreNote =
+              res.lastExplorePaths && res.lastExplorePaths.length > 0
+                ? `\n\n**Suggested paths for your next message** (copy a line into the composer):\n${res.lastExplorePaths
+                    .map((p) => `- Learn everything about **${p.label}**`)
+                    .join('\n')}`
+                : ''
+            const assistantText = [
+              `Deep research finished and saved **${res.title}** (${res.roundsUsed} model round(s)).`,
+              'Open **Knowledge wiki** to read the full article; open **Graph** in the sidebar to see this source in the knowledge graph.',
+              fetchNote,
+              exploreNote
+            ].join('\n')
+            await finishAssistantMessage(assistantText, { skipWikiExtract: true })
+            void loadWiki()
+            void loadKnowledgeGraph()
+          } else if (res.cancelled) {
+            setErr('Deep research was cancelled.')
+            setUserPromptReceipts((prev) => {
+              const cur = prev[receiptKey] ?? { delivered: false, responseStarted: false }
+              return { ...prev, [receiptKey]: { ...cur, failed: true } }
+            })
+          } else {
+            setErr(res.error || 'Deep research failed.')
+            setUserPromptReceipts((prev) => {
+              const cur = prev[receiptKey] ?? { delivered: false, responseStarted: false }
+              return { ...prev, [receiptKey]: { ...cur, failed: true } }
+            })
+          }
+        } catch (e) {
+          setErr(humanizeChatError(String(e)))
+          setUserPromptReceipts((prev) => {
+            const cur = prev[receiptKey] ?? { delivered: false, responseStarted: false }
+            return { ...prev, [receiptKey]: { ...cur, failed: true } }
+          })
+        } finally {
+          offDl()
+          setDeepLearnUi(null)
+          setChatSending(false)
+          setStreamingReplyStartedAt(null)
+          setChatStreamBuffer('')
+        }
+        return
+      }
     }
 
     const useAgentic = agenticWorkersEnabled && runtimeStatus.kind === 'ollama'
@@ -4220,11 +4631,15 @@ export default function App(): React.ReactElement {
     try {
       const reply = await window.api.runtimeChat(msgs, requestId)
       await finishAssistantMessage(reply)
+      const replyForRagCheck = (() => {
+        const v = stripModelProfileMarkers(reply).visible
+        return chatResponsePostProcess !== false ? postProcessAssistantChatMarkdown(v) : v
+      })()
       if (
         runtimeStatus.kind === 'llamacpp' &&
         llamaRagGrounding &&
         ragSnippets.length > 0 &&
-        ragReplyMissingSnippetCitations(stripModelProfileMarkers(reply).visible, ragSnippets.length)
+        ragReplyMissingSnippetCitations(replyForRagCheck, ragSnippets.length)
       ) {
         setChatTurnNotice((prev) => {
           const extra =
@@ -4486,21 +4901,29 @@ export default function App(): React.ReactElement {
       ? 'Developer hub'
       : mainView === 'wiki'
         ? 'Knowledge wiki'
-        : mainView === 'architectureRepository'
-          ? 'Architecture Repository'
-          : mainView === 'train'
-            ? 'Training'
-            : 'Chat'
+        : mainView === 'knowledgeGraph'
+          ? 'Knowledge graph'
+          : mainView === 'codebaseLandscape'
+            ? 'Codebase landscape'
+            : mainView === 'architectureRepository'
+              ? 'Architecture Repository'
+              : mainView === 'train'
+                ? 'Training'
+                : 'Chat'
   const topSub =
     mainView === 'electronDev'
       ? 'Bridge, shortcuts, and IntelliJ plugin checklist.'
       : mainView === 'wiki'
         ? 'Browse sources built from files you ingest. Link snippets in chat.'
-        : mainView === 'architectureRepository'
-          ? 'TOGAF-aligned catalogs, live architecture data, and workspace evidence (Software architect).'
-          : mainView === 'train'
-            ? 'Fine-tune from knowledge or JSONL; jobs write into finetunes for Run.'
-            : ''
+        : mainView === 'knowledgeGraph'
+          ? 'Sources, chunks, wiki pages, and weak related links. Pan and zoom the canvas; use Layers for toggles and analysis.'
+          : mainView === 'codebaseLandscape'
+            ? 'Implementation roots you track here, with tool-backed formal verification history per tree.'
+            : mainView === 'architectureRepository'
+              ? 'TOGAF-aligned catalogs, live architecture data, and workspace evidence (Software architect).'
+              : mainView === 'train'
+                ? 'Fine-tune from knowledge or JSONL; jobs write into finetunes for Run.'
+                : ''
   const integrationPortLive = (() => {
     const n = parseInt(integrationPortDraft.trim(), 10)
     return Number.isFinite(n) ? clampIntegrationPort(n) : INTEGRATION_PORT_DEFAULT
@@ -4581,10 +5004,59 @@ export default function App(): React.ReactElement {
     return 'Starting llama-server…\n\nStatus lines will appear here (stdout, stderr, and health checks).'
   }, [runtimeLoadLog, runtimeStarting, modelPath, localModelFilePaths, winPlatform, runtimeLoadProgress])
 
+  const trainGgufModelPaths = useMemo(
+    () => localModelFilePaths.filter((p) => /\.gguf$/i.test(p)),
+    [localModelFilePaths]
+  )
+
+  const setTrainReviewStatus = useCallback(async (cardId: string, status: 'pending' | 'approved' | 'rejected') => {
+    await window.api.trainReviewSetStatus({ cardId, status })
+    const rows = await window.api.trainReviewQueue({
+      limit: 120,
+      ...(trainSelectedDomainId ? { domainId: trainSelectedDomainId } : {})
+    })
+    setTrainReviewQueue(rows)
+  }, [trainSelectedDomainId])
+
+  const previewTrainManifest = useCallback(
+    async (args: { baseModelPath: string; datasetPath: string; domainId?: string; sourceIds?: string[] }) => {
+      const manifest = await window.api.trainManifestPreview({
+        baseModelPath: args.baseModelPath,
+        datasetPath: args.datasetPath,
+        outputDir: 'pending-job-output',
+        ...(args.domainId ? { domainId: args.domainId } : {}),
+        ...(args.sourceIds ? { sourceIds: args.sourceIds } : {})
+      })
+      setTrainManifestPreviewMarkdown(manifest.previewMarkdown)
+    },
+    []
+  )
+
+  const createDomainProfileFromPromptDomain = useCallback(async (name: string, terms: string[]) => {
+    const profile = await window.api.trainDomainProfileUpsert({
+      name,
+      terminology: terms.filter((t) => t.trim()).slice(0, 40),
+      objective: `Refine model quality for ${name}`,
+      allowedSources: ['electron', 'intellij-plugin'],
+      retentionDays: 180
+    })
+    const list = await window.api.trainDomainProfilesList()
+    setTrainDomainProfiles(list)
+    setTrainSelectedDomainId(profile.id)
+  }, [])
+
   const trainPanel = (
     <TrainMainView
       trainJobs={trainJobs}
       trainKbSources={trainKbSources}
+      wikiTopics={wikiTopics}
+      promptDomains={promptDomains}
+      ragGroundingEnabled={llamaRagGrounding}
+      trainGgufModelPaths={trainGgufModelPaths}
+      comparePathsCaseInsensitive={winPlatform}
+      onOpenChatForAugment={openTrainChatForAugment}
+      onOpenWiki={openTrainWiki}
+      onOpenPromptDomainSettings={openTrainPromptDomainSettings}
       trainKbSelected={trainKbSelected}
       setTrainKbSelected={setTrainKbSelected}
       trainBase={trainBase}
@@ -4596,6 +5068,19 @@ export default function App(): React.ReactElement {
       trainStartBusy={trainStartBusy}
       setTrainStartBusy={setTrainStartBusy}
       setTrainJobs={setTrainJobs}
+      domainProfiles={trainDomainProfiles}
+      selectedDomainId={trainSelectedDomainId}
+      setSelectedDomainId={setTrainSelectedDomainId}
+      onCreateDomainProfile={createDomainProfileFromPromptDomain}
+      reviewQueue={trainReviewQueue}
+      onReviewSetStatus={setTrainReviewStatus}
+      onManifestPreview={previewTrainManifest}
+      manifestPreviewMarkdown={trainManifestPreviewMarkdown}
+      domainModelVersions={
+        trainSelectedDomainId
+          ? trainDomainModelVersions.filter((v) => v.domainId === trainSelectedDomainId)
+          : trainDomainModelVersions
+      }
       setErr={setErr}
     />
   )
@@ -4637,7 +5122,13 @@ export default function App(): React.ReactElement {
       <div className={shellChromeClass}>
       <aside className="nav-rail" aria-label="Primary navigation">
         <div className="nav-brand" title="Local LLM Desktop — private chat on your computer">
-          <img src="/app-icon.png" alt="" width={44} height={44} decoding="async" />
+          <img
+            src={`${import.meta.env.BASE_URL}app-icon.png`}
+            alt=""
+            width={44}
+            height={44}
+            decoding="async"
+          />
         </div>
         <nav className="nav-main">
           {roleLayoutResolved.mainViews.map((id) => {
@@ -4697,6 +5188,37 @@ export default function App(): React.ReactElement {
                 >
                   <IconFlask />
                   Train
+                </button>
+              )
+            }
+            if (id === 'knowledgeGraph') {
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  className={`nav-btn ${mainView === 'knowledgeGraph' ? 'active' : ''}`}
+                  onClick={() => {
+                    setMainView('knowledgeGraph')
+                    void loadKnowledgeGraph()
+                  }}
+                  title="Knowledge graph — sources, chunks, wiki pages, related links"
+                >
+                  <i className="fa-solid fa-diagram-project" aria-hidden />
+                  Graph
+                </button>
+              )
+            }
+            if (id === 'codebaseLandscape') {
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  className={`nav-btn ${mainView === 'codebaseLandscape' ? 'active' : ''}`}
+                  onClick={() => setMainView('codebaseLandscape')}
+                  title="Codebases — registered roots and formal verification results"
+                >
+                  <i className="fa-solid fa-layer-group" aria-hidden />
+                  Codebases
                 </button>
               )
             }
@@ -5253,7 +5775,25 @@ export default function App(): React.ReactElement {
 
         {err && <div className="err-banner">{err}</div>}
 
-        <SetupRoleTour open={setupTourOpen} initialRole={parseUiRoleOrDefault(uiRole)} onComplete={onSetupTourComplete} />
+        <SetupRoleTour
+          open={setupTourOpen}
+          initialRole={parseUiRoleOrDefault(uiRole)}
+          initialColorScheme={colorScheme}
+          runtime={{
+            ollamaReachable: ollamaHost?.reachable ?? null,
+            ollamaBaseUrl: ollamaHost?.baseUrl?.trim() || ollamaBaseUrlDraft.trim() || OLLAMA_BASE_DEFAULT,
+            onRefreshProbe: () => void refreshRunDrawerQuick(),
+            onInstallOllama: () => void runOllamaInstall(),
+            installBusy: ollamaInstallBusy,
+            installLog: ollamaInstallLog,
+            installNote: ollamaInstallNote,
+            installNoteKind: ollamaInstallNoteKind,
+            llamaDetected: llamaEnv?.detected ?? false,
+            llamaBinaryValid: llamaEnv?.binaryValid ?? false,
+            llamaValidateError: llamaEnv?.validateError ?? null
+          }}
+          onComplete={onSetupTourComplete}
+        />
 
         {welcomeModalOpen && (
           <div
@@ -5637,46 +6177,158 @@ export default function App(): React.ReactElement {
                     )
                   })}
                   {chatSending ? (
-                    <div className="msg-row assistant">
-                      <div className="msg-bubble msg-bubble--streaming">
-                        <div className="msg-bubble-top">
-                          <div
-                            className="msg-role"
-                            title={
-                              runtimeStatus?.running && runtimeStatus.modelPath
-                                ? runtimeStatus.modelPath
-                                : undefined
-                            }
-                          >
-                            {assistantResponderLabel}
+                    deepLearnUi ? (
+                      <div className="msg-deep-learn-session">
+                        <div className="msg-row assistant msg-row--deep-learn-stream">
+                          <div className="msg-bubble msg-bubble--streaming msg-bubble--deep-learn">
+                            <div className="msg-bubble-top">
+                              <div
+                                className="msg-role"
+                                title={
+                                  runtimeStatus?.running && runtimeStatus.modelPath
+                                    ? runtimeStatus.modelPath
+                                    : undefined
+                                }
+                              >
+                                {assistantResponderLabel}
+                                <span className="msg-role-deep-learn-mark" aria-hidden>
+                                  {' '}
+                                  · deep research
+                                </span>
+                              </div>
+                              {streamingReplyStartedAt != null ? (
+                                <time
+                                  className="msg-time"
+                                  dateTime={new Date(streamingReplyStartedAt).toISOString()}
+                                  title={chatTimeTitle(streamingReplyStartedAt)}
+                                >
+                                  {formatChatTimestamp(streamingReplyStartedAt)}
+                                </time>
+                              ) : null}
+                            </div>
+                            <div className="msg-rich msg-bubble--deep-learn-status">
+                              <p className="msg-bubble--deep-learn-status-line">{deepLearnUi.label}</p>
+                              {!deepLearnUi.awaiting ? (
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  style={{ marginTop: 8 }}
+                                  onClick={() => void window.api.kbDeepLearnCancel({ jobId: deepLearnUi.jobId })}
+                                >
+                                  Cancel research
+                                </button>
+                              ) : null}
+                            </div>
+                            {activityChatTokens ? (
+                              <div className="msg-token-foot">{streamingTokenFoot(activityChatTokens)}</div>
+                            ) : null}
                           </div>
-                          {streamingReplyStartedAt != null ? (
-                            <time
-                              className="msg-time"
-                              dateTime={new Date(streamingReplyStartedAt).toISOString()}
-                              title={chatTimeTitle(streamingReplyStartedAt)}
-                            >
-                              {formatChatTimestamp(streamingReplyStartedAt)}
-                            </time>
-                          ) : null}
                         </div>
-                        {chatStreamBuffer ? (
-                          <ChatRichContent
-                            content={stripChatAssistantVisibleMarkers(
-                              stripPartialProfileStreamTail(chatStreamBuffer)
-                            )}
-                            plainStreaming
-                            wikiHighlightTerms={wikiHighlightTerms}
-                            onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
-                          />
-                        ) : (
-                          <FloatingDots label="Generating reply" />
-                        )}
-                        {activityChatTokens ? (
-                          <div className="msg-token-foot">{streamingTokenFoot(activityChatTokens)}</div>
+                        {deepLearnUi.awaiting ? (
+                          <div className="deep-learn-continuation-wrap">
+                            <div
+                              className="deep-learn-continuation-blob"
+                              role="region"
+                              aria-label="Deep research: choose how to continue"
+                            >
+                              <p className="deep-learn-continuation-blob-head">Round complete — next steps</p>
+                              <p className="muted deep-learn-continuation-hint">
+                                Pick a suggested angle for the next model pass, continue without extra focus, or finish
+                                and save the draft to your wiki.
+                              </p>
+                              {deepLearnUi.awaiting.paths.length > 0 ? (
+                                <ul className="deep-learn-continuation-paths" aria-label="Suggested investigation paths">
+                                  {deepLearnUi.awaiting.paths.map((p, idx) => (
+                                    <li key={idx}>
+                                      <button
+                                        type="button"
+                                        className="btn-secondary"
+                                        title={p.prompt}
+                                        onClick={() =>
+                                          deepLearnResume(deepLearnUi.jobId, 'continue', p.prompt)
+                                        }
+                                      >
+                                        {p.label}
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : null}
+                              <div className="deep-learn-continuation-actions">
+                                {deepLearnUi.awaiting.canContinueMore ? (
+                                  <button
+                                    type="button"
+                                    className="btn-secondary"
+                                    onClick={() => deepLearnResume(deepLearnUi.jobId, 'continue')}
+                                  >
+                                    Continue next round
+                                  </button>
+                                ) : (
+                                  <span className="muted" style={{ fontSize: 12 }}>
+                                    Max rounds reached for this run.
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn-send"
+                                  onClick={() => deepLearnResume(deepLearnUi.jobId, 'finish')}
+                                >
+                                  Finish and save to wiki
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  onClick={() => void window.api.kbDeepLearnCancel({ jobId: deepLearnUi.jobId })}
+                                >
+                                  Cancel research
+                                </button>
+                              </div>
+                            </div>
+                          </div>
                         ) : null}
                       </div>
-                    </div>
+                    ) : (
+                      <div className="msg-row assistant">
+                        <div className="msg-bubble msg-bubble--streaming">
+                          <div className="msg-bubble-top">
+                            <div
+                              className="msg-role"
+                              title={
+                                runtimeStatus?.running && runtimeStatus.modelPath
+                                  ? runtimeStatus.modelPath
+                                  : undefined
+                              }
+                            >
+                              {assistantResponderLabel}
+                            </div>
+                            {streamingReplyStartedAt != null ? (
+                              <time
+                                className="msg-time"
+                                dateTime={new Date(streamingReplyStartedAt).toISOString()}
+                                title={chatTimeTitle(streamingReplyStartedAt)}
+                              >
+                                {formatChatTimestamp(streamingReplyStartedAt)}
+                              </time>
+                            ) : null}
+                          </div>
+                          {chatStreamBuffer ? (
+                            <ChatRichContent
+                              content={stripChatAssistantVisibleMarkers(
+                                stripPartialProfileStreamTail(chatStreamBuffer)
+                              )}
+                              plainStreaming
+                              wikiHighlightTerms={wikiHighlightTerms}
+                              onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
+                            />
+                          ) : (
+                            <FloatingDots label="Generating reply" />
+                          )}
+                          {activityChatTokens ? (
+                            <div className="msg-token-foot">{streamingTokenFoot(activityChatTokens)}</div>
+                          ) : null}
+                        </div>
+                      </div>
+                    )
                   ) : null}
                   <div ref={messagesEndRef} />
                 </div>
@@ -5688,11 +6340,56 @@ export default function App(): React.ReactElement {
                     </div>
                   ) : null}
                   {chatSending ? (
-                    <div className="chat-generating-floater" aria-live="polite">
-                      <FloatingDots label="Generating reply" />
+                    <div
+                      className={`chat-generating-floater${deepLearnUi ? ' chat-generating-floater--deep-learn' : ''}`}
+                      aria-live="polite"
+                    >
+                      <FloatingDots label={deepLearnUi ? deepLearnUi.label : 'Generating reply'} />
                       <span className="chat-generating-floater-label">
-                        {chatStreamBuffer ? 'Streaming reply…' : 'Waiting for reply…'}
+                        {deepLearnUi
+                          ? deepLearnUi.label
+                          : chatStreamBuffer
+                            ? 'Streaming reply…'
+                            : 'Waiting for reply…'}
                       </span>
+                      {deepLearnUi?.awaiting ? (
+                        <span className="chat-generating-floater-actions" style={{ marginLeft: 8 }}>
+                          <button
+                            type="button"
+                            className="btn-send"
+                            style={{ marginRight: 6 }}
+                            onClick={() => deepLearnResume(deepLearnUi.jobId, 'finish')}
+                          >
+                            Finish
+                          </button>
+                          {deepLearnUi.awaiting.canContinueMore ? (
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              style={{ marginRight: 6 }}
+                              onClick={() => deepLearnResume(deepLearnUi.jobId, 'continue')}
+                            >
+                              Next round
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            onClick={() => void window.api.kbDeepLearnCancel({ jobId: deepLearnUi.jobId })}
+                          >
+                            Cancel
+                          </button>
+                        </span>
+                      ) : deepLearnUi ? (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ marginLeft: 10 }}
+                          onClick={() => void window.api.kbDeepLearnCancel({ jobId: deepLearnUi.jobId })}
+                        >
+                          Cancel
+                        </button>
+                      ) : null}
                     </div>
                   ) : null}
                   <div className="composer-toolbar">
@@ -5914,7 +6611,7 @@ export default function App(): React.ReactElement {
                       Knowledge graph
                     </button>
                     <p className="muted kb-sidebar-graph-cta-hint">
-                      Browse how sources, chunks, and wiki pages link — and run graph analysis — in the Wiki view.
+                      Browse how sources, chunks, and wiki pages link — and run graph analysis — in the Graph view.
                     </p>
                   </div>
                 </div>
@@ -6024,77 +6721,22 @@ export default function App(): React.ReactElement {
                       type="button"
                       className="btn-secondary btn-wiki-kgraph"
                       onClick={() => void openKnowledgeGraph()}
-                      title="Scroll to the knowledge graph and refresh its data"
+                      title="Open the knowledge graph view and refresh its data"
                     >
                       <i className="fa-solid fa-diagram-project" aria-hidden style={{ marginRight: 6, opacity: 0.8 }} />
                       Knowledge graph
                     </button>
+                    <button
+                      type="button"
+                      className="btn-secondary btn-wiki-reset"
+                      disabled={settingsMaintenanceBusy !== false}
+                      title="Opens confirmation — removes every library entry and all chat prompt domains"
+                      onClick={() => setSettingsConfirmKind('wikiReset')}
+                    >
+                      <i className="fa-solid fa-book-skull" aria-hidden style={{ marginRight: 6, opacity: 0.85 }} />
+                      Reset wiki &amp; domains…
+                    </button>
                   </div>
-                </div>
-                <div className="wiki-prompt-domains">
-                  <h4 className="wiki-prompt-domains-title">Chat prompt domains</h4>
-                  <p className="wiki-prompt-domains-hint muted">
-                    Topic clusters inferred from your user prompts (keyword overlap). Optional per-domain system context
-                    is used only when Settings → Chat → “Domain-enhanced prompts” is enabled. Send a chat message to
-                    refresh this list.
-                  </p>
-                      {promptDomains.length === 0 ? (
-                    <p className="wiki-prompt-domains-empty muted">No domains yet.</p>
-                  ) : (
-                    <ul className="wiki-prompt-domains-list">
-                      {promptDomains.map((d) => (
-                        <li key={d.id}>
-                          <span className="wiki-prompt-domains-name">{d.title}</span>
-                          <span className="muted"> · {d.messageCount} prompts</span>
-                          {d.keywords.length > 0 ? (
-                            <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-                              {d.keywords.slice(0, 8).join(', ')}
-                              {d.keywords.length > 8 ? '…' : ''}
-                            </div>
-                          ) : null}
-                          <label className="muted" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
-                            Optional system context when this domain matches (max {MAX_PROMPT_DOMAIN_SUFFIX_CHARS}{' '}
-                            chars; used only if “Domain-enhanced prompts” is on in Settings → Chat)
-                            <textarea
-                              className="input"
-                              style={{
-                                display: 'block',
-                                width: '100%',
-                                maxWidth: 520,
-                                minHeight: 56,
-                                marginTop: 6,
-                                fontSize: 12
-                              }}
-                              value={promptDomainSuffixDrafts[d.id] ?? d.systemSuffix}
-                              onChange={(e) =>
-                                setPromptDomainSuffixDrafts((prev) => ({
-                                  ...prev,
-                                  [d.id]: e.target.value.slice(0, MAX_PROMPT_DOMAIN_SUFFIX_CHARS)
-                                }))
-                              }
-                              spellCheck={false}
-                              rows={3}
-                            />
-                          </label>
-                          <button
-                            type="button"
-                            className="btn-ghost-sm"
-                            style={{ marginTop: 6 }}
-                            onClick={() =>
-                              void window.api
-                                .promptDomainSetSuffix({
-                                  domainId: d.id,
-                                  systemSuffix: (promptDomainSuffixDrafts[d.id] ?? d.systemSuffix).trim()
-                                })
-                                .then(() => void loadWiki())
-                            }
-                          >
-                            Save domain context
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
                 </div>
                 <div className="wiki-topic-list">
                   {wikiTopics.length === 0 && (
@@ -6112,22 +6754,13 @@ export default function App(): React.ReactElement {
                             {WIKI_KIND_LABELS[kind]}
                           </p>
                           <div className="wiki-topic-group-list" role="group" aria-labelledby={`wiki-group-${kind}`}>
-                            {list.map((t) => (
-                              <div key={t.id} className="wiki-library-entry">
-                                <button
-                                  type="button"
-                                  className={`wiki-topic-btn ${wikiSelectedId === t.id ? 'active' : ''}`}
-                                  onClick={() => void openWikiPage(t.id)}
-                                >
-                                  {t.title}
-                                  <span className="wiki-topic-meta">{t.chunkCount} sections indexed</span>
-                                </button>
-                                <WikiEntryRemoveButton
-                                  ariaLabel={`Remove ${t.title} from wiki`}
-                                  onPress={() => setWikiDeletePending({ id: t.id, title: t.title })}
-                                />
-                              </div>
-                            ))}
+                            <WikiLibraryKindRows
+                              kind={kind}
+                              topics={list}
+                              wikiSelectedId={wikiSelectedId}
+                              onOpenPage={(id) => void openWikiPage(id)}
+                              onRequestRemove={(id, title) => setWikiDeletePending({ id, title })}
+                            />
                           </div>
                         </div>
                       )
@@ -6151,44 +6784,28 @@ export default function App(): React.ReactElement {
                                   role="group"
                                   aria-labelledby={`wiki-search-title-${kind}`}
                                 >
-                                  {list.map((t) => (
-                                    <div key={t.id} className="wiki-library-entry">
-                                      <button
-                                        type="button"
-                                        className={`wiki-topic-btn ${wikiSelectedId === t.id ? 'active' : ''}`}
-                                        onClick={() => void openWikiPage(t.id)}
-                                      >
-                                        {t.title}
-                                        <span className="wiki-topic-meta">
-                                          {t.chunkCount} sections indexed
-                                        </span>
-                                      </button>
-                                      <WikiEntryRemoveButton
-                                        ariaLabel={`Remove ${t.title} from wiki`}
-                                        onPress={() => setWikiDeletePending({ id: t.id, title: t.title })}
-                                      />
-                                    </div>
-                                  ))}
+                                  <WikiLibraryKindRows
+                                    kind={kind}
+                                    topics={list}
+                                    compact
+                                    wikiSelectedId={wikiSelectedId}
+                                    onOpenPage={(id) => void openWikiPage(id)}
+                                    onRequestRemove={(id, title) => setWikiDeletePending({ id, title })}
+                                  />
                                 </div>
                               </div>
                             )
                           })
-                        : wikiTitleMatchTopics.map((t) => (
-                            <div key={t.id} className="wiki-library-entry">
-                              <button
-                                type="button"
-                                className={`wiki-topic-btn ${wikiSelectedId === t.id ? 'active' : ''}`}
-                                onClick={() => void openWikiPage(t.id)}
-                              >
-                                {t.title}
-                                <span className="wiki-topic-meta">{t.chunkCount} sections indexed</span>
-                              </button>
-                              <WikiEntryRemoveButton
-                                ariaLabel={`Remove ${t.title} from wiki`}
-                                onPress={() => setWikiDeletePending({ id: t.id, title: t.title })}
-                              />
-                            </div>
-                          ))}
+                        : (
+                            <WikiLibraryKindRows
+                              kind={wikiTitleMatchTopics[0]?.kind ?? 'other'}
+                              topics={wikiTitleMatchTopics}
+                              compact
+                              wikiSelectedId={wikiSelectedId}
+                              onOpenPage={(id) => void openWikiPage(id)}
+                              onRequestRemove={(id, title) => setWikiDeletePending({ id, title })}
+                            />
+                          )}
                       {(wikiContentHits.length > 0 || wikiSearchBusy) && (
                         <p className="wiki-search-section-label">In content</p>
                       )}
@@ -6228,8 +6845,29 @@ export default function App(): React.ReactElement {
                   )}
                 </div>
               </nav>
-              <div className="wiki-main">
-              <article className="wiki-article">
+              <div className={`wiki-main${wikiTitle.trim() ? '' : ' wiki-main--landing'}`}>
+                {!wikiTitle.trim() ? (
+                  <div className="wiki-main-search-region">
+                    <div className="wiki-main-search-bar">
+                      <label htmlFor="wiki-main-search" className="wiki-main-search-label visually-hidden">
+                        Search library
+                      </label>
+                      <input
+                        ref={wikiMainSearchInputRef}
+                        id="wiki-main-search"
+                        type="search"
+                        className="wiki-search-input wiki-search-input--main"
+                        placeholder="Search titles and content…"
+                        value={wikiSearchQuery}
+                        onChange={(e) => setWikiSearchQuery(e.target.value)}
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-busy={wikiHasSearch && wikiSearchBusy}
+                      />
+                    </div>
+                  </div>
+                ) : null}
+              <article className={`wiki-article${wikiTitle.trim() ? '' : ' wiki-article--no-selection'}`}>
                 {wikiTitle ? (
                   <>
                     <div className="wiki-article-inner">
@@ -6252,10 +6890,6 @@ export default function App(): React.ReactElement {
                             ) : null}
                           </div>
                         </div>
-                        <p className="wiki-article-hatnote wiki-lead">
-                          Compiled from your ingested sources. Use <strong>Pull into chat</strong> from the Chat view
-                          to cite this material.
-                        </p>
                       </header>
 
                       <div className="wiki-article-main mw-parser-output">
@@ -6291,7 +6925,7 @@ export default function App(): React.ReactElement {
                         >
                           <h2 className="wiki-section-heading">See also</h2>
                           <p className="wiki-related-lead">
-                            Other library entries that share topical words with this article (links open in the wiki).
+                            Other library entries that overlap this topic by vocabulary (open to read in the wiki).
                           </p>
                           <ul className="wiki-related-list">
                             {wikiRelated.map((r) => (
@@ -6306,15 +6940,6 @@ export default function App(): React.ReactElement {
                                     {WIKI_KIND_LABELS[r.kind]}
                                   </span>
                                 </button>
-                                {r.sharedTerms.length > 0 ? (
-                                  <span className="wiki-related-terms">
-                                    {r.sharedTerms.map((term) => (
-                                      <span key={term} className="wiki-related-term-chip">
-                                        {term}
-                                      </span>
-                                    ))}
-                                  </span>
-                                ) : null}
                               </li>
                             ))}
                           </ul>
@@ -6322,55 +6947,34 @@ export default function App(): React.ReactElement {
                       ) : null}
                     </div>
                   </>
-                ) : (
-                  <div className="wiki-article-inner wiki-article-empty">
-                    <h1 className="wiki-article-title">Your wiki</h1>
-                    <p className="wiki-lead">
-                      Select a topic or add a document. Content is chunked and searchable from Chat. The{' '}
-                      <strong>Knowledge graph</strong> section below shows how sources, chunks, and wiki pages connect.
-                    </p>
-                    <button type="button" className="btn-secondary wiki-empty-kgraph-btn" onClick={() => void openKnowledgeGraph()}>
-                      <i className="fa-solid fa-diagram-project" aria-hidden style={{ marginRight: 8, opacity: 0.8 }} />
-                      Open knowledge graph
-                    </button>
-                  </div>
-                )}
+                ) : null}
               </article>
-              <section
-                className="wiki-graph-section"
-                aria-labelledby="wiki-knowledge-graph-heading"
-              >
-                <h2
-                  id="wiki-knowledge-graph-heading"
-                  className="wiki-graph-section-heading"
-                  tabIndex={-1}
-                >
-                  Knowledge graph
-                </h2>
-                <div className="wiki-graph-panel-wrap">
-                  <KnowledgeGraphView
-                    hideToolbarTitle
-                    data={kgPayload}
-                    loading={kgLoading}
-                    onRefresh={() => void loadKnowledgeGraph()}
-                    graphAnalysis={{
-                      busy: kgAnalysisBusy,
-                      error: kgAnalysisError,
-                      summary: kgAnalysisSummary,
-                      markdown: kgAnalysisMarkdown,
-                      ingestedId: kgAnalysisIngestedId,
-                      result: kgAnalysisResult
-                    }}
-                    onRunGraphAnalysis={(o) => void runKnowledgeGraphAnalysis(o)}
-                    onPickSource={(id) => {
-                      void openWikiPage(id)
-                    }}
-                  />
-                </div>
-              </section>
               </div>
             </div>
           )}
+
+          {mainView === 'knowledgeGraph' ? (
+            <div className="main-knowledge-graph-shell">
+              <KnowledgeGraphView
+                hideToolbarTitle
+                data={kgPayload}
+                loading={kgLoading}
+                onRefresh={() => void loadKnowledgeGraph()}
+                graphAnalysis={{
+                  busy: kgAnalysisBusy,
+                  error: kgAnalysisError,
+                  summary: kgAnalysisSummary,
+                  markdown: kgAnalysisMarkdown,
+                  ingestedId: kgAnalysisIngestedId,
+                  result: kgAnalysisResult
+                }}
+                onRunGraphAnalysis={(o) => void runKnowledgeGraphAnalysis(o)}
+                onPickSource={(id) => {
+                  void navigateChatKeywordToWiki(id)
+                }}
+              />
+            </div>
+          ) : null}
 
           {mainView === 'architectureRepository' ? (
             <div className="main-arch-repo-shell">
@@ -6380,7 +6984,8 @@ export default function App(): React.ReactElement {
                 onClearScanRoot={clearArchitectureRepositoryScanRoot}
                 integrationListenEnabled={integrationListenEnabled}
                 integrationPort={integrationPortLive}
-                wikiTopicCount={wikiTopics.length}
+                integrationTokenConfigured={integrationTokenDraft.trim().length > 0}
+                wikiTopics={wikiTopics}
                 kgNodeCount={kgPayload?.nodes.length ?? 0}
                 kgEdgeCount={kgPayload?.edges.length ?? 0}
                 kgLoading={kgLoading}
@@ -6388,11 +6993,19 @@ export default function App(): React.ReactElement {
                 onRefreshKnowledgeGraph={() => void loadKnowledgeGraph()}
                 hardwareSummary={hardwareSummary}
                 modelsDefaultPath={paths?.modelsDefault ?? null}
+                trainJobCount={trainJobs.length}
+                pluginReportCount={integrationPluginReports.length}
               />
             </div>
           ) : null}
 
           {mainView === 'train' ? <div className="main-train-shell">{trainPanel}</div> : null}
+
+          {mainView === 'codebaseLandscape' ? (
+            <div className="main-codebase-landscape-shell">
+              <CodebaseLandscapeView onOpenIntegrations={() => openSettings('integrations')} />
+            </div>
+          ) : null}
 
           {mainView === 'electronDev' && devShellChrome ? (
             <ElectronDevDashboard
@@ -7093,6 +7706,38 @@ export default function App(): React.ReactElement {
                         </h2>
                         <div className="drawer-section">
                           <h3 className="settings-section-title">
+                            <i className="fa-solid fa-box-open" aria-hidden />
+                            Application
+                          </h3>
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            Version <strong>{paths?.appVersion ?? '—'}</strong>
+                            {paths?.updatesSupported ? '' : ' · In-app updates apply to release installs only.'}
+                          </p>
+                          <div style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              disabled={!paths?.updatesSupported || appUpdateBusy}
+                              onClick={() => void runCheckForUpdates()}
+                            >
+                              {appUpdateBusy ? 'Checking…' : 'Check for updates'}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              onClick={() => void window.api.openExternalUrl('https://github.com/localllm/local-llm-desktop/releases')}
+                            >
+                              Release notes
+                            </button>
+                          </div>
+                          {appUpdateLine ? (
+                            <p className="muted" style={{ marginTop: 10, marginBottom: 0 }}>
+                              {appUpdateLine}
+                            </p>
+                          ) : null}
+                        </div>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title" id="settings-workspace-role-heading">
                             <i className="fa-solid fa-user-tag" aria-hidden />
                             Workspace role
                           </h3>
@@ -7100,30 +7745,37 @@ export default function App(): React.ReactElement {
                             Simplifies the sidebar to match how you work. The Hub entry appears for the Software developer
                             role, and for any role in unpackaged builds (or when LOCAL_LLM_FORCE_DEV_UI=1).
                           </p>
-                          <label style={{ display: 'block', marginTop: 12 }}>
-                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
-                              Role
-                            </span>
-                            <select
-                              className="select"
-                              style={{ width: '100%', maxWidth: 360 }}
-                              value={uiRole}
-                              onChange={(e) => {
-                                const parsed = parseUiRole(e.target.value)
-                                if (!parsed) return
-                                setUiRole(parsed)
-                                void window.api.setConfig({ uiRole: parsed }).then((r) => {
-                                  if (!r.ok) setErr(r.error ?? 'Could not save role')
-                                })
-                              }}
-                            >
-                              {UI_ROLE_IDS.map((id) => (
-                                <option key={id} value={id}>
+                          <div
+                            className="settings-role-grid"
+                            role="radiogroup"
+                            aria-labelledby="settings-workspace-role-heading"
+                          >
+                            {UI_ROLE_IDS.map((id) => (
+                              <button
+                                key={id}
+                                type="button"
+                                role="radio"
+                                aria-checked={uiRole === id}
+                                className={`settings-role-option${uiRole === id ? ' settings-role-option--selected' : ''}`}
+                                onClick={() => {
+                                  setUiRole(id)
+                                  void window.api.setConfig({ uiRole: id }).then((r) => {
+                                    if (!r.ok) setErr(r.error ?? 'Could not save role')
+                                  })
+                                }}
+                              >
+                                <span className="settings-role-option-title">
+                                  {uiRole === id ? (
+                                    <i className="fa-solid fa-circle-check settings-role-option-title-check" aria-hidden="true" />
+                                  ) : (
+                                    <span className="settings-role-option-title-radio" aria-hidden="true" />
+                                  )}
                                   {UI_ROLE_LABELS[id]}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
+                                </span>
+                                <span className="settings-role-option-blurb muted">{UI_ROLE_CARD_BLURBS[id]}</span>
+                              </button>
+                            ))}
+                          </div>
                         </div>
                         <div className="drawer-section">
                           <h3 className="settings-section-title">
@@ -7351,6 +8003,145 @@ export default function App(): React.ReactElement {
                             </select>
                           </label>
                         </div>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-font" aria-hidden />
+                            Font &amp; spacing
+                          </h3>
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            These settings apply on top of the preset above. Line spacing scales body text, chat
+                            bubbles, and the composer. Letter and word spacing are added to the whole app (body).
+                          </p>
+                          <label style={{ display: 'block', marginTop: 12 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                              <i className="fa-solid fa-font" aria-hidden style={{ marginRight: 6, opacity: 0.65 }} />
+                              Application font
+                            </span>
+                            <select
+                              className="select"
+                              style={{ width: '100%', maxWidth: 420 }}
+                              value={typographyFontFamily}
+                              onChange={(e) => {
+                                const f = parseTypographyFontFamily(e.target.value)
+                                typographyFontLiveRef.current = f
+                                setTypographyFontFamily(f)
+                                void window.api.setConfig({
+                                  typographyFontFamily: f,
+                                  typographyLineHeightFactor: typographyLineHeightLiveRef.current,
+                                  typographyLetterSpacingExtraEm: typographyLetterExtraLiveRef.current,
+                                  typographyWordSpacingEm: typographyWordSpacingLiveRef.current
+                                })
+                              }}
+                            >
+                              {TYPOGRAPHY_FONT_FAMILY_IDS.map((id) => (
+                                <option key={id} value={id}>
+                                  {TYPOGRAPHY_FONT_FAMILY_LABELS[id]}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <div style={{ marginTop: 18 }}>
+                            <label className="muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 6, fontSize: 12 }}>
+                              <span>Line spacing multiplier</span>
+                              <span aria-live="polite">{Math.round(typographyLineHeightFactor * 100)}%</span>
+                            </label>
+                            <input
+                              id="settings-typo-line-height"
+                              type="range"
+                              className="settings-typography-range"
+                              min={Math.round(TYPOGRAPHY_LINE_HEIGHT_FACTOR_MIN * 100)}
+                              max={Math.round(TYPOGRAPHY_LINE_HEIGHT_FACTOR_MAX * 100)}
+                              step={1}
+                              value={Math.round(typographyLineHeightFactor * 100)}
+                              onInput={(e) => {
+                                const v = clampTypographyLineHeightFactor(parseInt(e.currentTarget.value, 10) / 100)
+                                typographyLineHeightLiveRef.current = v
+                                setTypographyLineHeightFactor(v)
+                              }}
+                              onPointerUp={persistTypographyTuneConfig}
+                              aria-valuemin={Math.round(TYPOGRAPHY_LINE_HEIGHT_FACTOR_MIN * 100)}
+                              aria-valuemax={Math.round(TYPOGRAPHY_LINE_HEIGHT_FACTOR_MAX * 100)}
+                              aria-valuenow={Math.round(typographyLineHeightFactor * 100)}
+                              aria-label="Line spacing multiplier percent"
+                            />
+                          </div>
+                          <div style={{ marginTop: 16 }}>
+                            <label className="muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 6, fontSize: 12 }}>
+                              <span>Extra letter spacing</span>
+                              <span aria-live="polite">{typographyLetterSpacingExtraEm.toFixed(3)}em</span>
+                            </label>
+                            <input
+                              id="settings-typo-letter"
+                              type="range"
+                              className="settings-typography-range"
+                              min={Math.round(TYPOGRAPHY_LETTER_EXTRA_EM_MIN * 1000)}
+                              max={Math.round(TYPOGRAPHY_LETTER_EXTRA_EM_MAX * 1000)}
+                              step={1}
+                              value={Math.round(typographyLetterSpacingExtraEm * 1000)}
+                              onInput={(e) => {
+                                const v = clampTypographyLetterSpacingExtraEm(parseInt(e.currentTarget.value, 10) / 1000)
+                                typographyLetterExtraLiveRef.current = v
+                                setTypographyLetterSpacingExtraEm(v)
+                              }}
+                              onPointerUp={persistTypographyTuneConfig}
+                              aria-valuemin={Math.round(TYPOGRAPHY_LETTER_EXTRA_EM_MIN * 1000)}
+                              aria-valuemax={Math.round(TYPOGRAPHY_LETTER_EXTRA_EM_MAX * 1000)}
+                              aria-valuenow={Math.round(typographyLetterSpacingExtraEm * 1000)}
+                              aria-label="Extra letter spacing in thousandths of em"
+                            />
+                          </div>
+                          <div style={{ marginTop: 16 }}>
+                            <label className="muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 6, fontSize: 12 }}>
+                              <span>Word spacing</span>
+                              <span aria-live="polite">
+                                {typographyWordSpacingEm === 0 ? 'normal' : `${typographyWordSpacingEm.toFixed(3)}em`}
+                              </span>
+                            </label>
+                            <input
+                              id="settings-typo-word"
+                              type="range"
+                              className="settings-typography-range"
+                              min={0}
+                              max={Math.round(TYPOGRAPHY_WORD_SPACING_EM_MAX * 1000)}
+                              step={1}
+                              value={Math.round(typographyWordSpacingEm * 1000)}
+                              onInput={(e) => {
+                                const v = clampTypographyWordSpacingEm(parseInt(e.currentTarget.value, 10) / 1000)
+                                typographyWordSpacingLiveRef.current = v
+                                setTypographyWordSpacingEm(v)
+                              }}
+                              onPointerUp={persistTypographyTuneConfig}
+                              aria-valuemin={0}
+                              aria-valuemax={Math.round(TYPOGRAPHY_WORD_SPACING_EM_MAX * 1000)}
+                              aria-valuenow={Math.round(typographyWordSpacingEm * 1000)}
+                              aria-label="Word spacing in thousandths of em"
+                            />
+                          </div>
+                          <div style={{ marginTop: 14 }}>
+                            <button
+                              type="button"
+                              className="btn-secondary btn-ghost-sm"
+                              onClick={() => {
+                                typographyFontLiveRef.current = DEFAULT_TYPOGRAPHY_FONT_FAMILY
+                                typographyLineHeightLiveRef.current = DEFAULT_TYPOGRAPHY_LINE_HEIGHT_FACTOR
+                                typographyLetterExtraLiveRef.current = DEFAULT_TYPOGRAPHY_LETTER_SPACING_EXTRA_EM
+                                typographyWordSpacingLiveRef.current = DEFAULT_TYPOGRAPHY_WORD_SPACING_EM
+                                setTypographyFontFamily(DEFAULT_TYPOGRAPHY_FONT_FAMILY)
+                                setTypographyLineHeightFactor(DEFAULT_TYPOGRAPHY_LINE_HEIGHT_FACTOR)
+                                setTypographyLetterSpacingExtraEm(DEFAULT_TYPOGRAPHY_LETTER_SPACING_EXTRA_EM)
+                                setTypographyWordSpacingEm(DEFAULT_TYPOGRAPHY_WORD_SPACING_EM)
+                                void window.api.setConfig({
+                                  typographyFontFamily: DEFAULT_TYPOGRAPHY_FONT_FAMILY,
+                                  typographyLineHeightFactor: DEFAULT_TYPOGRAPHY_LINE_HEIGHT_FACTOR,
+                                  typographyLetterSpacingExtraEm: DEFAULT_TYPOGRAPHY_LETTER_SPACING_EXTRA_EM,
+                                  typographyWordSpacingEm: DEFAULT_TYPOGRAPHY_WORD_SPACING_EM
+                                })
+                              }}
+                            >
+                              Reset font &amp; spacing to defaults
+                            </button>
+                          </div>
+                        </div>
                       </section>
                     )}
 
@@ -7442,11 +8233,75 @@ export default function App(): React.ReactElement {
                         />
                         <span>
                           Domain-enhanced prompts — when a user message matches a{' '}
-                          <strong>Chat prompt domain</strong> that has optional context (see Wiki → domains), append
-                          that text to the system message (bounded to {MAX_PROMPT_DOMAIN_SUFFIX_CHARS} characters per
-                          turn).
+                          <strong>Chat prompt domain</strong> that has optional context (configure below), append that
+                          text to the system message (bounded to {MAX_PROMPT_DOMAIN_SUFFIX_CHARS} characters per turn).
                         </span>
                       </label>
+                      <div className="prompt-domains-panel" aria-label="Chat prompt domains">
+                        <h4 className="prompt-domains-panel-title">Chat prompt domains</h4>
+                        <p className="prompt-domains-panel-hint muted">
+                          Topic clusters inferred from your user prompts (keyword overlap). Optional per-domain system
+                          context applies only when “Domain-enhanced prompts” above is enabled. Send a chat message to
+                          refresh this list.
+                        </p>
+                        {promptDomains.length === 0 ? (
+                          <p className="prompt-domains-panel-empty muted">No domains yet.</p>
+                        ) : (
+                          <ul className="prompt-domains-panel-list">
+                            {promptDomains.map((d) => (
+                              <li key={d.id}>
+                                <span className="prompt-domains-panel-name">{d.title}</span>
+                                <span className="muted"> · {d.messageCount} prompts</span>
+                                {d.keywords.length > 0 ? (
+                                  <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                                    {d.keywords.slice(0, 8).join(', ')}
+                                    {d.keywords.length > 8 ? '…' : ''}
+                                  </div>
+                                ) : null}
+                                <label className="muted" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
+                                  Optional system context when this domain matches (max {MAX_PROMPT_DOMAIN_SUFFIX_CHARS}{' '}
+                                  chars; used only when “Domain-enhanced prompts” is on)
+                                  <textarea
+                                    className="input"
+                                    style={{
+                                      display: 'block',
+                                      width: '100%',
+                                      maxWidth: 520,
+                                      minHeight: 56,
+                                      marginTop: 6,
+                                      fontSize: 12
+                                    }}
+                                    value={promptDomainSuffixDrafts[d.id] ?? d.systemSuffix}
+                                    onChange={(e) =>
+                                      setPromptDomainSuffixDrafts((prev) => ({
+                                        ...prev,
+                                        [d.id]: e.target.value.slice(0, MAX_PROMPT_DOMAIN_SUFFIX_CHARS)
+                                      }))
+                                    }
+                                    spellCheck={false}
+                                    rows={3}
+                                  />
+                                </label>
+                                <button
+                                  type="button"
+                                  className="btn-ghost-sm"
+                                  style={{ marginTop: 6 }}
+                                  onClick={() =>
+                                    void window.api
+                                      .promptDomainSetSuffix({
+                                        domainId: d.id,
+                                        systemSuffix: (promptDomainSuffixDrafts[d.id] ?? d.systemSuffix).trim()
+                                      })
+                                      .then(() => void refreshPromptDomains())
+                                  }
+                                >
+                                  Save domain context
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
                       <label className="metrics-widget-check" style={{ marginTop: 16 }}>
                         <input
                           type="checkbox"
@@ -7463,10 +8318,94 @@ export default function App(): React.ReactElement {
                         </span>
                       </label>
                       <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
-                        Runs a short second pass on the local model to distill bullet notes into the knowledge base. Notes are linked to the conversation so
-                        they can be removed with <strong>Save chat to knowledge base</strong>–style cleanup when you delete the chat. Turn off to save time and
-                        tokens.
+                        Runs a short second pass on the local model to distill concise reference notes into the knowledge
+                        base. Notes are linked to the conversation so they can be removed with{' '}
+                        <strong>Save chat to knowledge base</strong>–style cleanup when you delete the chat. Turn off to
+                        save time and tokens.
                       </p>
+                      <label className="metrics-widget-check" style={{ marginTop: 14 }}>
+                        <input
+                          type="checkbox"
+                          checked={chatResponsePostProcess}
+                          onChange={(e) => {
+                            const v = e.target.checked
+                            setChatResponsePostProcess(v)
+                            void window.api.setConfig({ chatResponsePostProcess: v })
+                          }}
+                        />
+                        <span>
+                          <i className="fa-solid fa-align-left" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
+                          Tidy assistant replies (spacing, sections, quick outline)
+                        </span>
+                      </label>
+                      <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                        After each reply, the app normalizes Markdown: trims stray spaces, adds breathing room around
+                        headings and horizontal rules, collapses huge blank gaps, and when there are several{' '}
+                        <code>##</code> sections it prepends a short <strong>In this reply</strong> outline so you can
+                        scan faster. Runs locally — no extra model call.
+                      </p>
+                      <label className="metrics-widget-check" style={{ marginTop: 16 }}>
+                        <input
+                          type="checkbox"
+                          checked={deepLearnEnabled}
+                          onChange={(e) => {
+                            const v = e.target.checked
+                            setDeepLearnEnabled(v)
+                            void window.api.setConfig({ deepLearnEnabled: v })
+                          }}
+                        />
+                        <span>
+                          <i className="fa-solid fa-layer-group" aria-hidden style={{ marginRight: 6, opacity: 0.55 }} />
+                          Deep research from chat (“learn everything about …”)
+                        </span>
+                      </label>
+                      <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+                        When your message matches that phrase, the app asks before running several local model passes and saving one wiki article (and
+                        updating the knowledge graph). If you paste http(s) links, you confirm once to allow the main process to fetch them; localhost and
+                        private hosts are blocked.
+                      </p>
+                      <label style={{ display: 'block', marginTop: 12 }}>
+                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                          Deep research — max model rounds per run
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          style={{ width: '100%', maxWidth: 200 }}
+                          min={1}
+                          max={24}
+                          step={1}
+                          value={deepLearnMaxRoundsDraft}
+                          onChange={(e) => setDeepLearnMaxRoundsDraft(e.target.value)}
+                          onBlur={() => {
+                            const n = parseInt(deepLearnMaxRoundsDraft.trim(), 10)
+                            const v = Math.min(24, Math.max(1, Number.isFinite(n) ? n : 5))
+                            setDeepLearnMaxRoundsDraft(String(v))
+                            void window.api.setConfig({ deepLearnMaxRounds: v })
+                          }}
+                        />
+                      </label>
+                      <label style={{ display: 'block', marginTop: 12 }}>
+                        <span className="muted" style={{ display: 'block', marginBottom: 6 }}>
+                          Deep research — max bytes per approved URL fetch
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          style={{ width: '100%', maxWidth: 200 }}
+                          min={4096}
+                          max={8000000}
+                          step={1024}
+                          value={deepLearnMaxFetchBytesDraft}
+                          onChange={(e) => setDeepLearnMaxFetchBytesDraft(e.target.value)}
+                          onBlur={() => {
+                            const n = parseInt(deepLearnMaxFetchBytesDraft.trim(), 10)
+                            const v = Math.min(8_000_000, Math.max(4096, Number.isFinite(n) ? n : 1_500_000))
+                            setDeepLearnMaxFetchBytesDraft(String(v))
+                            void window.api.setConfig({ deepLearnMaxFetchBytes: v })
+                          }}
+                        />
+                      </label>
                       <label className="metrics-widget-check" style={{ marginTop: 18 }}>
                         <input
                           type="checkbox"
@@ -7615,6 +8554,7 @@ export default function App(): React.ReactElement {
                         />
                       </label>
                     </div>
+                    <CodebaseFormalSettingsSection />
                     <div className="drawer-section">
                       <h3 className="settings-section-title">
                         <i className="fa-solid fa-cloud-arrow-down" aria-hidden />
@@ -8175,6 +9115,15 @@ export default function App(): React.ReactElement {
                           type="button"
                           className="btn-danger settings-btn-icon"
                           disabled={settingsMaintenanceBusy !== false}
+                          onClick={() => setSettingsConfirmKind('wikiReset')}
+                        >
+                          <i className="fa-solid fa-book-skull" aria-hidden />
+                          {settingsMaintenanceBusy === 'wikiReset' ? 'Removing…' : 'Reset wiki &amp; all domains'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-danger settings-btn-icon"
+                          disabled={settingsMaintenanceBusy !== false}
                           onClick={() => setSettingsConfirmKind('models')}
                         >
                           <i className="fa-solid fa-trash-can" aria-hidden />
@@ -8219,12 +9168,24 @@ export default function App(): React.ReactElement {
           <div className="modal-box" onClick={(e) => e.stopPropagation()}>
             <h2 id="settings-destructive-title" className="modal-title">
               {settingsConfirmKind === 'caches' && 'Clear all caches?'}
+              {settingsConfirmKind === 'wikiReset' && 'Reset entire wiki and all prompt domains?'}
               {settingsConfirmKind === 'models' && 'Delete all model files?'}
               {settingsConfirmKind === 'factory' && 'Reset settings to factory defaults?'}
             </h2>
             {settingsConfirmKind === 'caches' ? (
               <p className="muted modal-text">
                 This cancels active downloads, clears the download registry and Hugging Face metadata cache in the database, wipes metrics history and training job records, and deletes files under the vectors index folder. Your conversations, knowledge base, wiki pages, and downloaded model weight files are kept.
+              </p>
+            ) : null}
+            {settingsConfirmKind === 'wikiReset' ? (
+              <p className="muted modal-text">
+                This permanently deletes <strong>every</strong> knowledge library entry (documents, saved chats, chat
+                notes, auto-extracted notes), all compiled wiki pages, indexed chunks, and the full-text search index for
+                that material. It also clears <strong>all chat prompt domains</strong>: every domain row, all keyword
+                clusters, optional per-domain system suffixes, and every link from stored messages to those domains. Your{' '}
+                <strong>conversations and chat history are kept</strong>; only the wiki / knowledge base and domain data
+                are cleared. Training job records are not removed, but past jobs may reference KB source ids that no longer
+                exist.
               </p>
             ) : null}
             {settingsConfirmKind === 'models' ? (
@@ -8249,11 +9210,13 @@ export default function App(): React.ReactElement {
                 disabled={settingsMaintenanceBusy !== false}
                 onClick={() => {
                   if (settingsConfirmKind === 'caches') void runClearAllCaches()
+                  else if (settingsConfirmKind === 'wikiReset') void runResetWikiAndKeywords()
                   else if (settingsConfirmKind === 'models') void runDeleteAllModels()
                   else void runResetFactoryConfig()
                 }}
               >
                 {settingsConfirmKind === 'caches' && 'Clear caches'}
+                {settingsConfirmKind === 'wikiReset' && 'Reset wiki & domains'}
                 {settingsConfirmKind === 'models' && 'Delete models'}
                 {settingsConfirmKind === 'factory' && 'Reset settings'}
               </button>

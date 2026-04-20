@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useId,
   useLayoutEffect,
   useMemo,
@@ -13,6 +14,14 @@ import {
 import type { KnowledgeGraphAnalysisResult } from '@shared/knowledgeGraphAnalysis'
 import type { KnowledgeGraphEdgeKind, KnowledgeGraphNode, KnowledgeGraphPayload } from '@shared/types'
 import { buildKnowledgeGraphLayout, kgEdgePath, nodeRadius } from './knowledgeGraph/buildKnowledgeGraphLayout'
+import { clampDragOffsetForNode, mergeNodeDragIntoLayout } from './knowledgeGraph/mergeNodeDragOffsets'
+import {
+  applySemanticGravity,
+  KG_GRAVITY_STORAGE_KEY,
+  KG_MIN_GAP_STORAGE_KEY,
+  readStoredGravity,
+  readStoredMinSurfaceGap
+} from './knowledgeGraph/semanticGravityLayout'
 import { useKnowledgeGraphViewport } from './knowledgeGraph/useKnowledgeGraphViewport'
 
 const CLUSTER_STROKE: string[] = [
@@ -86,8 +95,28 @@ export function KnowledgeGraphView(props: {
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [analysisOpen, setAnalysisOpen] = useState(true)
   const [minimapOpen, setMinimapOpen] = useState(true)
+  const [minimalTextMode, setMinimalTextMode] = useState(true)
+  const [clusterMode, setClusterMode] = useState<'related' | 'domain'>('related')
   const [kbdFocusId, setKbdFocusId] = useState<string | null>(null)
+  const [semanticGravity, setSemanticGravity] = useState(() => readStoredGravity())
+  const [minSurfaceGap, setMinSurfaceGap] = useState(() => readStoredMinSurfaceGap())
   const obsPatternId = useId().replace(/:/g, '')
+
+  useLayoutEffect(() => {
+    try {
+      globalThis.localStorage?.setItem(KG_GRAVITY_STORAGE_KEY, String(semanticGravity))
+    } catch {
+      /* ignore */
+    }
+  }, [semanticGravity])
+
+  useLayoutEffect(() => {
+    try {
+      globalThis.localStorage?.setItem(KG_MIN_GAP_STORAGE_KEY, String(minSurfaceGap))
+    } catch {
+      /* ignore */
+    }
+  }, [minSurfaceGap])
 
   useLayoutEffect(() => {
     const el = wrapRef.current
@@ -110,19 +139,110 @@ export function KnowledgeGraphView(props: {
 
   const layout = useMemo(() => {
     if (!data || data.nodes.length === 0) return null
-    return buildKnowledgeGraphLayout(data, {
+    const seed = buildKnowledgeGraphLayout(data, {
       containerWidth: layoutW,
-      collapsedSourceIds
+      collapsedSourceIds,
+      clusterMode
     })
-  }, [data, layoutW, collapsedSourceIds])
+    return applySemanticGravity(data, seed, {
+      gravity: semanticGravity,
+      minSurfaceGap: minSurfaceGap
+    })
+  }, [data, layoutW, collapsedSourceIds, semanticGravity, minSurfaceGap, clusterMode])
 
   const resetKey = data ? `${data.nodes.length}-${data.edges.length}-${[...collapsedSourceIds].sort().join(',')}` : '0'
 
+  const [nodeDragOffsets, setNodeDragOffsets] = useState<Record<string, { dx: number; dy: number }>>({})
+
+  useEffect(() => {
+    setNodeDragOffsets({})
+  }, [resetKey])
+
+  const displayLayout = useMemo(() => {
+    if (!layout || !data) return null
+    return mergeNodeDragIntoLayout(layout, data, nodeDragOffsets)
+  }, [layout, data, nodeDragOffsets])
+
   const vpApi = useKnowledgeGraphViewport(wrapRef, {
-    contentW: layout?.width ?? 1,
-    contentH: layout?.height ?? 1,
+    contentW: displayLayout?.width ?? layout?.width ?? 1,
+    contentH: displayLayout?.height ?? layout?.height ?? 1,
     resetKey
   })
+
+  const vpApiRef = useRef(vpApi)
+  vpApiRef.current = vpApi
+
+  const layoutRef = useRef(layout)
+  layoutRef.current = layout
+
+  const nodeDragOffsetsRef = useRef(nodeDragOffsets)
+  nodeDragOffsetsRef.current = nodeDragOffsets
+
+  const nodeDragActiveRef = useRef<{
+    id: string
+    startClient: { x: number; y: number }
+    startOff: { dx: number; dy: number }
+    moved: boolean
+  } | null>(null)
+  const suppressNodeClickRef = useRef(false)
+  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null)
+
+  const onWrapPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const d = nodeDragActiveRef.current
+    const lay = layoutRef.current
+    if (d && data && lay) {
+      const scale = vpApiRef.current.viewport.scale
+      const rawDx = d.startOff.dx + (e.clientX - d.startClient.x) / scale
+      const rawDy = d.startOff.dy + (e.clientY - d.startClient.y) / scale
+      const node = data.nodes.find((x) => x.id === d.id)
+      const p0 = lay.positions.get(d.id)
+      if (node && p0) {
+        const next = clampDragOffsetForNode(p0, rawDx, rawDy, node, lay)
+        if (Math.hypot(e.clientX - d.startClient.x, e.clientY - d.startClient.y) > 5) d.moved = true
+        setNodeDragOffsets((prev) => ({ ...prev, [d.id]: next }))
+      }
+    }
+    vpApiRef.current.onPointerMove(e)
+  }, [data])
+
+  const onWrapPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const d = nodeDragActiveRef.current
+    if (d) {
+      if (d.moved) suppressNodeClickRef.current = true
+      nodeDragActiveRef.current = null
+      setDraggingNodeId(null)
+      try {
+        wrapRef.current?.releasePointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+    }
+    vpApiRef.current.onPointerUp(e)
+  }, [])
+
+  const beginNodeDrag = useCallback((e: ReactPointerEvent<SVGGElement>, n: KnowledgeGraphNode) => {
+    if (e.button !== 0) return
+    if ((e.target as Element).closest('.kg-source-collapse-hit')) return
+    if (n.kind === 'source' && e.shiftKey) return
+    e.stopPropagation()
+    e.preventDefault()
+    const w = wrapRef.current
+    const lay = layoutRef.current
+    if (!w || !lay) return
+    try {
+      w.setPointerCapture(e.pointerId)
+    } catch {
+      /* ignore */
+    }
+    const off = nodeDragOffsetsRef.current[n.id] ?? { dx: 0, dy: 0 }
+    nodeDragActiveRef.current = {
+      id: n.id,
+      startClient: { x: e.clientX, y: e.clientY },
+      startOff: { ...off },
+      moved: false
+    }
+    setDraggingNodeId(n.id)
+  }, [])
 
   const graphCounts = useMemo(() => {
     if (!data) return null
@@ -136,15 +256,15 @@ export function KnowledgeGraphView(props: {
   const hubIds = useMemo(() => hubSourceSet(graphAnalysis?.result), [graphAnalysis?.result])
 
   const kbdOrderIds = useMemo(() => {
-    if (!data || !layout) return [] as string[]
-    const pos = layout.positions
+    if (!data || !displayLayout) return [] as string[]
+    const pos = displayLayout.positions
     const wikis = data.nodes.filter((n) => n.kind === 'wiki').map((n) => n.id)
     const sources = data.nodes.filter((n) => n.kind === 'source').map((n) => n.id)
     const chunks = data.nodes
       .filter((n) => n.kind === 'chunk' && n.sourceId && !collapsedSourceIds.has(n.sourceId) && pos.has(n.id))
       .map((n) => n.id)
     return [...wikis, ...sources, ...chunks]
-  }, [data, layout, collapsedSourceIds])
+  }, [data, displayLayout, collapsedSourceIds])
 
   useLayoutEffect(() => {
     if (kbdFocusId && !kbdOrderIds.includes(kbdFocusId)) setKbdFocusId(null)
@@ -190,6 +310,10 @@ export function KnowledgeGraphView(props: {
 
   const onNodeClick = useCallback(
     (node: KnowledgeGraphNode, e?: ReactMouseEvent) => {
+      if (suppressNodeClickRef.current) {
+        suppressNodeClickRef.current = false
+        return
+      }
       if (node.kind === 'source' && e?.shiftKey) {
         e.preventDefault()
         toggleSourceCollapse(node.id)
@@ -281,16 +405,16 @@ export function KnowledgeGraphView(props: {
   const minimapClick = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
       e.stopPropagation()
-      if (!layout || !wrapRef.current) return
+      if (!displayLayout || !wrapRef.current) return
       const el = e.currentTarget
       const rect = el.getBoundingClientRect()
       const mx = e.clientX - rect.left
       const my = e.clientY - rect.top
       const mw = 120
       const mh = 86
-      const mm = Math.min(mw / layout.width, mh / layout.height)
-      const worldX = Math.max(0, Math.min(layout.width, mx / mm))
-      const worldY = Math.max(0, Math.min(layout.height, my / mm))
+      const mm = Math.min(mw / displayLayout.width, mh / displayLayout.height)
+      const worldX = Math.max(0, Math.min(displayLayout.width, mx / mm))
+      const worldY = Math.max(0, Math.min(displayLayout.height, my / mm))
       const vw = wrapRef.current.clientWidth
       const vh = wrapRef.current.clientHeight
       vpApi.setViewport((prev) => ({
@@ -299,12 +423,12 @@ export function KnowledgeGraphView(props: {
         ty: vh / 2 - worldY * prev.scale
       }))
     },
-    [layout, vpApi]
+    [displayLayout, vpApi]
   )
 
   const renderMinimap = () => {
-    if (!layout || !minimapOpen) return null
-    const { width: cw, height: ch } = layout
+    if (!displayLayout || !minimapOpen) return null
+    const { width: cw, height: ch } = displayLayout
     const mw = 120
     const mh = 86
     const mm = Math.min(mw / cw, mh / ch)
@@ -386,7 +510,7 @@ export function KnowledgeGraphView(props: {
           aria-label="Graph layers and tools"
           onWheel={(e) => e.stopPropagation()}
         >
-          <p className="kg-map-layers-hint muted">Wheel zoom · drag background to pan</p>
+          <p className="kg-map-layers-hint muted">Wheel zoom · drag background to pan · drag nodes to move</p>
           <div className="kg-map-layers-section" role="group" aria-label="Edge types">
             <span className="kg-map-layers-section-title">Edges</span>
             <label className="kg-map-check">
@@ -432,6 +556,21 @@ export function KnowledgeGraphView(props: {
             <input type="checkbox" checked={minimapOpen} onChange={() => setMinimapOpen((v) => !v)} />
             Minimap
           </label>
+          <label className="kg-map-check kg-map-check--solo">
+            <input type="checkbox" checked={minimalTextMode} onChange={() => setMinimalTextMode((v) => !v)} />
+            Minimal text
+          </label>
+          <div className="kg-map-layers-section">
+            <span className="kg-map-layers-section-title">Organization</span>
+            <select
+              className="input"
+              value={clusterMode}
+              onChange={(e) => setClusterMode(e.target.value === 'domain' ? 'domain' : 'related')}
+            >
+              <option value="related">Related-title clusters</option>
+              <option value="domain">Domain clusters</option>
+            </select>
+          </div>
           <div className="kg-map-layers-section">
             <span className="kg-map-layers-section-title">Chunks</span>
             <div className="kg-map-layers-actions">
@@ -442,6 +581,46 @@ export function KnowledgeGraphView(props: {
                 Expand all
               </button>
             </div>
+          </div>
+          <div className="kg-map-layers-section">
+            <span className="kg-map-layers-section-title">Layout physics</span>
+            <label className="kg-map-range">
+              <span className="kg-map-range-head">
+                Semantic gravity
+                <output className="kg-map-range-value">{semanticGravity.toFixed(2)}</output>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={1.55}
+                step={0.03}
+                value={semanticGravity}
+                onChange={(e) => setSemanticGravity(Number(e.target.value))}
+                aria-valuetext={`${semanticGravity.toFixed(2)}`}
+              />
+            </label>
+            <p className="kg-map-layers-hint muted" style={{ marginTop: 4 }}>
+              Linked nodes attract more when edges are semantically strong (strongest on contains and
+              compiled-from, then indexes, then related). Zero keeps the seeded layout only.
+            </p>
+            <label className="kg-map-range">
+              <span className="kg-map-range-head">
+                Min surface gap
+                <output className="kg-map-range-value">{Math.round(minSurfaceGap)} px</output>
+              </span>
+              <input
+                type="range"
+                min={5}
+                max={26}
+                step={1}
+                value={minSurfaceGap}
+                onChange={(e) => setMinSurfaceGap(Number(e.target.value))}
+                aria-valuetext={`${Math.round(minSurfaceGap)} pixels between node circles`}
+              />
+            </label>
+            <p className="kg-map-layers-hint muted" style={{ marginTop: 4 }}>
+              Enforces a minimum space between node circles so labels stay readable.
+            </p>
           </div>
           <div className="kg-map-layers-section">
             <span className="kg-map-layers-section-title">View</span>
@@ -561,9 +740,9 @@ export function KnowledgeGraphView(props: {
     )
   }
 
-  if (!layout) return null
+  if (!displayLayout) return null
 
-  const { positions, boxes, width: layoutWidth, height } = layout
+  const { positions, boxes, width: layoutWidth, height } = displayLayout
   const { tx, ty, scale: zs } = vpApi.viewport
   const hideChunkLabels = zs < 0.44
   const hideWikiLabels = zs < 0.34
@@ -573,20 +752,22 @@ export function KnowledgeGraphView(props: {
     <div className="kg-panel">
       <div
         ref={wrapRef}
-        className="kg-svg-wrap kg-svg-wrap--viewport"
+        className={['kg-svg-wrap kg-svg-wrap--viewport', draggingNodeId ? 'kg-svg-wrap--node-drag' : '']
+          .filter(Boolean)
+          .join(' ')}
         onWheel={vpApi.onWheel}
         onPointerDown={vpApi.onPointerDown}
-        onPointerMove={vpApi.onPointerMove}
-        onPointerUp={vpApi.onPointerUp}
-        onPointerLeave={vpApi.onPointerLeave}
-        onPointerCancel={vpApi.onPointerUp}
+        onPointerMove={onWrapPointerMove}
+        onPointerUp={onWrapPointerUp}
+        onPointerLeave={onWrapPointerUp}
+        onPointerCancel={onWrapPointerUp}
       >
         <div
           ref={stageRef}
           className="kg-graph-stage"
           tabIndex={0}
           onKeyDown={onStageKeyDown}
-          aria-label="Knowledge graph canvas. Use arrow keys to move focus, Enter to open topic."
+          aria-label="Knowledge graph canvas. Drag nodes to reposition. Use arrow keys to move focus, Enter to open topic."
         >
           <svg
             className="kg-graph-svg kg-graph-svg--fill kg-graph-svg--obsidian"
@@ -663,19 +844,28 @@ export function KnowledgeGraphView(props: {
                       : n.kind === 'wiki'
                         ? !hideWikiLabels
                         : true
+                  const compactLabel = n.shortLabel?.trim() || n.label
                   const label = showLabel
-                    ? truncate(n.label, n.kind === 'chunk' ? (isOverflow ? 12 : 14) : 22)
+                    ? truncate(
+                        minimalTextMode ? compactLabel : n.label,
+                        n.kind === 'chunk' ? (isOverflow ? 12 : 14) : 22
+                      )
                     : n.kind === 'chunk'
                       ? ''
-                      : truncate(n.label, 6)
+                      : truncate(minimalTextMode ? compactLabel : n.label, 6)
+                  const hasConfidenceRing = typeof n.confidence === 'number'
+                  const confidencePct = Math.min(1, Math.max(0, n.confidence ?? 0))
+                  const confidenceStroke = Math.max(1.2, Math.round(confidencePct * 3))
+                  const isNovel = typeof n.novelty === 'number' && n.novelty > 0.66
 
                   if (n.kind === 'wiki') {
                     return (
                       <g
                         key={n.id}
                         id={`kg-node-${n.id}`}
-                        className={`kg-node kg-node--wiki${hi ? ' kg-node--hi' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}`}
-                        style={{ cursor: onPickSource ? 'pointer' : 'default' }}
+                        className={`kg-node kg-node--wiki kg-node--draggable${hi ? ' kg-node--hi' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}${draggingNodeId === n.id ? ' kg-node--dragging' : ''}`}
+                        style={{ cursor: onPickSource ? 'grab' : 'grab' }}
+                        onPointerDown={(e) => beginNodeDrag(e, n)}
                         onMouseEnter={() => setHoverId(n.id)}
                         onMouseLeave={() => setHoverId(null)}
                         onClick={() => onNodeClick(n)}
@@ -683,6 +873,21 @@ export function KnowledgeGraphView(props: {
                         aria-label={n.label}
                       >
                         <circle cx={p.x} cy={p.y} r={r} className="kg-shape kg-node-dot" />
+                        {hasConfidenceRing ? (
+                          <circle
+                            cx={p.x}
+                            cy={p.y}
+                            r={r + 2.2}
+                            className="kg-confidence-ring"
+                            strokeWidth={confidenceStroke}
+                          />
+                        ) : null}
+                        {isNovel ? <circle cx={p.x + r + 2} cy={p.y - r - 2} r={2.2} className="kg-novelty-dot" /> : null}
+                        {n.provenance === 'intellij-plugin' ? (
+                          <text x={p.x + r + 5} y={p.y + 3} className="kg-provenance-badge">
+                            I
+                          </text>
+                        ) : null}
                         {showLabel ? (
                           <text x={p.x} y={p.y + r + 12} textAnchor="middle" className="kg-label kg-label-below">
                             {label}
@@ -698,8 +903,9 @@ export function KnowledgeGraphView(props: {
                       <g
                         key={n.id}
                         id={`kg-node-${n.id}`}
-                        className={`kg-node kg-node--source${hi ? ' kg-node--hi' : ''}${isHub ? ' kg-node--hub' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}`}
-                        style={{ cursor: onPickSource ? 'pointer' : 'default' }}
+                        className={`kg-node kg-node--source kg-node--draggable${hi ? ' kg-node--hi' : ''}${isHub ? ' kg-node--hub' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}${draggingNodeId === n.id ? ' kg-node--dragging' : ''}`}
+                        style={{ cursor: onPickSource ? 'grab' : 'grab' }}
+                        onPointerDown={(e) => beginNodeDrag(e, n)}
                         onMouseEnter={() => setHoverId(n.id)}
                         onMouseLeave={() => setHoverId(null)}
                         onClick={(ev) => onNodeClick(n, ev)}
@@ -714,6 +920,21 @@ export function KnowledgeGraphView(props: {
                           stroke={clusterStroke}
                           strokeWidth={clusterStroke ? 2.4 : undefined}
                         />
+                        {hasConfidenceRing ? (
+                          <circle
+                            cx={p.x}
+                            cy={p.y}
+                            r={r + 2.6}
+                            className="kg-confidence-ring"
+                            strokeWidth={confidenceStroke}
+                          />
+                        ) : null}
+                        {isNovel ? <circle cx={p.x + r + 2} cy={p.y - r - 2} r={2.2} className="kg-novelty-dot" /> : null}
+                        {n.provenance === 'intellij-plugin' ? (
+                          <text x={p.x + r + 6} y={p.y + 4} className="kg-provenance-badge">
+                            I
+                          </text>
+                        ) : null}
                         <text x={p.x} y={p.y + r + 13} textAnchor="middle" className="kg-label kg-label-below kg-label-below--source">
                           {truncate(n.label, 24)}
                         </text>
@@ -759,8 +980,9 @@ export function KnowledgeGraphView(props: {
                     <g
                       key={n.id}
                       id={`kg-node-${n.id}`}
-                      className={`kg-node kg-node--chunk${isOverflow ? ' kg-node--overflow' : ''}${hi ? ' kg-node--hi' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}`}
-                      style={{ cursor: onPickSource ? 'pointer' : 'default' }}
+                      className={`kg-node kg-node--chunk kg-node--draggable${isOverflow ? ' kg-node--overflow' : ''}${hi ? ' kg-node--hi' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}${draggingNodeId === n.id ? ' kg-node--dragging' : ''}`}
+                      style={{ cursor: onPickSource ? 'grab' : 'grab' }}
+                      onPointerDown={(e) => beginNodeDrag(e, n)}
                       onMouseEnter={() => setHoverId(n.id)}
                       onMouseLeave={() => setHoverId(null)}
                       onClick={() => onNodeClick(n)}
@@ -768,6 +990,21 @@ export function KnowledgeGraphView(props: {
                       aria-label={n.sublabel ? `${n.label} — ${n.sublabel}` : n.label}
                     >
                       <circle cx={p.x} cy={p.y} r={r} className="kg-shape kg-node-dot" />
+                      {hasConfidenceRing ? (
+                        <circle
+                          cx={p.x}
+                          cy={p.y}
+                          r={r + 2.1}
+                          className="kg-confidence-ring"
+                          strokeWidth={confidenceStroke}
+                        />
+                      ) : null}
+                      {isNovel ? <circle cx={p.x + r + 2} cy={p.y - r - 2} r={1.8} className="kg-novelty-dot" /> : null}
+                      {n.provenance === 'intellij-plugin' ? (
+                        <text x={p.x + r + 4} y={p.y + 2} className="kg-provenance-badge">
+                          I
+                        </text>
+                      ) : null}
                       {showLabel ? (
                         <text x={p.x} y={p.y + r + 9} textAnchor="middle" className="kg-label kg-label-below kg-label-below--chunk">
                           {label}
@@ -800,6 +1037,7 @@ export function KnowledgeGraphView(props: {
           <li>
             <span className="kg-legend-swatch kg-node--wiki" /> Wiki page
           </li>
+          <li className="kg-legend-drag-hint muted">Drag any node to reposition it. Manual positions reset when the graph reloads (refresh, library change, or chunk collapse).</li>
           <li className="kg-legend-edges">
             <span className="kg-legend-line kg-edge--contains" /> contains
           </li>

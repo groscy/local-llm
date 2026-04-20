@@ -21,7 +21,8 @@ let navigation: ViewToastNavigationSnapshot = {
 
 let toasts: ViewToastRecord[] = []
 const listeners = new Set<() => void>()
-const dismissTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** DOM timer ids (`window.setTimeout`); typed as `number` to avoid Node `Timeout` vs browser mismatch. */
+const dismissTimers = new Map<string, number>()
 const actionHandlers = new Map<string, () => void>()
 
 function emit(): void {
@@ -55,7 +56,7 @@ export function getViewToastsServerSnapshot(): readonly ViewToastRecord[] {
 
 function clearDismissTimer(id: string): void {
   const t = dismissTimers.get(id)
-  if (t != null) {
+  if (t !== undefined) {
     window.clearTimeout(t)
     dismissTimers.delete(id)
   }
@@ -109,7 +110,7 @@ export function pushViewToast(input: ViewToastInput): string {
       id,
       window.setTimeout(() => {
         dismissViewToast(id)
-      }, durationMs)
+      }, durationMs) as unknown as number
     )
   }
 
