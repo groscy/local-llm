@@ -1,9 +1,11 @@
 import { randomUUID } from 'crypto'
 import { createWriteStream, readFileSync } from 'fs'
+import { extractPdfPlainText, isPdfFilePath } from './pdfIngest'
 import { finished } from 'stream/promises'
 import archiver from 'archiver'
 import type Database from 'better-sqlite3'
-import { extractWikiGlossary } from '@shared/wikiArticleExtras'
+import { extractWikiGlossary, stripWikiControlMarkers, WIKI_REFERENCE_SECTION_MARKDOWN } from '@shared/wikiArticleExtras'
+import { wikiKindFromUri } from '@shared/wikiSourceGroups'
 import type {
   KbChunk,
   KbSearchHit,
@@ -62,10 +64,19 @@ export function ingestText(
   return { id: sourceId, title, uri, createdAt: t }
 }
 
-export function ingestFile(db: Database.Database, filePath: string, title?: string): KbSource {
-  const raw = readFileSync(filePath, 'utf8')
+export async function ingestFile(db: Database.Database, filePath: string, title?: string): Promise<KbSource> {
   const name = title ?? filePath.split(/[/\\]/).pop() ?? filePath
-  return ingestText(db, name, `file://${filePath}`, raw, undefined, null)
+  let body: string
+  if (isPdfFilePath(filePath)) {
+    const buf = readFileSync(filePath)
+    body = await extractPdfPlainText(buf)
+    if (!body.trim()) {
+      throw new Error('No extractable text in this PDF (it may be image-only, encrypted, or empty).')
+    }
+  } else {
+    body = readFileSync(filePath, 'utf8')
+  }
+  return ingestText(db, name, `file://${filePath}`, body, undefined, null)
 }
 
 /** Chunk and index the full message thread of a conversation into the knowledge base (linked for later bulk delete). */
@@ -104,6 +115,33 @@ export function deleteKbSourcesForConversation(db: Database.Database, conversati
     .all(conversationId) as { id: string }[]
   for (const { id } of sources) deleteKbSource(db, id)
   return sources.length
+}
+
+export type ResetWikiAndKeywordsResult = {
+  sourcesRemoved: number
+  promptDomainsRemoved: number
+}
+
+/**
+ * Remove the entire knowledge wiki: all KB sources, compiled wiki pages, chunks, and FTS rows.
+ * Also removes **all prompt domains**: clears `message_prompt_domains` then `prompt_domains` (clusters,
+ * keywords, and optional system suffixes). Does not remove conversations, chats, or model files.
+ */
+export function resetEntireWikiAndKeywords(db: Database.Database): ResetWikiAndKeywordsResult {
+  const tx = db.transaction(() => {
+    const ids = db.prepare('SELECT id FROM kb_sources').all() as { id: string }[]
+    for (const { id } of ids) {
+      deleteKbSource(db, id)
+    }
+    const countRow = db.prepare('SELECT COUNT(*) as c FROM prompt_domains').get() as { c: number } | undefined
+    const promptDomainsRemoved = Number(countRow?.c ?? 0)
+    db.prepare('DELETE FROM message_prompt_domains').run()
+    db.prepare('DELETE FROM prompt_domains').run()
+    db.prepare('DELETE FROM wiki_page_chunks').run()
+    db.prepare('DELETE FROM wiki_pages').run()
+    return { sourcesRemoved: ids.length, promptDomainsRemoved }
+  })
+  return tx()
 }
 
 function ftsEscape(q: string): string {
@@ -145,14 +183,6 @@ function kbHitSnippet(text: string): string {
   const s = text.replace(/\s+/g, ' ').trim()
   if (s.length <= KB_HIT_SNIPPET_MAX) return s
   return `${s.slice(0, KB_HIT_SNIPPET_MAX - 1)}…`
-}
-
-function wikiKindFromUri(uri: string): WikiSourceKind {
-  const u = uri.toLowerCase()
-  if (u.startsWith('file:')) return 'document'
-  if (u.startsWith('wiki-extract:')) return 'extracted_note'
-  if (u.startsWith('chat:')) return 'saved_chat'
-  return 'other'
 }
 
 type KbSearchRow = {
@@ -303,7 +333,7 @@ export function listWikiChatHighlightTerms(db: Database.Database): WikiChatHighl
   for (const page of pages) {
     const sourceId = page.id.startsWith('src:') ? page.id.slice(4) : ''
     if (!sourceId) continue
-    const { glossary } = extractWikiGlossary(page.body ?? '')
+    const { glossary } = extractWikiGlossary(stripWikiControlMarkers(page.body ?? ''))
     for (const g of glossary) {
       push(sourceId, g.term, g.definition || g.term)
     }
@@ -333,9 +363,138 @@ export function listWikiTopics(db: Database.Database): WikiTopic[] {
   }))
 }
 
+const WIKI_FILLER = {
+  emptySection: 'Nothing further was recorded for this section in the library.',
+  noIndexedText: 'No indexed text is available for this topic yet.',
+  noDefinition: 'No definition line has been indexed for this topic yet.',
+  noRelatedAuto: 'No other library entries were linked automatically from this topic.'
+} as const
+
+function wikiDefinitionSnippet(text: string, maxLen: number): string {
+  const t = text.replace(/\s+/g, ' ').trim()
+  if (!t) return WIKI_FILLER.noDefinition
+  if (t.length <= maxLen) return t
+  const cut = t.slice(0, maxLen)
+  const lastPeriod = cut.lastIndexOf('.')
+  if (lastPeriod > 48) return cut.slice(0, lastPeriod + 1).trim()
+  return `${cut.trim()}…`
+}
+
+function wikiChunkBlock(c: KbChunk, i: number): string {
+  const h = c.heading?.trim()
+  const head = h || `Passage ${i + 1}`
+  return `### ${head}\n\n${c.text.trim()}`
+}
+
+function wikiMarkdownRelatedList(db: Database.Database, sourceId: string): string {
+  const related = listRelatedWikiSources(db, sourceId, 18)
+  if (related.length === 0) {
+    return WIKI_FILLER.noRelatedAuto
+  }
+  return related
+    .map((r) => {
+      const safeTitle = r.title.replace(/\*/g, "'")
+      return `- **${safeTitle}**`
+    })
+    .join('\n')
+}
+
+/**
+ * Compile browsable wiki Markdown for one KB source: reference article shape —
+ * glossary introduction (keyword + definition), practice/context, related concepts (manual chunks + suggested titles),
+ * and notes from remaining indexed chunks.
+ */
 export function getWikiPageBody(db: Database.Database, sourceId: string): string {
+  const row = db.prepare('SELECT title FROM kb_sources WHERE id = ?').get(sourceId) as { title: string } | undefined
+  const keyword = row?.title?.trim() || 'Untitled'
   const chunks = listChunksForSource(db, sourceId)
-  return chunks.map((c, i) => `## Section ${i + 1}${c.heading ? `: ${c.heading}` : ''}\n\n${c.text}`).join('\n\n---\n\n')
+  const relatedMd = wikiMarkdownRelatedList(db, sourceId)
+
+  if (chunks.length === 0) {
+    return [
+      '::: glossary',
+      `**${keyword.replace(/\*/g, "'")}** — ${WIKI_FILLER.noIndexedText}`,
+      ':::',
+      '',
+      WIKI_REFERENCE_SECTION_MARKDOWN.practice,
+      '',
+      WIKI_FILLER.emptySection,
+      '',
+      WIKI_REFERENCE_SECTION_MARKDOWN.related,
+      '',
+      relatedMd,
+      '',
+      WIKI_REFERENCE_SECTION_MARKDOWN.notes,
+      '',
+      WIKI_FILLER.emptySection,
+      ''
+    ].join('\n')
+  }
+
+  const usagePick = (c: KbChunk) =>
+    /\busage\b|application|how\s+to\s+use|employed|employ\b|practice|context|when\s+it\s+applies|applies\b|typical\s+context/i.test(
+      c.heading ?? ''
+    )
+  const relationsPick = (c: KbChunk) =>
+    /\blinguistic|relations?\b|related\s+concepts?|cross-?ref|synonym|antonym|etymolog|other\s+keywords?|see\s+also|ties\s+to\b/i.test(
+      c.heading ?? ''
+    )
+  const depthPick = (c: KbChunk) =>
+    /\bin-?depth|deep\s+dive|extended|detailed|full\s+account|analysis\b|notes\b|caveats?\b|edge\s+cases?\b/i.test(c.heading ?? '')
+
+  const usageChunks = chunks.filter(usagePick)
+  const relationsChunks = chunks.filter(relationsPick)
+  const depthChunks = chunks.filter(depthPick)
+  const consumed = new Set([...usageChunks, ...relationsChunks, ...depthChunks].map((c) => c.id))
+  const pool = chunks.filter((c) => !consumed.has(c.id))
+
+  let usageParts: KbChunk[] = [...usageChunks]
+  let depthParts: KbChunk[] = [...depthChunks]
+  const relationsManual = [...relationsChunks]
+
+  if (usageParts.length === 0 && pool.length > 0) {
+    usageParts = [pool[0]]
+    depthParts = [...depthParts, ...pool.slice(1)]
+  } else {
+    depthParts = [...depthParts, ...pool]
+  }
+
+  const defSnippet = wikiDefinitionSnippet(chunks[0]?.text ?? '', 340)
+  const glossaryTerm = keyword.replace(/\*/g, "'")
+
+  const usageBody =
+    usageParts.length > 0
+      ? usageParts.map((c, i) => wikiChunkBlock(c, i)).join('\n\n---\n\n')
+      : WIKI_FILLER.emptySection
+
+  const relationsBody =
+    relationsManual.length > 0
+      ? `### From indexed sources\n\n${relationsManual.map((c, i) => wikiChunkBlock(c, i)).join('\n\n---\n\n')}\n\n---\n\n### Suggested related entries\n\n${relatedMd}`
+      : `### Suggested related entries\n\n${relatedMd}`
+
+  const depthBody =
+    depthParts.length > 0
+      ? depthParts.map((c, i) => wikiChunkBlock(c, i)).join('\n\n---\n\n')
+      : WIKI_FILLER.emptySection
+
+  return [
+    '::: glossary',
+    `**${glossaryTerm}** — ${defSnippet}`,
+    ':::',
+    '',
+    WIKI_REFERENCE_SECTION_MARKDOWN.practice,
+    '',
+    usageBody,
+    '',
+    WIKI_REFERENCE_SECTION_MARKDOWN.related,
+    '',
+    relationsBody,
+    '',
+    WIKI_REFERENCE_SECTION_MARKDOWN.notes,
+    '',
+    depthBody,
+    ''
+  ].join('\n')
 }
 
 /** Individual chunk nodes shown per source before a single “+N more” aggregate node. */
@@ -352,6 +511,29 @@ function tokenizeTitle(title: string): string[] {
   return raw ? [...new Set(raw)] : []
 }
 
+function semanticToken(label: string): string {
+  const words = label
+    .replace(/[_:/\\-]+/g, ' ')
+    .split(/\s+/)
+    .map((w) => w.trim())
+    .filter(Boolean)
+  if (words.length === 0) return label.slice(0, 10)
+  if (words.length === 1) return words[0].slice(0, 12)
+  return `${words[0].slice(0, 8)} ${words[1].slice(0, 8)}`
+}
+
+function domainIdFromUri(uri: string): string | undefined {
+  const t = uri.trim()
+  if (!t) return undefined
+  const m = t.match(/^domain:([a-f0-9-]{8,})/i)
+  if (m?.[1]) return m[1].toLowerCase()
+  if (t.startsWith('chat:')) return 'chat'
+  if (t.startsWith('wiki-extract:')) return 'wiki'
+  if (t.startsWith('deep-learn:')) return 'research'
+  if (t.startsWith('file://')) return 'documents'
+  return undefined
+}
+
 /**
  * Build a structural knowledge graph: KB sources linked to chunk nodes, wiki pages linked to chunks,
  * wiki pages tied to their source when `page_id` is `src:<sourceId>`, and weak `related` edges between
@@ -359,8 +541,8 @@ function tokenizeTitle(title: string): string[] {
  */
 export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload {
   const sources = db
-    .prepare(`SELECT id, title FROM kb_sources ORDER BY created_at ASC`)
-    .all() as { id: string; title: string }[]
+    .prepare(`SELECT id, title, uri, created_at as createdAt FROM kb_sources ORDER BY created_at ASC`)
+    .all() as { id: string; title: string; uri: string; createdAt: number }[]
 
   const nodes: KnowledgeGraphNode[] = []
   const edges: KnowledgeGraphEdge[] = []
@@ -368,7 +550,16 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
   let chunkSlotsUsed = 0
 
   for (const s of sources) {
-    nodes.push({ id: s.id, kind: 'source', label: s.title })
+    nodes.push({
+      id: s.id,
+      kind: 'source',
+      label: s.title,
+      shortLabel: semanticToken(s.title),
+      domainId: domainIdFromUri(s.uri),
+      confidence: 0.72,
+      novelty: 0.36,
+      provenance: 'knowledge-base'
+    })
   }
 
   const chunkStmt = db.prepare(
@@ -399,10 +590,15 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
         id: r.id,
         kind: 'chunk',
         label: ordLabel,
+        shortLabel: `c${r.ord + 1}`,
         sublabel: sub,
-        sourceId: s.id
+        sourceId: s.id,
+        domainId: domainIdFromUri(s.uri),
+        confidence: 0.58,
+        novelty: r.heading ? 0.62 : 0.44,
+        provenance: 'knowledge-base'
       })
-      edges.push({ from: s.id, to: r.id, kind: 'contains' })
+      edges.push({ from: s.id, to: r.id, kind: 'contains', confidence: 0.92, recency: 0.5 })
       chunkSlotsUsed++
     }
     const omitted = rows.length - slice.length
@@ -412,10 +608,15 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
         id: overflowId,
         kind: 'chunk',
         label: `+${omitted}`,
+        shortLabel: `+${omitted}`,
         sublabel: 'chunks not drawn',
-        sourceId: s.id
+        sourceId: s.id,
+        domainId: domainIdFromUri(s.uri),
+        confidence: 0.4,
+        novelty: 0.2,
+        provenance: 'knowledge-base'
       })
-      edges.push({ from: s.id, to: overflowId, kind: 'contains' })
+      edges.push({ from: s.id, to: overflowId, kind: 'contains', confidence: 0.82, recency: 0.4 })
       chunkSlotsUsed++
     }
   }
@@ -429,7 +630,18 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
         })()
       : wikiRowsAll
   for (const w of wikiRows) {
-    nodes.push({ id: w.id, kind: 'wiki', label: w.title })
+    const sourceBackref = w.id.startsWith('src:') ? w.id.slice(4) : undefined
+    const src = sourceBackref ? sources.find((s) => s.id === sourceBackref) : undefined
+    nodes.push({
+      id: w.id,
+      kind: 'wiki',
+      label: w.title,
+      shortLabel: semanticToken(w.title),
+      domainId: src ? domainIdFromUri(src.uri) : undefined,
+      confidence: 0.78,
+      novelty: 0.48,
+      provenance: 'knowledge-base'
+    })
   }
 
   const linkRows = db
@@ -441,7 +653,7 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
   for (const l of linkRows) {
     if (!chunkIds.has(l.chunkId)) continue
     if (!wikiNodeIds.has(l.pageId)) continue
-    edges.push({ from: l.pageId, to: l.chunkId, kind: 'indexes' })
+    edges.push({ from: l.pageId, to: l.chunkId, kind: 'indexes', confidence: 0.74, recency: 0.55 })
   }
 
   const sourceIdSet = new Set(sources.map((s) => s.id))
@@ -449,7 +661,7 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
     if (w.id.startsWith('src:')) {
       const sid = w.id.slice(4)
       if (sourceIdSet.has(sid)) {
-        edges.push({ from: w.id, to: sid, kind: 'compiled_from' })
+        edges.push({ from: w.id, to: sid, kind: 'compiled_from', confidence: 0.88, recency: 0.65 })
       }
     }
   }
@@ -467,7 +679,7 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
       if (a.length === 0 || b.length === 0) continue
       const shared = a.some((t) => b.includes(t))
       if (shared) {
-        edges.push({ from: sources[i].id, to: sources[j].id, kind: 'related' })
+        edges.push({ from: sources[i].id, to: sources[j].id, kind: 'related', confidence: 0.52, recency: 0.35 })
       }
     }
   }
@@ -615,7 +827,7 @@ export function listRelatedWikiSources(
 /** Sync wiki page row, then return payload for the renderer (glossary stripped from body). */
 export function buildWikiPagePayload(db: Database.Database, sourceId: string): WikiPagePayload {
   const page = ensureWikiPageForSource(db, sourceId)
-  const { body, glossary } = extractWikiGlossary(page.body)
+  const { body, glossary } = extractWikiGlossary(stripWikiControlMarkers(page.body))
   return {
     id: page.id,
     title: page.title,
@@ -712,7 +924,7 @@ export async function exportWikiZip(db: Database.Database, outPath: string): Pro
     [
       '# Wiki export',
       '',
-      'Generated by **Local LLM Desktop**. Each file under `wiki-sources/` matches the compiled wiki body shown in the app (sections built from indexed chunks).',
+      'Generated by **Local LLM Desktop**. Each file under `wiki-sources/` matches the compiled wiki body shown in the app (reference layout: glossary plus practice, related concepts, and notes — built from indexed chunks and suggested related titles).',
       '',
       'Metadata: `wiki-manifest.json` (ids, URIs, kinds, timestamps).',
       ''
