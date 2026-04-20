@@ -74,6 +74,10 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   integrationListenEnabled: false,
   integrationPort: 17373,
   integrationToken: '',
+  /** After a formal verification run completes, optionally summarize logs with the local model (advisory text only). */
+  formalVerificationInterpretWithLlm: false,
+  /** When interpreting, include KB snippets and a bounded repo scan in the model prompt (opt-in; may contain sensitive titles). */
+  formalVerificationInterpretIncludeKb: false,
   /** User-checked steps for the IntelliJ plugin journey (shown in the Dev panel when unpackaged). */
   ideJourneyChecklist: {
     backendReady: false,
@@ -146,6 +150,12 @@ export function migrateChatProfileSettings(store: Store<Record<string, unknown>>
   }
   if (typeof store.get('chatResponsePostProcess') !== 'boolean') {
     store.set('chatResponsePostProcess', true)
+  }
+  if (typeof store.get('formalVerificationInterpretWithLlm') !== 'boolean') {
+    store.set('formalVerificationInterpretWithLlm', false)
+  }
+  if (typeof store.get('formalVerificationInterpretIncludeKb') !== 'boolean') {
+    store.set('formalVerificationInterpretIncludeKb', false)
   }
   if (!store.has('typographyComfort')) {
     store.set('typographyComfort', DEFAULT_TYPOGRAPHY_COMFORT)
