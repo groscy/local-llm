@@ -15,6 +15,7 @@
     "prepreview": "node scripts/ensure-preload-api.mjs",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "dist:zip": "node scripts/package-zip.mjs",
     "dist:installer": "node scripts/package-installer.mjs",
     "dist:linux": "node scripts/package-linux.mjs",
@@ -31,12 +32,16 @@
     "@fortawesome/fontawesome-free": "^7.2.0",
     "@huggingface/hub": "^1.0.1",
     "archiver": "^7.0.1",
+    "archiver-utils": "^5.0.2",
     "better-sqlite3": "^11.7.0",
+    "compress-commons": "^6.0.2",
     "dompurify": "^3.3.3",
     "electron-store": "^10.0.0",
+    "electron-updater": "^6.8.3",
     "katex": "^0.16.45",
     "marked": "^18.0.0",
     "mermaid": "^11.14.0",
+    "pdf-parse": "^2.4.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -56,6 +61,7 @@
     "react-dom": "^18.3.1",
     "sharp": "^0.34.5",
     "typescript": "^5.7.2",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vitest": "^3.0.5"
   }
 }

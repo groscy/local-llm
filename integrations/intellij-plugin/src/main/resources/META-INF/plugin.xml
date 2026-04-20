@@ -28,6 +28,7 @@
         <projectService serviceImplementation="com.localllm.intellij.LocalLlmBridgeService"/>
         <inline.completion.provider id="com.localllm.intellij.LocalLlmInlineCompletionProvider"
                                     implementation="com.localllm.intellij.LocalLlmInlineCompletionProvider"/>
+        <projectActivity implementation="com.localllm.intellij.LocalLlmProjectOpenReporter"/>
     </extensions>
 
     <actions>

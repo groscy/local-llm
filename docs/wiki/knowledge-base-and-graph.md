@@ -34,9 +34,24 @@ Use this page to understand what the **Knowledge wiki** and **Knowledge graph** 
 
 From **Chat**, search the knowledge base and **pull** snippets into your composer; the model sees that text in the user turn. The graph does not change retrieval rules—it is a **map** of how material is stored and linked.
 
+**Chat prompt domains** (keyword clusters with optional system suffix text) are edited under **Settings → Chat & knowledge**, next to **Domain-enhanced prompts**—not in the wiki sidebar.
+
 ## Auto notes from chat
 
-When **Auto-extract wiki notes after each reply** is enabled (Settings → Chat generation), the app sends the last user message and assistant reply through a **brief follow-up** completion with a fixed “archivist” prompt. The model returns a `TITLE:` line and markdown bullets; that text is ingested as a new `kb_sources` row with `conversation_id` set, so it participates in the same **delete with chat** cleanup as manually saved chat exports.
+When **Auto-extract wiki notes after each reply** is enabled (Settings → Chat generation), the app sends the last user message and assistant reply through a **brief follow-up** completion with a fixed “archivist” prompt. The model returns a `<wiki-title>…</wiki-title>` line (legacy `TITLE:` is still accepted) and Markdown body; that text is ingested as a new `kb_sources` row with `conversation_id` set, so it participates in the same **delete with chat** cleanup as manually saved chat exports.
+
+## Reference-style wiki entries
+
+Browsable wiki pages (`wiki_pages` compiled from each source) follow a **reference article** shape:
+
+1. **`::: glossary` … `:::`** — The entry keyword (usually the source title) and a **short definition** (also rendered in the Glossary panel).
+2. **`## Practice and context`** — How the topic shows up in practice; populated from indexed chunks whose **headings** suggest usage or context (e.g. “Usage”, “Application”, “Practice”), or from the first unassigned chunk when you have not used those headings.
+3. **`## Related concepts`** — Your own passages from chunks whose headings mention relations, synonyms, “see also”, etc., plus optional **h3** blocks (“From indexed sources” / “Suggested related entries”) and a short bullet list of other library titles (same scoring signal as **See also** in the UI).
+4. **`## Notes and caveats`** — Remaining indexed passages, or chunks explicitly tagged with headings like “In-depth”, “Notes”, or “Caveats”.
+
+When authoring Markdown for **+ Add document**, use headings that match these sections (or the older “Usage” / “Linguistic relations” / “In-depth” labels) so chunk boundaries line up with the buckets you want. Auto-extracted chat notes are prompted to use the same structure in the model output.
+
+When a subsection has nothing to show yet, the compiler inserts a **short neutral sentence** instead of internal control tokens. Older rows may still contain legacy `` `wiki:…` `` markers; the app strips those when rendering.
 
 ## Ingesting this repository
 

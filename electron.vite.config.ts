@@ -39,6 +39,8 @@ export default defineConfig({
   renderer: {
     root: resolve(__dirname, 'src/renderer'),
     publicDir: resolve(__dirname, 'src/renderer/public'),
+    // Required for packaged `loadFile`: absolute `/asset.png` becomes `file:///asset.png` and breaks.
+    base: './',
     resolve: {
       alias: sharedAlias
     },

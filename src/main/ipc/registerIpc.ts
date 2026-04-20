@@ -86,6 +86,7 @@ import {
   LLAMA_CONTEXT_TOKENS_DEFAULT
 } from '@shared/llamaContext'
 import { llamaSamplingFromStore } from '../services/llamaChatOptions'
+import { manualCheckForUpdates } from '../updateController'
 import { hfSearch, hfModelDetail, hfRecommended } from '../services/hfService'
 import {
   startDownload,
@@ -126,6 +127,12 @@ import {
   runWikiExtractChat,
   wikiExtractLimits
 } from '../services/wikiExtractService'
+import {
+  deepLearnCancelJob,
+  resolveDeepLearnRoundChoice,
+  runDeepLearnResearch
+} from '../services/deepLearnResearchService'
+import { assertUrlAllowedForDeepLearnFetch } from '../services/deepLearnFetch'
 import * as metricsService from '../services/metricsService'
 import * as trainOrchestrator from '../services/trainOrchestrator'
 import { logLine } from '../logger'
@@ -147,6 +154,27 @@ import {
 } from '../services/pythonDetect'
 import { scanArchitectureRepository } from '../services/architectureRepositoryScan'
 import { saveIntellijPluginZipWithDialog } from '../services/intellijPluginZip'
+import {
+  addFormalProfile,
+  addManualCodebase,
+  appendFormalRun,
+  readCodebaseFormalBundle,
+  removeCodebase,
+  removeFormalProfile,
+  updateCodebase,
+  updateFormalRun
+} from '../services/codebaseFormalStore'
+import {
+  expandCommandTemplate,
+  finalizeRunRow,
+  runFormalVerificationJob
+} from '../services/formalVerificationRunner'
+import {
+  DEFAULT_FORMAL_TOOL_TIMEOUT_MS,
+  type FormalToolProfile,
+  type FormalVerificationProgressPayload,
+  type FormalVerificationRun
+} from '@shared/codebaseRegistry'
 
 const configSchema = z.object({
   /** Set to `null` to clear and use the app default under user data. */
@@ -190,6 +218,10 @@ const configSchema = z.object({
       message: 'Unknown color scheme id'
     }),
   typographyComfort: z.enum(['compact', 'balanced', 'relaxed', 'reader']).optional(),
+  typographyFontFamily: z.enum(['system', 'wide_sans', 'serif_document']).optional(),
+  typographyLineHeightFactor: z.number().min(0.88).max(1.2).optional(),
+  typographyLetterSpacingExtraEm: z.number().min(-0.04).max(0.12).optional(),
+  typographyWordSpacingEm: z.number().min(0).max(0.2).optional(),
   chatMaxTokens: z.number().int().min(1).max(262_144).optional(),
   /** When set, caps llama.cpp `max_tokens` / `-n` default instead of global `chatMaxTokens`. Clear with `null`. */
   llamaChatMaxTokens: z.union([z.number().int().min(1).max(262_144), z.null()]).optional(),
@@ -214,6 +246,10 @@ const configSchema = z.object({
   /** When true, successful IDE chat_completed reports mark checklist firstIdeChat. */
   ideJourneyAutoChecklist: z.boolean().optional(),
   wikiAutoExtract: z.boolean().optional(),
+  chatResponsePostProcess: z.boolean().optional(),
+  deepLearnEnabled: z.boolean().optional(),
+  deepLearnMaxRounds: z.number().int().min(1).max(24).optional(),
+  deepLearnMaxFetchBytes: z.number().int().min(4096).max(8_000_000).optional(),
   /** Bump when onboarding copy changes; user sees welcome until version matches latest in app. */
   welcomeGuideVersion: z.number().int().min(0).max(99).optional(),
   uiRole: z.enum(['software_developer', 'software_architect', 'business_analyst', 'tester']).optional(),
@@ -285,8 +321,12 @@ export function registerIpc(ctx: IpcContext): void {
     modelsDefault: modelsDir(),
     db: join(userData, 'app.sqlite'),
     vectors: join(userData, 'vectors'),
-    platform: process.platform
+    platform: process.platform,
+    appVersion: app.getVersion(),
+    updatesSupported: app.isPackaged && !is.dev
   }))
+
+  ipcMain.handle(IPC.APP_UPDATE_CHECK, async () => manualCheckForUpdates())
 
   ipcMain.handle(IPC.OPEN_PATH_IN_EXPLORER, async (_e, raw: unknown) => {
     const parsed = z.string().min(1).max(8192).safeParse(raw)
@@ -407,6 +447,198 @@ export function registerIpc(ctx: IpcContext): void {
       logLine('warn', 'architecture_repo_scan_failed', { root, error: msg })
       return { ok: false, error: msg } as const
     }
+  })
+
+  const formalVerificationLocks = new Set<string>()
+
+  function sendFormalVerificationProgress(payload: FormalVerificationProgressPayload): void {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) {
+        w.webContents.send(IPC.CODEBASE_FORMAL_VERIFICATION_PROGRESS, payload)
+      }
+    }
+  }
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_GET, () => readCodebaseFormalBundle(store))
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_PICK_ROOT, async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const r = win
+      ? await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
+      : await dialog.showOpenDialog({ properties: ['openDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return null
+    return r.filePaths[0]
+  })
+
+  const formalAddCodebaseSchema = z.object({
+    rootPath: z.string().min(1).max(8192),
+    displayName: z.string().max(400).optional()
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_ADD, (_e, raw: unknown) => {
+    const parsed = formalAddCodebaseSchema.safeParse(raw)
+    if (!parsed.success) return { ok: false as const, error: 'Invalid payload' }
+    const rec = addManualCodebase(store, parsed.data.rootPath, parsed.data.displayName)
+    if (!rec) return { ok: false as const, error: 'Path is not an existing directory.' }
+    return { ok: true as const, record: rec }
+  })
+
+  const formalUpdateCodebaseSchema = z.object({
+    id: z.string().uuid(),
+    displayName: z.string().max(400).optional(),
+    disabled: z.boolean().optional()
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_UPDATE, (_e, raw: unknown) => {
+    const parsed = formalUpdateCodebaseSchema.safeParse(raw)
+    if (!parsed.success) return { ok: false as const, error: 'Invalid payload' }
+    const rec = updateCodebase(store, parsed.data.id, {
+      displayName: parsed.data.displayName,
+      disabled: parsed.data.disabled
+    })
+    if (!rec) return { ok: false as const, error: 'Codebase not found.' }
+    return { ok: true as const, record: rec }
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_REMOVE, (_e, id: unknown) => {
+    if (typeof id !== 'string' || !id.trim()) return { ok: false as const, error: 'Invalid id' }
+    const ok = removeCodebase(store, id.trim())
+    return ok ? ({ ok: true as const } as const) : ({ ok: false as const, error: 'Codebase not found.' } as const)
+  })
+
+  const formalProfileAddSchema = z.object({
+    label: z.string().min(1).max(200),
+    commandTemplate: z.string().min(1).max(8000),
+    spawnMode: z.enum(['shell', 'exec']).optional(),
+    timeoutMs: z.number().int().min(1000).max(3_600_000).optional(),
+    expectedExitCodes: z.array(z.number().int()).min(1).max(24).optional()
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_PROFILE_ADD, (_e, raw: unknown) => {
+    const parsed = formalProfileAddSchema.safeParse(raw)
+    if (!parsed.success) return { ok: false as const, error: 'Invalid profile' }
+    const profile: FormalToolProfile = {
+      id: randomUUID(),
+      label: parsed.data.label,
+      commandTemplate: parsed.data.commandTemplate,
+      spawnMode: parsed.data.spawnMode ?? (process.platform === 'win32' ? 'shell' : 'exec'),
+      timeoutMs: parsed.data.timeoutMs ?? DEFAULT_FORMAL_TOOL_TIMEOUT_MS,
+      expectedExitCodes: parsed.data.expectedExitCodes ?? [0]
+    }
+    addFormalProfile(store, profile)
+    return { ok: true as const, profile }
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_PROFILE_REMOVE, (_e, id: unknown) => {
+    if (typeof id !== 'string' || !id.trim()) return { ok: false as const, error: 'Invalid id' }
+    const ok = removeFormalProfile(store, id.trim())
+    return ok ? ({ ok: true as const } as const) : ({ ok: false as const, error: 'Profile not found.' } as const)
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_RUN_LIST, () => {
+    const bundle = readCodebaseFormalBundle(store)
+    return [...bundle.formalVerificationRuns].sort((a, b) => b.startedAt - a.startedAt)
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_RUN_GET, (_e, runId: unknown) => {
+    if (typeof runId !== 'string' || !runId.trim()) return null
+    const bundle = readCodebaseFormalBundle(store)
+    return bundle.formalVerificationRuns.find((r) => r.id === runId.trim()) ?? null
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_RUN_EXPORT_JSON, (_e, runId: unknown) => {
+    if (typeof runId !== 'string' || !runId.trim()) return { ok: false as const, error: 'Invalid id' }
+    const bundle = readCodebaseFormalBundle(store)
+    const run = bundle.formalVerificationRuns.find((r) => r.id === runId.trim())
+    if (!run) return { ok: false as const, error: 'Run not found.' }
+    const payload = {
+      disclaimer:
+        'Tool-backed bounded formal assurance only. Verdict reflects the configured external command exit code, not universal program correctness.',
+      exportedAt: new Date().toISOString(),
+      run
+    }
+    return { ok: true as const, json: JSON.stringify(payload, null, 2) }
+  })
+
+  const formalRunStartSchema = z.object({
+    codebaseId: z.string().uuid(),
+    profileId: z.string().uuid()
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_RUN_START, (_event, raw: unknown) => {
+    const parsed = formalRunStartSchema.safeParse(raw)
+    if (!parsed.success) return { ok: false as const, error: 'Invalid payload' }
+    const { codebaseId, profileId } = parsed.data
+    if (formalVerificationLocks.has(codebaseId)) {
+      return { ok: false as const, error: 'A verification run is already in progress for this codebase.' }
+    }
+    const bundle = readCodebaseFormalBundle(store)
+    const codebase = bundle.codebases.find((c) => c.id === codebaseId)
+    const profile = bundle.formalToolProfiles.find((p) => p.id === profileId)
+    if (!codebase) return { ok: false as const, error: 'Codebase not found.' }
+    if (!profile) return { ok: false as const, error: 'Profile not found.' }
+    if (codebase.disabled) return { ok: false as const, error: 'Codebase is disabled.' }
+
+    const cwd = resolve(codebase.rootPath.trim())
+    if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
+      return { ok: false as const, error: 'Codebase directory no longer exists.' }
+    }
+
+    const commandResolved = expandCommandTemplate(profile.commandTemplate, cwd)
+    const runId = randomUUID()
+    const startedAt = Date.now()
+    const baseRun: FormalVerificationRun = {
+      id: runId,
+      codebaseId,
+      profileId,
+      startedAt,
+      status: 'running',
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+      commandResolved
+    }
+
+    formalVerificationLocks.add(codebaseId)
+    appendFormalRun(store, baseRun)
+    sendFormalVerificationProgress({ runId, phase: 'started', run: baseRun })
+
+    void (async () => {
+      try {
+        const expectedExitCodes =
+          profile.expectedExitCodes.length > 0 ? profile.expectedExitCodes : [0]
+        const timeoutMs =
+          typeof profile.timeoutMs === 'number' && profile.timeoutMs > 0
+            ? profile.timeoutMs
+            : DEFAULT_FORMAL_TOOL_TIMEOUT_MS
+        const result = await runFormalVerificationJob({
+          commandResolved,
+          cwd,
+          spawnMode: profile.spawnMode,
+          timeoutMs,
+          expectedExitCodes
+        })
+        const final = finalizeRunRow(baseRun, result)
+        updateFormalRun(store, final)
+        sendFormalVerificationProgress({ runId, phase: 'finished', run: final })
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        const failed: FormalVerificationRun = {
+          ...baseRun,
+          finishedAt: Date.now(),
+          status: 'failed',
+          exitCode: null,
+          stdout: '',
+          stderr: msg.slice(0, 8000)
+        }
+        updateFormalRun(store, failed)
+        sendFormalVerificationProgress({ runId, phase: 'finished', run: failed })
+      } finally {
+        formalVerificationLocks.delete(codebaseId)
+      }
+    })()
+
+    return { ok: true as const, runId }
   })
 
   const confirmDestructivePayload = z.object({
@@ -1015,7 +1247,14 @@ export function registerIpc(ctx: IpcContext): void {
   })
 
   ipcMain.handle(IPC.KB_INGEST_FILE, async () => {
-    const r = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Text', extensions: ['txt', 'md', 'html'] }] })
+    const r = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [
+        { name: 'Documents', extensions: ['txt', 'md', 'html', 'htm', 'pdf'] },
+        { name: 'PDF', extensions: ['pdf'] },
+        { name: 'Text / Markdown', extensions: ['txt', 'md', 'html', 'htm'] }
+      ]
+    })
     if (r.canceled || !r.filePaths[0]) return null
     return kbService.ingestFile(db, r.filePaths[0])
   })
@@ -1039,6 +1278,7 @@ export function registerIpc(ctx: IpcContext): void {
     kbService.deleteKbSource(db, id)
     return { ok: true as const }
   })
+  ipcMain.handle(IPC.KB_RESET_WIKI_AND_KEYWORDS, () => kbService.resetEntireWikiAndKeywords(db))
   ipcMain.handle(IPC.KB_EXPORT_WIKI_ZIP, async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     const iso = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
@@ -1114,7 +1354,7 @@ export function registerIpc(ctx: IpcContext): void {
       const { title, body } = distilled
       const t = Date.now()
       const uri = `wiki-extract:${parsed.data.conversationId}:${t}`
-      const displayTitle = `Note: ${title}`
+      const displayTitle = title.replace(/\s+/g, ' ').trim() || 'Untitled'
       const source = kbService.ingestText(
         db,
         displayTitle,
@@ -1130,6 +1370,127 @@ export function registerIpc(ctx: IpcContext): void {
       logLine('warn', 'wiki_extract_failed', { error: message })
       return { ok: false as const, skipped: false, error: message }
     }
+  })
+
+  ipcMain.handle(IPC.KB_DEEP_LEARN_RUN, async (event, raw: unknown) => {
+    const parsed = z
+      .object({
+        jobId: z.string().min(1).max(128),
+        conversationId: z.string().min(1),
+        subject: z.string().min(1).max(500),
+        userMessage: z.string().min(1).max(24_000),
+        approvedFetchUrls: z.array(z.string().min(1).max(2048)).max(20)
+      })
+      .safeParse(raw)
+    if (!parsed.success) {
+      return { ok: false as const, error: 'Invalid deep learn payload' }
+    }
+
+    if (store.get('deepLearnEnabled') === false) {
+      return {
+        ok: false as const,
+        error: 'Deep research is turned off in Settings → Chat generation.'
+      }
+    }
+
+    for (const url of parsed.data.approvedFetchUrls) {
+      const t = url.trim()
+      if (!/^https?:\/\//i.test(t)) {
+        return { ok: false as const, error: `Unsupported URL: ${t.slice(0, 120)}` }
+      }
+      try {
+        assertUrlAllowedForDeepLearnFetch(t)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return { ok: false as const, error: msg }
+      }
+    }
+
+    const rt = getRuntime()
+    if (!rt?.getStatus().running) {
+      return { ok: false as const, error: 'Model is not running. Start the runtime first.' }
+    }
+
+    const maxRoundsRaw = store.get('deepLearnMaxRounds')
+    const maxRounds =
+      typeof maxRoundsRaw === 'number' && Number.isFinite(maxRoundsRaw)
+        ? Math.min(24, Math.max(1, Math.floor(maxRoundsRaw)))
+        : 5
+    const maxBytesRaw = store.get('deepLearnMaxFetchBytes')
+    const maxFetchBytes =
+      typeof maxBytesRaw === 'number' && Number.isFinite(maxBytesRaw)
+        ? Math.min(8_000_000, Math.max(4096, Math.floor(maxBytesRaw)))
+        : 1_500_000
+
+    const jobId = parsed.data.jobId
+    event.sender.send(IPC.KB_DEEP_LEARN_PROGRESS, { kind: 'started', jobId })
+
+    try {
+      const r = await runDeepLearnResearch({
+        db,
+        store,
+        rt,
+        jobId,
+        conversationId: parsed.data.conversationId,
+        subject: parsed.data.subject,
+        userMessage: parsed.data.userMessage,
+        approvedFetchUrls: parsed.data.approvedFetchUrls.map((u) => u.trim()),
+        maxRounds,
+        maxFetchBytes,
+        sendProgress: (p) =>
+          event.sender.send(IPC.KB_DEEP_LEARN_PROGRESS, {
+            jobId,
+            ...p
+          })
+      })
+      logLine('info', 'deep_learn_ingested', {
+        sourceId: r.sourceId,
+        conversationId: parsed.data.conversationId
+      })
+      return {
+        ok: true as const,
+        sourceId: r.sourceId,
+        title: r.title,
+        roundsUsed: r.roundsUsed,
+        fetchErrors: r.fetchErrors.length ? r.fetchErrors : undefined,
+        lastExplorePaths: r.lastExplorePaths.length ? r.lastExplorePaths : undefined
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (msg === 'cancelled' || msg.toLowerCase().includes('cancelled')) {
+        event.sender.send(IPC.KB_DEEP_LEARN_PROGRESS, { kind: 'cancelled', jobId })
+        return { ok: false as const, error: 'Cancelled', cancelled: true }
+      }
+      logLine('warn', 'deep_learn_failed', { error: msg })
+      return { ok: false as const, error: msg }
+    }
+  })
+
+  ipcMain.handle(IPC.KB_DEEP_LEARN_CANCEL, (_e, raw: unknown) => {
+    const p = z.object({ jobId: z.string().min(1).max(128) }).safeParse(raw)
+    if (!p.success) return { ok: false as const }
+    deepLearnCancelJob(p.data.jobId)
+    return { ok: true as const }
+  })
+
+  ipcMain.handle(IPC.KB_DEEP_LEARN_RESUME, (_e, raw: unknown) => {
+    const p = z
+      .object({
+        jobId: z.string().min(1).max(128),
+        action: z.enum(['continue', 'finish']),
+        followUp: z.string().max(4000).optional()
+      })
+      .safeParse(raw)
+    if (!p.success) return { ok: false as const }
+    if (p.data.action === 'finish') {
+      resolveDeepLearnRoundChoice(p.data.jobId, { action: 'finish' })
+    } else {
+      resolveDeepLearnRoundChoice(p.data.jobId, {
+        action: 'continue',
+        followUp: p.data.followUp?.trim() || undefined
+      })
+    }
+    return { ok: true as const }
   })
 
   ipcMain.handle(IPC.METRICS_SNAPSHOT, async (_e, opts?: { persist?: boolean }) => {

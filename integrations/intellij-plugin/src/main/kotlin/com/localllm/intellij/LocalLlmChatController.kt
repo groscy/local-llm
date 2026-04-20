@@ -78,14 +78,17 @@ class LocalLlmChatController(
         val port = LocalLlmIntegrationProperties.integrationPort()
         val token = LocalLlmIntegrationProperties.integrationToken()
 
-        val preview = buildString {
-            if (question.isNotEmpty()) appendLine(question)
-            if (files.isNotEmpty()) {
-                appendLine()
-                appendLine("— ${files.size} file(s) attached —")
+        // Prompt text stays in the compose area — do not duplicate it in the transcript.
+        val youLine = buildString {
+            append("You")
+            when {
+                files.isNotEmpty() && question.isNotEmpty() ->
+                    append(" · ${files.size} file(s) attached")
+                files.isNotEmpty() ->
+                    append(" · ${files.size} file(s) only (no extra message text)")
             }
         }
-        transcript.appendSection("You", preview.trimEnd())
+        transcript.append("$youLine\n\n")
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Local LLM", true) {
             override fun run(indicator: ProgressIndicator) {

@@ -11,6 +11,7 @@ import type { RuntimeAdapter } from './services/runtime/types'
 import { ELECTRON_STORE_DEFAULTS } from './storeDefaults'
 import { stopIntegrationServer } from './services/integrationServer'
 import { resumeInterruptedDownloads } from './services/downloadManager'
+import { initAppUpdater } from './updateController'
 
 const store = new Store<Record<string, unknown>>({
   defaults: { ...ELECTRON_STORE_DEFAULTS }
@@ -45,8 +46,14 @@ function windowIconPath(): string | undefined {
     if (existsSync(dev)) return dev
     return undefined
   }
-  const prod = join(__dirname, '../renderer/app-icon.png')
-  if (existsSync(prod)) return prod
+  // Packaged: prefer file next to app.asar (see electron-builder extraResources → window-icon.png).
+  // PNG only under app.asar is unreliable for the Windows title-bar icon.
+  const besideAsar = join(process.resourcesPath, 'window-icon.png')
+  if (existsSync(besideAsar)) return besideAsar
+  const sibling = join(__dirname, '..', 'renderer', 'app-icon.png')
+  if (existsSync(sibling)) return sibling
+  const underApp = join(app.getAppPath(), 'out', 'renderer', 'app-icon.png')
+  if (existsSync(underApp)) return underApp
   return undefined
 }
 
@@ -66,7 +73,13 @@ function createWindow(): void {
     }
   })
 
-  mainWindow.on('ready-to-show', () => mainWindow?.show())
+  mainWindow.on('ready-to-show', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMaximizable()) {
+      mainWindow.maximize()
+    }
+    mainWindow.show()
+  })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
@@ -123,6 +136,7 @@ app.whenReady().then(() => {
   resumeInterruptedDownloads(db, () => hfTokenMem)
 
   createWindow()
+  initAppUpdater()
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

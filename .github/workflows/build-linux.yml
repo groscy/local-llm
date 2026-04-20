@@ -1,10 +1,8 @@
+# Manual Linux artifact build (no GitHub Release upload). For tagged releases see release-desktop.yml.
 name: Build Linux release
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 
 jobs:
   linux:

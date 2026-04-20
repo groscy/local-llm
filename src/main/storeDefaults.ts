@@ -7,6 +7,17 @@ import {
   WELCOME_GUIDE_LATEST
 } from '@shared/uiRole'
 import { DEFAULT_TYPOGRAPHY_COMFORT, parseTypographyComfort } from '@shared/typographyComfort'
+import {
+  DEFAULT_TYPOGRAPHY_FONT_FAMILY,
+  DEFAULT_TYPOGRAPHY_LETTER_SPACING_EXTRA_EM,
+  DEFAULT_TYPOGRAPHY_LINE_HEIGHT_FACTOR,
+  DEFAULT_TYPOGRAPHY_WORD_SPACING_EM,
+  parseTypographyFontFamily,
+  parseTypographyLetterSpacingExtraEm,
+  parseTypographyLineHeightFactor,
+  parseTypographyWordSpacingEm
+} from '@shared/typographyTune'
+import { CODEBASE_FORMAL_STORE_KEY, emptyCodebaseFormalBundle } from '@shared/codebaseRegistry'
 
 /** Default keys written on first launch and after “factory reset”. */
 export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
@@ -29,6 +40,13 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   colorScheme: 'violet',
   /** Text scale & rhythm; see `@shared/typographyComfort` and `data-typography-comfort` in styles. */
   typographyComfort: 'balanced',
+  typographyFontFamily: DEFAULT_TYPOGRAPHY_FONT_FAMILY,
+  /** Multiplier on preset line-heights (body, chat bubbles, composer). */
+  typographyLineHeightFactor: DEFAULT_TYPOGRAPHY_LINE_HEIGHT_FACTOR,
+  /** Added to preset letter-spacing on the body (em). */
+  typographyLetterSpacingExtraEm: DEFAULT_TYPOGRAPHY_LETTER_SPACING_EXTRA_EM,
+  /** Word spacing on the body (em); 0 means CSS `normal`. */
+  typographyWordSpacingEm: DEFAULT_TYPOGRAPHY_WORD_SPACING_EM,
   /** Upper bound on assistant completion length (Ollama `num_predict`; llama.cpp default unless `llamaChatMaxTokens` is set). */
   chatMaxTokens: 4096,
   /** Max prior user+assistant messages included in the API history (newest retained). */
@@ -44,6 +62,14 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   llamaPresencePenalty: 0,
   /** After each assistant reply, run a brief second pass to extract bullet notes into the knowledge base / wiki. */
   wikiAutoExtract: true,
+  /** Tidy assistant Markdown (spacing, section breaks, quick outline) before saving and displaying. */
+  chatResponsePostProcess: true,
+  /** “Learn everything about …” runs multi-step local research and ingests one wiki article. */
+  deepLearnEnabled: true,
+  /** Max refinement rounds per deep-learn run (each round is one model completion). */
+  deepLearnMaxRounds: 5,
+  /** Max bytes downloaded per approved URL during deep-learn fetch. */
+  deepLearnMaxFetchBytes: 1_500_000,
   /** Localhost HTTP API for IDE plugins (127.0.0.1 only). */
   integrationListenEnabled: false,
   integrationPort: 17373,
@@ -60,7 +86,9 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   /** Self-hosted Ollama only (second machine you run); not third-party LLM APIs */
   agentRemoteOllamaUrl: '',
   /** Workspace role for simplified nav (see `@shared/uiRole`). */
-  uiRole: DEFAULT_UI_ROLE
+  uiRole: DEFAULT_UI_ROLE,
+  /** Codebases, formal tool profiles, and verification run history (see `@shared/codebaseRegistry`). */
+  [CODEBASE_FORMAL_STORE_KEY]: emptyCodebaseFormalBundle()
 }
 
 export function resetElectronStoreToFactory(store: Store<Record<string, unknown>>): void {
@@ -73,7 +101,14 @@ export function resetElectronStoreToFactory(store: Store<Record<string, unknown>
 /**
  * Legacy store cleanup and defaults. Call when the app starts.
  */
+export function migrateCodebaseFormalStore(store: Store<Record<string, unknown>>): void {
+  if (!store.has(CODEBASE_FORMAL_STORE_KEY)) {
+    store.set(CODEBASE_FORMAL_STORE_KEY, emptyCodebaseFormalBundle())
+  }
+}
+
 export function migrateChatProfileSettings(store: Store<Record<string, unknown>>): void {
+  migrateCodebaseFormalStore(store)
   if (store.has('chatLlamaMinimalSystem')) {
     store.delete('chatLlamaMinimalSystem')
   }
@@ -94,12 +129,40 @@ export function migrateChatProfileSettings(store: Store<Record<string, unknown>>
   if (typeof store.get('ideJourneyAutoChecklist') !== 'boolean') {
     store.set('ideJourneyAutoChecklist', false)
   }
+  if (typeof store.get('deepLearnEnabled') !== 'boolean') {
+    store.set('deepLearnEnabled', true)
+  }
+  if (typeof store.get('deepLearnMaxRounds') !== 'number' || !Number.isFinite(store.get('deepLearnMaxRounds'))) {
+    store.set('deepLearnMaxRounds', 5)
+  } else {
+    const n = Math.floor(Number(store.get('deepLearnMaxRounds')))
+    store.set('deepLearnMaxRounds', Math.min(24, Math.max(1, n)))
+  }
+  if (typeof store.get('deepLearnMaxFetchBytes') !== 'number' || !Number.isFinite(store.get('deepLearnMaxFetchBytes'))) {
+    store.set('deepLearnMaxFetchBytes', 1_500_000)
+  } else {
+    const b = Math.floor(Number(store.get('deepLearnMaxFetchBytes')))
+    store.set('deepLearnMaxFetchBytes', Math.min(8_000_000, Math.max(4096, b)))
+  }
+  if (typeof store.get('chatResponsePostProcess') !== 'boolean') {
+    store.set('chatResponsePostProcess', true)
+  }
   if (!store.has('typographyComfort')) {
     store.set('typographyComfort', DEFAULT_TYPOGRAPHY_COMFORT)
   } else {
     const raw = store.get('typographyComfort')
     const next = parseTypographyComfort(raw)
     if (raw !== next) store.set('typographyComfort', next)
+  }
+  const tuneKeys: Array<[string, unknown]> = [
+    ['typographyFontFamily', parseTypographyFontFamily(store.get('typographyFontFamily'))],
+    ['typographyLineHeightFactor', parseTypographyLineHeightFactor(store.get('typographyLineHeightFactor'))],
+    ['typographyLetterSpacingExtraEm', parseTypographyLetterSpacingExtraEm(store.get('typographyLetterSpacingExtraEm'))],
+    ['typographyWordSpacingEm', parseTypographyWordSpacingEm(store.get('typographyWordSpacingEm'))]
+  ]
+  for (const [k, v] of tuneKeys) {
+    if (!store.has(k)) store.set(k, v)
+    else if (store.get(k) !== v) store.set(k, v)
   }
 }
 

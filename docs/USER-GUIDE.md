@@ -87,9 +87,17 @@ npm run dist:linux:podman
 npm run dist:linux
 ```
 
-You can also use **GitHub Actions**: workflow **Build Linux release** (`.github/workflows/build-linux.yml`), or build `**Dockerfile.linux`** manually (see the file header).
+You can also use **GitHub Actions**: workflow **Build Linux release** (`.github/workflows/build-linux.yml`) runs **manually** (workflow dispatch) for Linux artifacts. Pushing a version tag `v*` runs **Release desktop** (`.github/workflows/release-desktop.yml`), which publishes Windows, macOS, and Linux installers, **electron-updater** metadata (`latest*.yml`), and the **IntelliJ plugin ZIP** to **GitHub Releases**. The workflow sets **`permissions: contents: write`** so the default `GITHUB_TOKEN` can upload assets (forks may need the same permission or a personal access token). You can still build `**Dockerfile.linux**` manually (see the file header).
 
 Output appears under `release/` or, if that folder is locked on Windows, under `release-builds/<timestamp>/`. On Linux (or Podman/CI) you should get a `**.deb**`, an `**.AppImage**`, a **`pacman` package** (`*.pkg.tar.*`), and a `**.zip**` in that directory.
+
+### 2.4 Automatic updates (release installs)
+
+When you install from a **GitHub Release** asset (for example the Windows Setup `.exe`, a macOS `.dmg`, or a Linux `.deb` / **AppImage** attached to the release), the app can **check for updates**, download a newer build, and prompt you to **restart** to finish installing. Open **Settings → General → Application** to see the **current version**, use **Check for updates**, or open **Release notes** on GitHub.
+
+- **Windows:** the **NSIS installer** is the primary target for in-app updates; a portable **zip** folder is not updated in place by the updater.
+- **Linux:** **AppImage** is the most straightforward target for the built-in updater flow; **`.deb`** / **RPM** users may reinstall from the release page depending on platform behavior.
+- **Code signing:** Release packaging in this repository is configured so **local and CI builds succeed without** Apple **Developer ID** or Windows **Authenticode** certificates (`forceCodeSigning: false` in `electron-builder.yml`). Expect **macOS Gatekeeper** prompts until the app is explicitly allowed, and **Windows SmartScreen** may warn on first launch. For broader distribution, plan **Apple notarization** (Developer ID Application certificate plus `notarytool`) and **Windows code signing** so first run and updates align with typical expectations for signed desktop software.
 
 ---
 

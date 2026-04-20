@@ -19,6 +19,9 @@ asarUnpack:
   - "**/*.node"
 
 extraResources:
+  # Title bar / window icon: Windows often ignores PNG inside app.asar; keep a real path under resources/.
+  - from: src/renderer/public/app-icon.png
+    to: window-icon.png
   - from: integrations/intellij-plugin/build/distributions
     to: intellij-plugin
     filter:
@@ -117,8 +120,13 @@ appImage:
 pacman:
   artifactName: ${productName}-${version}-linux-${arch}.${ext}
 
-# Do not publish to GitHub etc. from this config
-publish: null
+# Used by packaged app (electron-updater) and CI `electron-builder --publish always`.
+# Local `npm run dist:*` scripts pass `--publish never`.
+publish:
+  provider: github
+  owner: localllm
+  repo: local-llm-desktop
+  releaseType: release
 
 # Avoid winCodeSign extraction (symlinks) on Windows without Developer Mode / admin
 forceCodeSigning: false

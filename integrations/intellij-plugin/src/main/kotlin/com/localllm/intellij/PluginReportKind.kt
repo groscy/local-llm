@@ -15,4 +15,6 @@ object PluginReportKind {
     const val AGENT_STEP = "agent_step"
     /** Agent loop ended (reason in message / meta). */
     const val AGENT_STOP = "agent_stop"
+    /** Project opened in the IDE (desktop may register the codebase path). */
+    const val WORKSPACE_SEEN = "workspace_seen"
 }

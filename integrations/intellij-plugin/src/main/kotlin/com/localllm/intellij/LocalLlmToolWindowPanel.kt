@@ -172,7 +172,12 @@ class LocalLlmToolWindowPanel(private val project: Project) :
         val files = compose.snapshotFiles()
         val port = LocalLlmIntegrationProperties.integrationPort()
         val token = LocalLlmIntegrationProperties.integrationToken()
-        transcript.appendSection("Agent goal", goal + if (files.isNotEmpty()) "\n\n— ${files.size} attachment(s) —" else "")
+        // Goal text remains in the compose area — transcript only marks the run.
+        val agentLine = buildString {
+            append("Agent")
+            if (files.isNotEmpty()) append(" · ${files.size} attachment(s)")
+        }
+        transcript.append("$agentLine\n\n")
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Local LLM Agent", true) {
             override fun run(indicator: ProgressIndicator) {
                 try {

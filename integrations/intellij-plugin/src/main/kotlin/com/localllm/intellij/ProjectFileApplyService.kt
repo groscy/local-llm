@@ -58,6 +58,18 @@ object ProjectFileApplyService {
     private fun documentText(document: Document): String =
         if (document.textLength == 0) "" else document.getText(TextRange(0, document.textLength))
 
+    /**
+     * Aligns patch SEARCH with editor/disk text: IDEA documents use `\n`; models often emit `\r\n`;
+     * Windows files on disk may be CRLF. Also strips a leading UTF-8 BOM so SEARCH from copied content matches.
+     */
+    private fun normalizeForPatchMatch(text: String): String {
+        var t = text.replace("\r\n", "\n").replace('\r', '\n')
+        if (t.startsWith('\uFEFF')) {
+            t = t.substring(1)
+        }
+        return t
+    }
+
     private fun applyTextToDocument(project: Project, document: Document, newText: String) {
         if (documentText(document) == newText) return
         document.replaceString(0, document.textLength, newText)
@@ -83,13 +95,34 @@ object ProjectFileApplyService {
             } else {
                 Files.readString(target, StandardCharsets.UTF_8)
             }
+            content = normalizeForPatchMatch(content)
             for ((hi, h) in patch.hunks.withIndex()) {
-                val occ = countOccurrences(content, h.search)
+                var search = normalizeForPatchMatch(h.search)
+                var replace = normalizeForPatchMatch(h.replace)
+                var occ = countOccurrences(content, search)
+                if (occ == 0) {
+                    // Model / Windows: trailing newline mismatch on the SEARCH block
+                    if (search.endsWith('\n')) {
+                        val s2 = search.trimEnd('\n')
+                        val r2 = if (replace.endsWith('\n')) replace.trimEnd('\n') else replace
+                        if (countOccurrences(content, s2) == 1) {
+                            search = s2
+                            replace = r2
+                            occ = 1
+                        }
+                    }
+                    if (occ == 0 && !search.endsWith('\n') && countOccurrences(content, "$search\n") == 1) {
+                        search = "$search\n"
+                        replace = if (replace.endsWith('\n')) replace else "$replace\n"
+                        occ = 1
+                    }
+                }
                 if (occ == 0) {
                     return ApplyResult(
                         patch.path,
                         false,
-                        "Hunk ${hi + 1}/${patch.hunks.size}: SEARCH text not found (must match the file exactly)"
+                        "Hunk ${hi + 1}/${patch.hunks.size}: SEARCH text not found after normalizing line endings (CRLF/LF) " +
+                            "and BOM — copy SEARCH from the exact file buffer the model saw, including spaces and newlines."
                     )
                 }
                 if (occ != 1) {
@@ -99,7 +132,7 @@ object ProjectFileApplyService {
                         "Hunk ${hi + 1}/${patch.hunks.size}: SEARCH must match exactly once (found $occ times)"
                     )
                 }
-                content = content.replaceFirst(h.search, h.replace)
+                content = content.replaceFirst(search, replace)
             }
             if (doc != null) {
                 applyTextToDocument(project, doc, content)
