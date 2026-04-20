@@ -134,6 +134,27 @@ export function addFormalProfile(store: Store<Record<string, unknown>>, profile:
   })
 }
 
+export function updateFormalProfile(
+  store: Store<Record<string, unknown>>,
+  id: string,
+  patch: { interpretWithLlm: 'inherit' | 'on' | 'off' }
+): FormalToolProfile | null {
+  const bundle = readCodebaseFormalBundle(store)
+  const idx = bundle.formalToolProfiles.findIndex((p) => p.id === id)
+  if (idx < 0) return null
+  const cur = bundle.formalToolProfiles[idx]
+  const next: FormalToolProfile = { ...cur }
+  if (patch.interpretWithLlm === 'inherit') {
+    delete next.interpretWithLlm
+  } else {
+    next.interpretWithLlm = patch.interpretWithLlm === 'on'
+  }
+  const formalToolProfiles = [...bundle.formalToolProfiles]
+  formalToolProfiles[idx] = next
+  writeCodebaseFormalBundle(store, { ...bundle, formalToolProfiles })
+  return next
+}
+
 export function removeFormalProfile(store: Store<Record<string, unknown>>, id: string): boolean {
   const bundle = readCodebaseFormalBundle(store)
   const next = bundle.formalToolProfiles.filter((p) => p.id !== id)
