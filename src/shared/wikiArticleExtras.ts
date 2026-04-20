@@ -1,7 +1,26 @@
 import type { WikiGlossaryEntry } from './types'
 
+/** Markdown `## …` headings for auto-compiled reference wiki pages (keep in sync with archivist / deep-learn prompts). */
+export const WIKI_REFERENCE_SECTION_MARKDOWN = {
+  practice: '## Practice and context',
+  related: '## Related concepts',
+  notes: '## Notes and caveats'
+} as const
+
+/**
+ * Remove legacy machine slot tags from compiled wiki Markdown (inline code `wiki:…`).
+ * Used when serving pages so older `wiki_pages` rows never show internal control tokens.
+ */
+export function stripWikiControlMarkers(raw: string): string {
+  if (!raw) return raw
+  const s = raw.replace(/`wiki:[a-z-]+`/gi, '')
+  return s.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trimEnd()
+}
+
 /**
  * Optional glossary blocks in wiki Markdown. Stripped from the rendered body and shown as a definition list.
+ * Reference wiki entries use this block as the **introduction** (keyword + one-line definition); the rest of the
+ * article uses practice, related-concepts, and notes sections (see `WIKI_REFERENCE_SECTION_MARKDOWN` and `getWikiPageBody` in kbService).
  *
  * ```
  * ::: glossary

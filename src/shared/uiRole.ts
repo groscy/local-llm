@@ -24,7 +24,14 @@ export function parseUiRoleOrDefault(v: unknown): UiRole {
   return parseUiRole(v) ?? DEFAULT_UI_ROLE
 }
 
-export type MainShellView = 'chat' | 'wiki' | 'train' | 'architectureRepository'
+export type MainShellView =
+  | 'chat'
+  | 'wiki'
+  | 'train'
+  | 'architectureRepository'
+  | 'knowledgeGraph'
+  /** Registered implementation roots and formal verification run history. */
+  | 'codebaseLandscape'
 
 export type ToolDrawerId = 'hf' | 'runtime' | 'train' | 'metrics'
 
@@ -58,7 +65,7 @@ export type RoleLayout = {
 
 const LAYOUTS: Record<UiRole, RoleLayout> = {
   software_developer: {
-    mainViews: ['wiki', 'train'],
+    mainViews: ['wiki', 'knowledgeGraph', 'codebaseLandscape', 'train'],
     toolDrawers: ['hf', 'runtime', 'metrics'],
     defaultMainView: 'wiki',
     defaultAppMainView: 'electronDev',
@@ -70,7 +77,7 @@ const LAYOUTS: Record<UiRole, RoleLayout> = {
     defaultPinnedWidgets: {}
   },
   software_architect: {
-    mainViews: ['chat', 'wiki', 'architectureRepository', 'train'],
+    mainViews: ['chat', 'wiki', 'knowledgeGraph', 'codebaseLandscape', 'architectureRepository', 'train'],
     toolDrawers: ['hf', 'runtime'],
     defaultMainView: 'wiki',
     tourTip: 'Use Wiki and the knowledge graph to capture decisions and context; Models helps compare footprint.',
@@ -80,7 +87,7 @@ const LAYOUTS: Record<UiRole, RoleLayout> = {
     defaultPinnedWidgets: {}
   },
   business_analyst: {
-    mainViews: ['chat', 'wiki'],
+    mainViews: ['chat', 'wiki', 'knowledgeGraph', 'codebaseLandscape'],
     toolDrawers: ['hf', 'runtime'],
     defaultMainView: 'chat',
     tourTip: 'Chat for Q&A and Wiki for structured notes. Run starts your local model when you are ready.',
@@ -94,7 +101,7 @@ const LAYOUTS: Record<UiRole, RoleLayout> = {
     }
   },
   tester: {
-    mainViews: ['chat'],
+    mainViews: ['chat', 'wiki', 'knowledgeGraph', 'codebaseLandscape'],
     toolDrawers: ['hf', 'runtime', 'metrics'],
     defaultMainView: 'chat',
     tourTip: 'Use Stats while exercising flows; plugin traffic is under Settings → Integrations. Pin Issues from the shell if you track defects there.',
@@ -129,7 +136,7 @@ export const UI_ROLE_CARD_BLURBS: Record<UiRole, string> = {
   software_developer: 'Dev hub, wiki, training, models, run, stats',
   software_architect: 'Wiki, Test Repo, model footprint',
   business_analyst: 'Chat and wiki; minimal tools',
-  tester: 'Chat, stats, integrations settings'
+  tester: 'Chat, wiki, graph, stats, integrations settings'
 }
 
 /** Dev rail + main view: unpackaged/forced dev UI, or Software developer role in any build. */

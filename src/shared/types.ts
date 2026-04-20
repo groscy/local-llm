@@ -232,9 +232,19 @@ export interface KnowledgeGraphNode {
   id: string
   kind: KnowledgeGraphNodeKind
   label: string
+  /** Minimal-text token for zoomed-out / compact graph modes. */
+  shortLabel?: string
   sublabel?: string
   /** Parent KB source id when `kind === 'chunk'`. */
   sourceId?: string
+  /** Optional domain bucket used by domain clustering presets. */
+  domainId?: string
+  /** 0..1 confidence score for evidence-backed nodes. */
+  confidence?: number
+  /** 0..1 novelty score (higher means more unique/new). */
+  novelty?: number
+  /** Origin of the node's strongest evidence for trust overlays. */
+  provenance?: 'electron' | 'intellij-plugin' | 'knowledge-base'
 }
 
 export type KnowledgeGraphEdgeKind = 'contains' | 'indexes' | 'compiled_from' | 'related'
@@ -243,6 +253,10 @@ export interface KnowledgeGraphEdge {
   from: string
   to: string
   kind: KnowledgeGraphEdgeKind
+  /** Optional evidence-weighted confidence used by layout gravity. */
+  confidence?: number
+  /** Optional recency score (0..1), newer links can pull stronger in some modes. */
+  recency?: number
 }
 
 export interface KnowledgeGraphPayload {
@@ -261,6 +275,46 @@ export interface WikiExtractTurnResult {
   title?: string
   error?: string
 }
+
+/** Suggested follow-up angle after a deep-learn model round (shown as clickable actions). */
+export type DeepLearnExplorePath = {
+  /** Short title for the button. */
+  label: string
+  /** Passed to the next round as the user’s chosen investigation focus. */
+  prompt: string
+}
+
+/** Main → renderer while `kb:deepLearnRun` is in progress. */
+export type DeepLearnRunProgress =
+  | { kind: 'started'; jobId: string }
+  | { kind: 'fetch'; jobId: string; url: string }
+  | { kind: 'round'; jobId: string; round: number; maxRounds: number }
+  | {
+      kind: 'roundAwaitChoice'
+      jobId: string
+      roundCompleted: number
+      maxRounds: number
+      explorePaths: DeepLearnExplorePath[]
+      /** False when the configured max rounds have already been used. */
+      canContinueMore: boolean
+      /** True when the model’s `<deep-learn-status>` was `done`. */
+      modelSuggestsDone: boolean
+    }
+  | { kind: 'ingest'; jobId: string }
+  | { kind: 'cancelled'; jobId: string }
+
+/** Result of `kb:deepLearnRun` (multi-round research + optional URL fetch + KB ingest). */
+export type DeepLearnRunResult =
+  | {
+      ok: true
+      sourceId: string
+      title: string
+      roundsUsed: number
+      fetchErrors?: string[]
+      /** Suggestions from the last completed model round (for follow-up chats). */
+      lastExplorePaths?: DeepLearnExplorePath[]
+    }
+  | { ok: false; error: string; cancelled?: boolean }
 
 export interface MetricsSnapshot {
   ts: number
@@ -295,6 +349,104 @@ export interface TrainJob {
   datasetPath?: string
   /** Copied merged / exported GGUF under the models directory when present after training */
   artifactPath?: string
+  /** Optional domain profile for domain-specific refinement. */
+  domainId?: string | null
+  /** Human-readable quality loop output for this run. */
+  qualitySummary?: string
+  /** Heuristic regression risk signal versus previous domain version. */
+  regressionRisk?: 'low' | 'medium' | 'high'
+  /** Associated approved-data manifest id when generated. */
+  manifestId?: string
+}
+
+export type LearningEventSource = 'electron' | 'intellij-plugin'
+export type LearningEventPrivacyLevel = 'strict_private'
+export type LearningEventInteractionType =
+  | 'chat_turn'
+  | 'wiki_extract'
+  | 'deep_learn'
+  | 'plugin_report'
+  | 'tool_outcome'
+
+export interface LearningEvent {
+  id: string
+  source: LearningEventSource
+  domainId?: string | null
+  actor: string
+  timestamp: number
+  interactionType: LearningEventInteractionType
+  payloadRef: string
+  privacyLevel: LearningEventPrivacyLevel
+  summary: string
+  detailsJson?: string
+}
+
+export interface EvidenceCard {
+  id: string
+  domainId?: string | null
+  summary: string
+  supportingEventIds: string[]
+  confidence: number
+  noveltyScore: number
+  tags: string[]
+  provenance: LearningEventSource
+  status: 'pending' | 'approved' | 'rejected'
+  createdAt: number
+  updatedAt: number
+}
+
+export interface TrainingExample {
+  id: string
+  domainId?: string | null
+  instruction: string
+  context: string
+  preferredOutput: string
+  rationale: string
+  provenanceEventIds: string[]
+}
+
+export interface TrainingManifest {
+  id: string
+  domainId?: string | null
+  datasetHash: string
+  filters: {
+    sourceIds?: string[]
+    domainId?: string
+    approvedOnly: boolean
+  }
+  counts: {
+    events: number
+    evidenceCards: number
+    examples: number
+  }
+  modelBase: string
+  runParams: {
+    datasetPath: string
+    outputDir: string
+  }
+  previewMarkdown: string
+  createdAt: number
+}
+
+export interface DomainProfile {
+  id: string
+  name: string
+  terminology: string[]
+  objective: string
+  allowedSources: LearningEventSource[]
+  retentionDays: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface DomainModelVersion {
+  id: string
+  domainId: string
+  trainJobId: string
+  artifactPath: string
+  qualitySummary: string
+  regressionRisk: 'low' | 'medium' | 'high'
+  createdAt: number
 }
 
 /** Main → renderer while `runtime:start` is working (pull, GGUF import, server spawn). */
@@ -332,6 +484,8 @@ export type PluginIntegrationReportKind =
   | 'send_cancelled'
   | 'agent_step'
   | 'agent_stop'
+  /** IDE opened a project (optional; used for codebase registry without spamming chat events). */
+  | 'workspace_seen'
 
 /** Normalized report after the desktop app accepts a plugin POST (includes server receipt time). */
 export interface PluginIntegrationReport {

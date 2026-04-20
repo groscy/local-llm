@@ -20,6 +20,10 @@ export const IPC = {
   APP_CONFIRM_DESTRUCTIVE: 'app:confirmDestructive',
   HARDWARE_SUMMARY: 'app:hardwareSummary',
   LOG: 'app:log',
+  /** Renderer → main: trigger `electron-updater` check (packaged app only). */
+  APP_UPDATE_CHECK: 'app:updateCheck',
+  /** Main → renderer: auto-update lifecycle (check, download, errors). */
+  APP_UPDATE_STATUS: 'app:updateStatus',
 
   // Hugging Face
   HF_SEARCH: 'hf:search',
@@ -91,6 +95,8 @@ export const IPC = {
   KB_WIKI_HIGHLIGHT_TERMS: 'kb:wikiHighlightTerms',
   /** Remove one KB source (chunks, FTS, compiled wiki page, links). */
   KB_DELETE_SOURCE: 'kb:deleteSource',
+  /** Remove all KB sources, wiki pages, message↔domain links, and all prompt-domain rows. */
+  KB_RESET_WIKI_AND_KEYWORDS: 'kb:resetWikiAndKeywords',
   /** Save dialog → write all wiki sources + manifest to a ZIP. */
   KB_EXPORT_WIKI_ZIP: 'kb:exportWikiZip',
   /** Structural graph: sources → chunks, wiki pages → chunks, optional related sources. */
@@ -99,6 +105,14 @@ export const IPC = {
   KB_GRAPH_ANALYSIS_RUN: 'kb:graphAnalysisRun',
   /** After a chat turn: run a short local model pass to extract wiki notes and ingest (optional). */
   KB_WIKI_EXTRACT_TURN: 'kb:wikiExtractTurn',
+  /** Multi-round “learn everything about …” research → single KB ingest (wiki + graph). */
+  KB_DEEP_LEARN_RUN: 'kb:deepLearnRun',
+  /** Abort an in-flight `KB_DEEP_LEARN_RUN` by `jobId`. */
+  KB_DEEP_LEARN_CANCEL: 'kb:deepLearnCancel',
+  /** After `roundAwaitChoice` progress: continue another round (optional focus) or finish and ingest. */
+  KB_DEEP_LEARN_RESUME: 'kb:deepLearnResume',
+  /** Main → renderer: progress for deep-learn (`jobId` matches renderer request). */
+  KB_DEEP_LEARN_PROGRESS: 'kb:deepLearnProgress',
 
   // Metrics
   METRICS_SNAPSHOT: 'metrics:snapshot',
@@ -110,6 +124,17 @@ export const IPC = {
   TRAIN_LIST_JOBS: 'train:listJobs',
   /** Re-scan a finished job’s output folder for new .gguf and copy to models/finetunes */
   TRAIN_RESCAN_ARTIFACT: 'train:rescanArtifact',
+  /** Human-readable automatic evidence cards queued from local usage telemetry. */
+  TRAIN_REVIEW_QUEUE: 'train:reviewQueue',
+  /** Update one evidence card status (`approved`/`rejected`/`pending`). */
+  TRAIN_REVIEW_SET_STATUS: 'train:reviewSetStatus',
+  /** Build an inspectable training manifest from approved evidence before start. */
+  TRAIN_MANIFEST_PREVIEW: 'train:manifestPreview',
+  /** Domain profiles route learning events into domain-specific datasets. */
+  TRAIN_DOMAIN_PROFILES_LIST: 'train:domainProfilesList',
+  TRAIN_DOMAIN_PROFILE_UPSERT: 'train:domainProfileUpsert',
+  /** Trained model versions + quality summaries per domain. */
+  TRAIN_DOMAIN_MODEL_VERSIONS: 'train:domainModelVersions',
 
   SECRETS_SET_HF_TOKEN: 'secrets:setHfToken',
 
@@ -118,7 +143,25 @@ export const IPC = {
   /** Renderer → main: last N reports (for initial load). */
   INTEGRATION_PLUGIN_REPORTS_LIST: 'integration:pluginReportsList',
   /** Renderer → main: GET http://127.0.0.1:{port}/health from the main process (loopback self-test). */
-  INTEGRATION_BRIDGE_SELF_TEST: 'integration:bridgeSelfTest'
+  INTEGRATION_BRIDGE_SELF_TEST: 'integration:bridgeSelfTest',
+
+  /** Codebase registry + formal (external tool) verification — persisted bundle. */
+  CODEBASE_FORMAL_GET: 'codebaseFormal:get',
+  CODEBASE_FORMAL_ADD: 'codebaseFormal:add',
+  CODEBASE_FORMAL_UPDATE: 'codebaseFormal:update',
+  CODEBASE_FORMAL_REMOVE: 'codebaseFormal:remove',
+  CODEBASE_FORMAL_PICK_ROOT: 'codebaseFormal:pickRoot',
+  CODEBASE_FORMAL_PROFILE_ADD: 'codebaseFormal:profileAdd',
+  CODEBASE_FORMAL_PROFILE_UPDATE: 'codebaseFormal:profileUpdate',
+  CODEBASE_FORMAL_PROFILE_REMOVE: 'codebaseFormal:profileRemove',
+  CODEBASE_FORMAL_RUN_START: 'codebaseFormal:runStart',
+  CODEBASE_FORMAL_RUN_GET: 'codebaseFormal:runGet',
+  CODEBASE_FORMAL_RUN_LIST: 'codebaseFormal:runList',
+  CODEBASE_FORMAL_RUN_EXPORT_JSON: 'codebaseFormal:runExportJson',
+  /** Renderer → main: summarize a completed run with the local model (advisory). */
+  CODEBASE_FORMAL_INTERPRET_RUN: 'codebaseFormal:interpretRun',
+  /** Main → renderer: formal verification stdout/stderr chunks and final row. */
+  CODEBASE_FORMAL_VERIFICATION_PROGRESS: 'codebaseFormal:verificationProgress'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
