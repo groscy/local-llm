@@ -2,11 +2,17 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { IPC } from '@shared/ipc'
 import type { KnowledgeGraphAnalysisRunResponse } from '@shared/knowledgeGraphAnalysis'
 import type {
+  DomainModelVersion,
+  DomainProfile,
+  DeepLearnRunProgress,
+  DeepLearnRunResult,
+  EvidenceCard,
   KbSearchHit,
   PluginIntegrationReport,
   RuntimeChatProgress,
   RuntimeLoadProgress,
   SaveIntellijPluginZipResult,
+  TrainingManifest,
   WikiChatHighlightTerm,
   WikiExportZipResult,
   WikiPagePayload,
@@ -14,6 +20,14 @@ import type {
 } from '@shared/types'
 import type { IntegrationBridgeSelfTestResult } from '@shared/ideJourney'
 import type { ArchitectureRepositoryScanResponse } from '@shared/architectureRepository'
+import type { AppUpdateStatusPayload } from '@shared/appUpdate'
+import type {
+  CodebaseFormalBundle,
+  CodebaseRecord,
+  FormalToolProfile,
+  FormalVerificationProgressPayload,
+  FormalVerificationRun
+} from '@shared/codebaseRegistry'
 
 function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   return ipcRenderer.invoke(channel, ...args)
@@ -21,6 +35,13 @@ function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
 
 contextBridge.exposeInMainWorld('api', {
   getPaths: () => invoke(IPC.GET_PATHS),
+  checkForUpdates: () => invoke<{ ok: boolean; error?: string }>(IPC.APP_UPDATE_CHECK),
+  onAppUpdateStatus: (callback: (payload: AppUpdateStatusPayload) => void) => {
+    const channel = IPC.APP_UPDATE_STATUS
+    const listener = (_e: IpcRendererEvent, payload: AppUpdateStatusPayload) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
   openPathInExplorer: (absolutePath: string) =>
     invoke<{ ok: boolean; error?: string }>(IPC.OPEN_PATH_IN_EXPLORER, absolutePath),
   getConfig: () => invoke(IPC.GET_CONFIG),
@@ -87,6 +108,51 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on(channel, listener)
     return () => ipcRenderer.removeListener(channel, listener)
   },
+  codebaseFormalGet: () => invoke<CodebaseFormalBundle>(IPC.CODEBASE_FORMAL_GET),
+  codebaseFormalPickRoot: () => invoke<string | null>(IPC.CODEBASE_FORMAL_PICK_ROOT),
+  codebaseFormalAdd: (p: { rootPath: string; displayName?: string }) =>
+    invoke<{ ok: true; record: CodebaseRecord } | { ok: false; error: string }>(IPC.CODEBASE_FORMAL_ADD, p),
+  codebaseFormalUpdate: (p: { id: string; displayName?: string; disabled?: boolean }) =>
+    invoke<{ ok: true; record: CodebaseRecord } | { ok: false; error: string }>(IPC.CODEBASE_FORMAL_UPDATE, p),
+  codebaseFormalRemove: (id: string) =>
+    invoke<{ ok: true } | { ok: false; error: string }>(IPC.CODEBASE_FORMAL_REMOVE, id),
+  codebaseFormalProfileAdd: (p: {
+    label: string
+    commandTemplate: string
+    spawnMode?: 'shell' | 'exec'
+    timeoutMs?: number
+    expectedExitCodes?: number[]
+    interpretWithLlm?: boolean
+  }) =>
+    invoke<{ ok: true; profile: FormalToolProfile } | { ok: false; error: string }>(
+      IPC.CODEBASE_FORMAL_PROFILE_ADD,
+      p
+    ),
+  codebaseFormalProfileUpdate: (p: { id: string; interpretWithLlm: 'inherit' | 'on' | 'off' }) =>
+    invoke<{ ok: true; profile: FormalToolProfile } | { ok: false; error: string }>(
+      IPC.CODEBASE_FORMAL_PROFILE_UPDATE,
+      p
+    ),
+  codebaseFormalProfileRemove: (id: string) =>
+    invoke<{ ok: true } | { ok: false; error: string }>(IPC.CODEBASE_FORMAL_PROFILE_REMOVE, id),
+  codebaseFormalRunStart: (p: { codebaseId: string; profileId: string }) =>
+    invoke<{ ok: true; runId: string } | { ok: false; error: string }>(IPC.CODEBASE_FORMAL_RUN_START, p),
+  codebaseFormalRunList: () => invoke<FormalVerificationRun[]>(IPC.CODEBASE_FORMAL_RUN_LIST),
+  codebaseFormalRunGet: (runId: string) =>
+    invoke<FormalVerificationRun | null>(IPC.CODEBASE_FORMAL_RUN_GET, runId),
+  codebaseFormalRunExportJson: (runId: string) =>
+    invoke<{ ok: true; json: string } | { ok: false; error: string }>(IPC.CODEBASE_FORMAL_RUN_EXPORT_JSON, runId),
+  codebaseFormalInterpretRun: (p: { runId: string; includeContext?: boolean }) =>
+    invoke<{ ok: true; run: FormalVerificationRun } | { ok: false; error: string }>(
+      IPC.CODEBASE_FORMAL_INTERPRET_RUN,
+      p
+    ),
+  onCodebaseFormalVerificationProgress: (callback: (payload: FormalVerificationProgressPayload) => void) => {
+    const channel = IPC.CODEBASE_FORMAL_VERIFICATION_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: FormalVerificationProgressPayload) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
   openExternalUrl: (url: string) => invoke(IPC.OPEN_EXTERNAL_URL, url),
   saveIntellijPluginZip: () => invoke<SaveIntellijPluginZipResult>(IPC.APP_SAVE_INTELLIJ_PLUGIN_ZIP),
   runtimeStart: (p: { kind: 'llamacpp' | 'ollama'; modelPath: string }) => invoke(IPC.RUNTIME_START, p),
@@ -144,6 +210,8 @@ contextBridge.exposeInMainWorld('api', {
   kbWikiPage: (sourceId: string) => invoke<WikiPagePayload>(IPC.KB_WIKI_PAGE, sourceId),
   kbWikiHighlightTerms: () => invoke<WikiChatHighlightTerm[]>(IPC.KB_WIKI_HIGHLIGHT_TERMS),
   kbDeleteSource: (sourceId: string) => invoke<{ ok: true }>(IPC.KB_DELETE_SOURCE, sourceId),
+  kbResetWikiAndKeywords: () =>
+    invoke<{ sourcesRemoved: number; promptDomainsRemoved: number }>(IPC.KB_RESET_WIKI_AND_KEYWORDS),
   kbExportWikiZip: () => invoke<WikiExportZipResult>(IPC.KB_EXPORT_WIKI_ZIP),
   kbKnowledgeGraph: () => invoke(IPC.KB_KNOWLEDGE_GRAPH),
   kbGraphAnalysisRun: (opts?: { ingestReport?: boolean }) =>
@@ -154,6 +222,22 @@ contextBridge.exposeInMainWorld('api', {
     userMessage: string
     assistantMessage: string
   }) => invoke(IPC.KB_WIKI_EXTRACT_TURN, p),
+  kbDeepLearnRun: (p: {
+    jobId: string
+    conversationId: string
+    subject: string
+    userMessage: string
+    approvedFetchUrls: string[]
+  }) => invoke<DeepLearnRunResult>(IPC.KB_DEEP_LEARN_RUN, p),
+  kbDeepLearnCancel: (p: { jobId: string }) => invoke<{ ok: boolean }>(IPC.KB_DEEP_LEARN_CANCEL, p),
+  kbDeepLearnResume: (p: { jobId: string; action: 'continue' | 'finish'; followUp?: string }) =>
+    invoke<{ ok: boolean }>(IPC.KB_DEEP_LEARN_RESUME, p),
+  onDeepLearnProgress: (callback: (payload: DeepLearnRunProgress) => void) => {
+    const channel = IPC.KB_DEEP_LEARN_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: DeepLearnRunProgress) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
   metricsSnapshot: (opts?: { persist?: boolean }) => invoke(IPC.METRICS_SNAPSHOT, opts),
   metricsHistory: (limit?: number) => invoke(IPC.METRICS_HISTORY, limit),
   trainStart: (p: {
@@ -161,10 +245,34 @@ contextBridge.exposeInMainWorld('api', {
     datasetPath?: string
     kbSourceIds?: string[]
     displayName?: string
+    domainId?: string
     pythonPath?: string
   }) => invoke(IPC.TRAIN_START, p),
   trainStatus: (id: string) => invoke(IPC.TRAIN_STATUS, id),
   trainListJobs: () => invoke(IPC.TRAIN_LIST_JOBS),
   trainRescanArtifact: (jobId: string) => invoke(IPC.TRAIN_RESCAN_ARTIFACT, jobId),
+  trainReviewQueue: (opts?: { status?: 'pending' | 'approved' | 'rejected'; domainId?: string; limit?: number }) =>
+    invoke<EvidenceCard[]>(IPC.TRAIN_REVIEW_QUEUE, opts ?? {}),
+  trainReviewSetStatus: (p: { cardId: string; status: 'pending' | 'approved' | 'rejected' }) =>
+    invoke<EvidenceCard>(IPC.TRAIN_REVIEW_SET_STATUS, p),
+  trainManifestPreview: (p: {
+    id?: string
+    domainId?: string
+    baseModelPath: string
+    datasetPath: string
+    outputDir: string
+    sourceIds?: string[]
+  }) => invoke<TrainingManifest>(IPC.TRAIN_MANIFEST_PREVIEW, p),
+  trainDomainProfilesList: () => invoke<DomainProfile[]>(IPC.TRAIN_DOMAIN_PROFILES_LIST),
+  trainDomainProfileUpsert: (p: {
+    id?: string
+    name: string
+    terminology: string[]
+    objective: string
+    allowedSources: ('electron' | 'intellij-plugin')[]
+    retentionDays: number
+  }) => invoke<DomainProfile>(IPC.TRAIN_DOMAIN_PROFILE_UPSERT, p),
+  trainDomainModelVersions: (opts?: { domainId?: string }) =>
+    invoke<DomainModelVersion[]>(IPC.TRAIN_DOMAIN_MODEL_VERSIONS, opts ?? {}),
   setHfToken: (token: string | null) => invoke(IPC.SECRETS_SET_HF_TOKEN, token)
 })
