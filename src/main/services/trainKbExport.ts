@@ -3,9 +3,13 @@ import { dirname } from 'path'
 import type Database from 'better-sqlite3'
 import { listChunksForSource, listSources } from './kbService'
 
+function escXmlAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/\r|\n/g, ' ')
+}
+
 /**
  * Export selected KB sources to Alpaca-style JSONL for LoRA / fine-tune pipelines.
- * One record per chunk: instruction names the source, output is the chunk body.
+ * One record per chunk: `instruction` is a single self-closing **tag** with metadata; `output` is raw chunk text.
  */
 export function exportKbSourcesToTrainingJsonl(
   db: Database.Database,
@@ -33,13 +37,23 @@ export function exportKbSourcesToTrainingJsonl(
     sourcesUsed.push(sourceId)
 
     for (const ch of chunks) {
-      const headingPart = ch.heading?.trim() ? ` — ${ch.heading.trim()}` : ''
-      const instruction = `Use this knowledge base excerpt from «${title}»${headingPart}. Internalize facts for downstream Q&A.`
+      const h = ch.heading?.trim()
+      const headingAttr = h ? ` heading="${escXmlAttr(h)}"` : ''
+      const instruction = `<kb-chunk source-id="${escXmlAttr(sourceId)}" title="${escXmlAttr(title)}"${headingAttr}/>`
+      const context = h ? `Source "${title}" section "${h}"` : `Source "${title}"`
       lines.push(
         JSON.stringify({
           instruction,
+          context,
           input: '',
-          output: ch.text.trim()
+          output: ch.text.trim(),
+          rationale: 'Verbatim domain knowledge captured from local usage-derived knowledge base.',
+          provenance: {
+            sourceId,
+            title,
+            heading: h ?? null,
+            ord: ch.ord
+          }
         })
       )
     }

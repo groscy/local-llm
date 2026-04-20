@@ -6,6 +6,7 @@ import type Database from 'better-sqlite3'
 import type { TrainJob } from '@shared/types'
 import { logLine } from '../logger'
 import { exportKbSourcesToTrainingJsonl } from './trainKbExport'
+import { buildManifestFromApproved, recordDomainModelVersion } from './trainingWorkflowStore'
 
 const running = new Map<string, ReturnType<typeof spawn>>()
 
@@ -80,7 +81,9 @@ export function listTrainJobs(db: Database.Database): TrainJob[] {
       `SELECT id, status, base_model_path as baseModelPath, output_dir as outputDir, message,
               started_at as startedAt, finished_at as finishedAt,
               kb_source_ids_json as kbSourceIdsJson, display_name as displayName,
-              dataset_path as datasetPath, artifact_path as artifactPath
+              dataset_path as datasetPath, artifact_path as artifactPath,
+              domain_id as domainId, quality_summary as qualitySummary,
+              regression_risk as regressionRisk, manifest_id as manifestId
        FROM train_jobs ORDER BY created_at DESC`
     )
     .all()
@@ -109,7 +112,14 @@ function mapRow(row: Record<string, unknown>): TrainJob {
     kbSourceIds,
     displayName: row.displayName != null ? String(row.displayName) : undefined,
     datasetPath: row.datasetPath != null ? String(row.datasetPath) : undefined,
-    artifactPath: row.artifactPath != null ? String(row.artifactPath) : undefined
+    artifactPath: row.artifactPath != null ? String(row.artifactPath) : undefined,
+    domainId: row.domainId != null ? String(row.domainId) : null,
+    qualitySummary: row.qualitySummary != null ? String(row.qualitySummary) : undefined,
+    regressionRisk:
+      row.regressionRisk === 'low' || row.regressionRisk === 'medium' || row.regressionRisk === 'high'
+        ? row.regressionRisk
+        : undefined,
+    manifestId: row.manifestId != null ? String(row.manifestId) : undefined
   }
 }
 
@@ -122,6 +132,8 @@ export interface StartTrainJobOpts {
   pythonPath?: string
   /** Shown in the UI and used in finetunes/*.gguf filename */
   displayName?: string
+  /** Optional domain profile id for scoped manifests/models. */
+  domainId?: string
   modelsDir: string
 }
 
@@ -137,9 +149,11 @@ export function startTrainJob(
   if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true })
 
   const displayName = (opts.displayName ?? '').trim() || `Fine-tune ${id.slice(0, 8)}`
+  const domainId = opts.domainId?.trim() || null
   const kbIds = opts.kbSourceIds?.filter((x) => x.trim()) ?? []
   let datasetPathResolved: string
   let kbJson: string | null = null
+  let manifestId: string | null = null
 
   try {
     if (kbIds.length > 0) {
@@ -154,13 +168,30 @@ export function startTrainJob(
     } else {
       throw new Error('Select knowledge sources or set a dataset JSONL path.')
     }
+    try {
+      manifestId = randomUUID()
+      buildManifestFromApproved(db, {
+        id: manifestId,
+        domainId,
+        baseModelPath: opts.baseModelPath,
+        datasetPath: datasetPathResolved,
+        outputDir,
+        sourceIds: kbIds.length ? kbIds : undefined
+      })
+    } catch (e) {
+      logLine('warn', 'train_manifest_preview_build_failed', {
+        id,
+        error: e instanceof Error ? e.message : String(e)
+      })
+      manifestId = null
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     db.prepare(
       `INSERT INTO train_jobs (id, status, base_model_path, output_dir, message, started_at, finished_at, created_at,
-       kb_source_ids_json, display_name, dataset_path, artifact_path)
-       VALUES (?, 'error', ?, ?, ?, NULL, NULL, ?, NULL, ?, NULL, NULL)`
-    ).run(id, opts.baseModelPath, outputDir, msg, t, displayName)
+       kb_source_ids_json, display_name, dataset_path, artifact_path, domain_id, manifest_id)
+       VALUES (?, 'error', ?, ?, ?, NULL, NULL, ?, NULL, ?, NULL, NULL, ?, NULL)`
+    ).run(id, opts.baseModelPath, outputDir, msg, t, displayName, domainId)
     const row = getTrainJob(db, id)
     if (!row) throw new Error('Failed to record train job')
     return row
@@ -168,9 +199,9 @@ export function startTrainJob(
 
   db.prepare(
     `INSERT INTO train_jobs (id, status, base_model_path, output_dir, message, started_at, finished_at, created_at,
-     kb_source_ids_json, display_name, dataset_path, artifact_path)
-     VALUES (?, 'queued', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL)`
-  ).run(id, opts.baseModelPath, outputDir, t, kbJson, displayName, datasetPathResolved)
+     kb_source_ids_json, display_name, dataset_path, artifact_path, domain_id, manifest_id)
+     VALUES (?, 'queued', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)`
+  ).run(id, opts.baseModelPath, outputDir, t, kbJson, displayName, datasetPathResolved, domainId, manifestId)
 
   const script = scriptPath
   const py = opts.pythonPath ?? 'python'
@@ -183,7 +214,9 @@ export function startTrainJob(
     startedAt: t,
     kbSourceIds: kbIds.length ? kbIds : undefined,
     displayName,
-    datasetPath: datasetPathResolved
+    datasetPath: datasetPathResolved,
+    domainId,
+    manifestId: manifestId ?? undefined
   }
 
   if (!existsSync(script)) {
@@ -221,10 +254,14 @@ export function startTrainJob(
       const primary = pickPrimaryGguf(ggufs)
       let artifactPath: string | undefined
       let msg = out.slice(-500) || 'ok'
+      let qualitySummary = ''
+      let regressionRisk: 'low' | 'medium' | 'high' = 'medium'
       if (primary && existsSync(opts.modelsDir)) {
         try {
           artifactPath = copyArtifactToModelsDir(primary, opts.modelsDir, displayName, id)
           msg = `${msg}\nRegistered GGUF for Run picker: ${artifactPath}`
+          qualitySummary = `Completed with artifact copy. Dataset source: ${kbIds.length ? `${kbIds.length} KB source(s)` : 'manual JSONL'}.`
+          regressionRisk = 'low'
         } catch (e) {
           logLine('warn', 'train_artifact_copy_failed', {
             id,
@@ -234,10 +271,37 @@ export function startTrainJob(
         }
       } else if (!primary) {
         msg = `${msg}\nNo .gguf found in output — install a full training stack to produce merged.gguf, then use Rescan on this job.`
+        qualitySummary = 'Job finished without a GGUF artifact. Quality cannot be evaluated until artifact registration.'
+        regressionRisk = 'high'
+      }
+      if (!qualitySummary) {
+        qualitySummary = `Job completed. Dataset source: ${kbIds.length ? `${kbIds.length} KB source(s)` : 'manual JSONL'}.`
+      }
+      if (artifactPath && domainId) {
+        try {
+          const prior = db
+            .prepare('SELECT COUNT(*) AS c FROM domain_model_versions WHERE domain_id = ?')
+            .get(domainId) as { c: number } | undefined
+          if (Number(prior?.c ?? 0) > 0) regressionRisk = 'medium'
+          recordDomainModelVersion(db, {
+            domainId,
+            trainJobId: id,
+            artifactPath,
+            qualitySummary,
+            regressionRisk
+          })
+        } catch (e) {
+          logLine('warn', 'domain_model_version_record_failed', {
+            id,
+            error: e instanceof Error ? e.message : String(e)
+          })
+        }
       }
       db.prepare(
-        `UPDATE train_jobs SET status = ?, message = ?, finished_at = ?, artifact_path = ? WHERE id = ?`
-      ).run('complete', msg.slice(-4000), done, artifactPath ?? null, id)
+        `UPDATE train_jobs
+         SET status = ?, message = ?, finished_at = ?, artifact_path = ?, quality_summary = ?, regression_risk = ?
+         WHERE id = ?`
+      ).run('complete', msg.slice(-4000), done, artifactPath ?? null, qualitySummary, regressionRisk, id)
     } else {
       db.prepare(`UPDATE train_jobs SET status = ?, message = ?, finished_at = ? WHERE id = ?`).run(
         'error',
@@ -263,7 +327,9 @@ export function rescanTrainJobArtifacts(
       `SELECT id, status, base_model_path as baseModelPath, output_dir as outputDir, message,
               started_at as startedAt, finished_at as finishedAt,
               kb_source_ids_json as kbSourceIdsJson, display_name as displayName,
-              dataset_path as datasetPath, artifact_path as artifactPath
+              dataset_path as datasetPath, artifact_path as artifactPath,
+              domain_id as domainId, quality_summary as qualitySummary,
+              regression_risk as regressionRisk, manifest_id as manifestId
        FROM train_jobs WHERE id = ?`
     )
     .get(jobId) as Record<string, unknown> | undefined
@@ -316,7 +382,9 @@ export function getTrainJob(db: Database.Database, id: string): TrainJob | undef
       `SELECT id, status, base_model_path as baseModelPath, output_dir as outputDir, message,
               started_at as startedAt, finished_at as finishedAt,
               kb_source_ids_json as kbSourceIdsJson, display_name as displayName,
-              dataset_path as datasetPath, artifact_path as artifactPath
+              dataset_path as datasetPath, artifact_path as artifactPath,
+              domain_id as domainId, quality_summary as qualitySummary,
+              regression_risk as regressionRisk, manifest_id as manifestId
        FROM train_jobs WHERE id = ?`
     )
     .get(id) as Record<string, unknown> | undefined
