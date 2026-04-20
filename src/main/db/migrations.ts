@@ -184,6 +184,85 @@ const MIGRATIONS: { version: number; sql: string }[] = [
     sql: `
       ALTER TABLE prompt_domains ADD COLUMN system_suffix TEXT;
     `
+  },
+  {
+    version: 11,
+    sql: `
+      CREATE TABLE IF NOT EXISTS learning_events (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        domain_id TEXT,
+        actor TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        interaction_type TEXT NOT NULL,
+        payload_ref TEXT NOT NULL,
+        privacy_level TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        details_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_learning_events_time ON learning_events(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_learning_events_domain ON learning_events(domain_id);
+
+      CREATE TABLE IF NOT EXISTS evidence_cards (
+        id TEXT PRIMARY KEY,
+        domain_id TEXT,
+        summary TEXT NOT NULL,
+        supporting_event_ids_json TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        novelty_score REAL NOT NULL,
+        tags_json TEXT NOT NULL,
+        provenance TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_evidence_cards_status ON evidence_cards(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_evidence_cards_domain ON evidence_cards(domain_id);
+
+      CREATE TABLE IF NOT EXISTS training_manifests (
+        id TEXT PRIMARY KEY,
+        domain_id TEXT,
+        dataset_hash TEXT NOT NULL,
+        filters_json TEXT NOT NULL,
+        counts_json TEXT NOT NULL,
+        model_base TEXT NOT NULL,
+        run_params_json TEXT NOT NULL,
+        preview_markdown TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_training_manifests_domain ON training_manifests(domain_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS domain_profiles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        terminology_json TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        allowed_sources_json TEXT NOT NULL,
+        retention_days INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS domain_model_versions (
+        id TEXT PRIMARY KEY,
+        domain_id TEXT NOT NULL,
+        train_job_id TEXT NOT NULL,
+        artifact_path TEXT NOT NULL,
+        quality_summary TEXT NOT NULL,
+        regression_risk TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_domain_model_versions_domain ON domain_model_versions(domain_id, created_at DESC);
+    `
+  },
+  {
+    version: 12,
+    sql: `
+      ALTER TABLE train_jobs ADD COLUMN domain_id TEXT;
+      ALTER TABLE train_jobs ADD COLUMN quality_summary TEXT;
+      ALTER TABLE train_jobs ADD COLUMN regression_risk TEXT;
+      ALTER TABLE train_jobs ADD COLUMN manifest_id TEXT;
+    `
   }
 ]
 
