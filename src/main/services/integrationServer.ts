@@ -8,6 +8,8 @@ import { upsertCodebaseFromPluginReport } from './codebaseFormalStore'
 import { appendLearningEvent } from './trainingWorkflowStore'
 import { resolveChatMaxCompletionTokens } from './chatMaxTokens'
 import { llamaSamplingFromStore } from './llamaChatOptions'
+import { buildOntologyContext } from './ontologyContextBuilder'
+import type { OntologyService } from './ontologyService'
 import { logLine } from '../logger'
 
 const DEFAULT_PORT = 17373
@@ -100,9 +102,10 @@ export function configureIntegrationServer(ctx: {
   store: Store<Record<string, unknown>>
   getRuntime: () => RuntimeAdapter | null
   getDb?: () => import('better-sqlite3').Database | null
+  getOntology?: () => OntologyService | null
 }): void {
   stopIntegrationServer()
-  const { store, getRuntime, getDb } = ctx
+  const { store, getRuntime, getDb, getOntology } = ctx
 
   const enabled = store.get('integrationListenEnabled') === true
   if (!enabled) {
@@ -172,6 +175,49 @@ export function configureIntegrationServer(ctx: {
           return
         }
         const messages = parsed.data.messages as ChatMessage[]
+        const ontology = getOntology?.() ?? null
+        const ontologyEnabled = store.get('ontologyEnabled') !== false
+        const ontologyMaxTriples =
+          typeof store.get('ontologyMaxTriples') === 'number'
+            ? Number(store.get('ontologyMaxTriples'))
+            : undefined
+        const ontologyContextTokens =
+          typeof store.get('ontologyContextTokens') === 'number'
+            ? Number(store.get('ontologyContextTokens'))
+            : undefined
+        const runtimeMessages: ChatMessage[] =
+          ontologyEnabled && ontology
+            ? (() => {
+                const built = buildOntologyContext(ontology, {
+                  messages,
+                  maxTriples: ontologyMaxTriples,
+                  maxTokens: ontologyContextTokens
+                })
+                if (!built.context) return messages
+                const next = [...messages]
+                const firstSystem = next.findIndex((m) => m.role === 'system')
+                if (firstSystem >= 0) {
+                  const row = next[firstSystem]
+                  if (row) row.content = `${row.content}\n\n${built.context}`
+                  return next
+                }
+                return [{ role: 'system' as const, content: built.context }, ...next]
+              })()
+            : messages
+        const lastUser = [...messages].reverse().find((m) => m.role === 'user' && m.content.trim().length > 0)
+        if (lastUser && ontology) {
+          try {
+            ontology.ingestText({
+              text: lastUser.content,
+              sourceType: 'http_chat_user',
+              sourceRef: `http-chat:user:${Date.now()}`,
+              confidence: 0.7,
+              entityType: 'user_input'
+            })
+          } catch {
+            /* ontology is best-effort */
+          }
+        }
         const st = rt.getStatus()
         const maxTokens = resolveChatMaxCompletionTokens(
           store,
@@ -193,7 +239,7 @@ export function configureIntegrationServer(ctx: {
                   }
                 })()
               : {}
-          const reply = await rt.chat(messages, {
+          const reply = await rt.chat(runtimeMessages, {
             maxTokens,
             ...samplingOpts,
             onStreamUsage: (u) => {
@@ -205,6 +251,19 @@ export function configureIntegrationServer(ctx: {
           const body: Record<string, unknown> = { reply, model: rt.getStatus().modelPath }
           if (typeof usage.promptTokens === 'number') body.promptTokens = usage.promptTokens
           if (typeof usage.completionTokens === 'number') body.completionTokens = usage.completionTokens
+          if (ontology) {
+            try {
+              ontology.ingestText({
+                text: reply,
+                sourceType: 'http_chat_assistant',
+                sourceRef: `http-chat:assistant:${Date.now()}`,
+                confidence: 0.62,
+                entityType: 'assistant_output'
+              })
+            } catch {
+              /* ontology is best-effort */
+            }
+          }
           sendJson(res, 200, body)
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e)
