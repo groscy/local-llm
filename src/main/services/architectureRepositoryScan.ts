@@ -95,18 +95,48 @@ function readPackageName(root: string): { hasPackageJson: boolean; packageName?:
 function buildHeuristicMermaid(root: string): string | undefined {
   const has = (rel: string) => existsSync(join(root, rel))
   const parts: string[] = ['flowchart TB']
-  if (has('src/main')) parts.push('  Main["Main process"]')
-  if (has('src/preload')) parts.push('  Preload["Preload bridge"]')
-  if (has('src/renderer')) parts.push('  Renderer["Renderer UI"]')
-  if (parts.length < 3) return undefined
-  if (has('src/renderer') && has('src/preload')) parts.push('  Renderer -->|IPC expose| Preload')
-  if (has('src/preload') && has('src/main')) parts.push('  Preload -->|invoke| Main')
-  if (has('integrations')) parts.push('  IDE["IDE integration"]')
-  if (has('integrations') && has('src/main')) parts.push('  IDE -->|HTTP localhost| Main')
-  parts.push(
-    '  classDef note fill:transparent,stroke-dasharray:5 5;',
-    '  Note["Candidate application communication diagram (heuristic draft)"]:::note'
-  )
+  const links: string[] = []
+  let nodeCount = 0
+  const addNode = (id: string, label: string, paths: string[]) => {
+    if (!paths.some((p) => has(p))) return false
+    parts.push(`  ${id}["${label}"]`)
+    nodeCount++
+    return true
+  }
+
+  const hasApps = addNode('Apps', 'Applications (web/mobile/ui)', ['apps', 'app', 'web', 'frontend', 'mobile'])
+  const hasServices = addNode('Services', 'Services / APIs', ['services', 'service', 'api', 'apis', 'backend'])
+  const hasPackages = addNode('Packages', 'Shared packages / modules', ['packages', 'libs', 'lib', 'modules'])
+  const hasData = addNode('DataLayer', 'Data / persistence', ['db', 'database', 'migrations', 'data'])
+  const hasInfra = addNode('Infra', 'Infrastructure / deployment', ['infra', 'infrastructure', 'docker', 'k8s', 'helm'])
+  const hasIntegrations = addNode('Integrations', 'Integrations / adapters', ['integrations', 'connectors', 'adapters'])
+  const hasDocs = addNode('Docs', 'Architecture / docs', ['docs', 'architecture', 'adr'])
+  const hasTests = addNode('Tests', 'Verification / tests', ['tests', 'test', '__tests__', 'spec'])
+  const hasCi = addNode('CiCd', 'CI / automation', ['.github/workflows', '.gitlab-ci.yml', 'azure-pipelines.yml'])
+
+  if (nodeCount < 2) return undefined
+
+  if (hasApps && hasServices) links.push('  Apps -->|"calls"| Services')
+  if (hasApps && hasPackages) links.push('  Apps -->|"imports"| Packages')
+  if (hasServices && hasPackages) links.push('  Services -->|"imports"| Packages')
+  if (hasServices && hasData) links.push('  Services -->|"persists to"| DataLayer')
+  if (hasServices && hasInfra) links.push('  Services -->|"deployed on"| Infra')
+  if (hasIntegrations && hasServices) links.push('  Integrations -->|"connects to"| Services')
+  if (hasTests && (hasApps || hasServices || hasPackages)) {
+    const target = hasServices ? 'Services' : hasApps ? 'Apps' : 'Packages'
+    links.push(`  Tests -->|"verifies"| ${target}`)
+  }
+  if (hasCi && (hasApps || hasServices || hasPackages)) {
+    const target = hasServices ? 'Services' : hasApps ? 'Apps' : 'Packages'
+    links.push(`  CiCd -->|"builds/tests"| ${target}`)
+  }
+  if (hasDocs && (hasApps || hasServices || hasPackages)) {
+    const target = hasServices ? 'Services' : hasApps ? 'Apps' : 'Packages'
+    links.push(`  Docs -->|"documents"| ${target}`)
+  }
+
+  if (links.length === 0) return undefined
+  parts.push(...links, '  Draft["Candidate communication model (heuristic draft)"]')
   return parts.join('\n')
 }
 
@@ -192,7 +222,21 @@ export function scanArchitectureRepository(rootRaw: string): ArchitectureReposit
             lineSamples++
           }
         }
-        for (const marker of ['src/main', 'src/renderer', 'src/preload', 'integrations/intellij-plugin']) {
+        for (const marker of [
+          'apps',
+          'app',
+          'services',
+          'api',
+          'backend',
+          'packages',
+          'libs',
+          'modules',
+          'integrations',
+          'docs',
+          'infra',
+          'docker',
+          '.github/workflows'
+        ]) {
           if (rel === marker || rel.startsWith(`${marker}/`)) {
             pushNotable(marker)
             break
