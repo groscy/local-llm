@@ -34,7 +34,7 @@ This guide explains how to install, configure, and run **Local LLM Desktop**: us
 | **Linux**   | `Local LLM Desktop-<version>-linux-x64.pkg.tar.*` | **Arch / pacman:** `sudo pacman -U ./Local\ LLM\ Desktop-<version>-linux-x64.pkg.tar.xz` (extension may be `.pkg.tar.zst` depending on build). Resolves dependencies like a normal package install.                        |
 
 
-Installers are produced from source with `**npm run dist:installer`** on the **same** OS you are targeting (output under `release/` or `release-builds/<timestamp>/`). **Linux packages** need a Linux toolchain: use `**npm run dist:linux:podman`** from **Windows or macOS** ([Podman](https://podman.io/) / Podman Desktop), `**npm run dist:linux`** on **Linux** or **WSL2** (Ubuntu, on the Linux filesystem — avoid `/mnt/c/...` if native modules misbehave). **RPM** (Fedora/RHEL) is configured in `electron-builder.yml`; after `npm run build`, run `npx electron-builder --publish never --linux rpm` on an RPM-based system (or install the `rpm` toolchain on Debian if you need `.rpm` there). **zip** builds remain available if you prefer a portable folder.
+Installers are produced from source with `**npm run dist:installer`** on the **same** OS you are targeting (output under `release/` or `release-builds/<timestamp>/`). **Linux packages** need a Linux toolchain: use `**npm run dist:linux:podman`** from **Windows or macOS** ([Podman](https://podman.io/) / Podman Desktop), `**npm run dist:linux`** on **Linux** or **WSL2** (Ubuntu, on the Linux filesystem — avoid `/mnt/c/...` if native modules misbehave). For a packaging-only Linux CPU flavor (same app behavior, CPU-labeled artifacts), use `**npm run dist:linux:cpu`**; output names are `**Local LLM Desktop-<version>-linux-cpu-x64.<ext>`**. **RPM** (Fedora/RHEL) is configured in `electron-builder.yml`; after `npm run build`, run `npx electron-builder --publish never --linux rpm` on an RPM-based system (or install the `rpm` toolchain on Debian if you need `.rpm` there). **zip** builds remain available if you prefer a portable folder.
 
 ### 2.2 From a release zip (portable folder)
 
@@ -81,13 +81,45 @@ npm run dist:linux:podman
 
   Artifacts land in `**release-linux/**` by default.
 
+  For the CPU-labeled flavor through Podman, run:
+
+```bash
+npm run dist:linux:cpu:podman
+```
+
+  CPU Podman artifacts land in `**release-linux-cpu/**` by default (or `LINUX_RELEASE_OUT` if set).
+
+  For the Raspberry Pi 5 (ARM64) flavor through Podman, run:
+
+```bash
+npm run dist:linux:rpi5:podman
+```
+
+  Raspberry Pi 5 Podman artifacts land in `**release-linux-rpi5/**` by default (or `LINUX_RELEASE_OUT` if set).
+
 - **From a Linux machine** (or WSL Ubuntu on the Linux filesystem):
 
 ```bash
 npm run dist:linux
 ```
 
-You can also use **GitHub Actions**: workflow **Build Linux release** (`.github/workflows/build-linux.yml`) runs **manually** (workflow dispatch) for Linux artifacts. Pushing a version tag `v*` runs **Release desktop** (`.github/workflows/release-desktop.yml`), which publishes Windows, macOS, and Linux installers, **electron-updater** metadata (`latest*.yml`), and the **IntelliJ plugin ZIP** to **GitHub Releases**. The workflow sets **`permissions: contents: write`** so the default `GITHUB_TOKEN` can upload assets (forks may need the same permission or a personal access token). You can still build `**Dockerfile.linux**` manually (see the file header).
+- **Raspberry Pi 5 flavor** (Linux ARM64 packaging):
+
+```bash
+npm run dist:linux:rpi5
+```
+
+  Raspberry Pi 5 artifacts are emitted as `**Local LLM Desktop-<version>-linux-rpi5-arm64.<ext>`**.
+
+- **Linux CPU-labeled flavor** (packaging variant; runtime behavior unchanged):
+
+```bash
+npm run dist:linux:cpu
+```
+
+  CPU artifacts are emitted as `**Local LLM Desktop-<version>-linux-cpu-x64.deb`**, `**.AppImage`**, `**.zip`**, and `**.pkg.tar.*` in the same output directory.
+
+You can also use **GitHub Actions**: workflow **Build Linux release** (`.github/workflows/build-linux.yml`) runs **manually** (workflow dispatch) for Linux artifacts and uploads both standard and `linux-cpu` artifact groups. Pushing a version tag `v*` runs **Release desktop** (`.github/workflows/release-desktop.yml`), which publishes Windows, macOS, and Linux installers, **electron-updater** metadata (`latest*.yml`), and the **IntelliJ plugin ZIP** to **GitHub Releases**. The workflow sets **`permissions: contents: write`** so the default `GITHUB_TOKEN` can upload assets (forks may need the same permission or a personal access token). You can still build `**Dockerfile.linux**` manually (see the file header).
 
 Output appears under `release/` or, if that folder is locked on Windows, under `release-builds/<timestamp>/`. On Linux (or Podman/CI) you should get a `**.deb**`, an `**.AppImage**`, a **`pacman` package** (`*.pkg.tar.*`), and a `**.zip**` in that directory.
 
@@ -293,4 +325,4 @@ The app writes logs under your **user data** directory, in a `**logs`** subfolde
 4. From **Models**, **Download** a Hub model (GGUF preferred) or use **`ollama pull`** when on Ollama with a mapped card.
 5. Open **Chat** and send a message.
 
-For architecture and technical detail, see the [arc42 architecture index](./architecture-arc42/README.md).
+For architecture and technical detail, see the [arc42 architecture index](./architecture-arc42/README.md) (Electron workbench architecture) and the [TOGAF repository scope guide](./architecture-repository/README.md) (loaded codebase architecture subjects).

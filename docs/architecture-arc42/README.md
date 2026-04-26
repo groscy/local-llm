@@ -6,6 +6,10 @@
 
 Chapters live in this folder as separate files. Read them in order or jump by topic.
 
+This track is the **tool/workbench architecture** for the Electron desktop app.
+For TOGAF repository scope centered on loaded project codebases, see:
+[`docs/architecture-repository/README.md`](../architecture-repository/README.md).
+
 
 | #   | Chapter                  | File                                                               |
 | --- | ------------------------ | ------------------------------------------------------------------ |

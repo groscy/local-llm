@@ -6,4 +6,10 @@ This documentation has been split into **one file per chapter** under:
 
 Start there for the chapter index and links.
 
+This arc42 set documents the **Electron workbench/tool architecture**.
+
+For TOGAF repository content centered on loaded project codebases, use:
+
+**[docs/architecture-repository/README.md](./architecture-repository/README.md)**
+
 **Related:** [Project plan / status](./PLAN.md) · [User Guide](./USER-GUIDE.md) · [IDE / IntelliJ HTTP bridge](./intellij-integration.md) · sample plugin under `integrations/intellij-plugin/`.
