@@ -5,6 +5,10 @@ dist/
 release/
 release-linux/
 release-builds/
+release-linux-builds/
+release-linux-cpu-builds/
+release-linux-cpu/
+release-linux.zip
 *.log
 .DS_Store
 .env
