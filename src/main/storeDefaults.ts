@@ -55,6 +55,12 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   chatDomainEnhancement: false,
   /** llama.cpp: ask the model to cite RAG snippet numbers [1], [2]; UI may warn if citations are missing. */
   llamaRagGrounding: false,
+  /** Build and use runtime ontology context in prompts. */
+  ontologyEnabled: true,
+  /** Upper bound of facts injected per request from runtime ontology retrieval. */
+  ontologyMaxTriples: 40,
+  /** Approx prompt-token budget for ontology context injections. */
+  ontologyContextTokens: 512,
   /** llama-server `/v1/chat/completions` sampling (OpenAI-style). */
   llamaTemperature: 0.8,
   llamaTopP: 0.95,
@@ -91,6 +97,8 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   agentRemoteOllamaUrl: '',
   /** Workspace role for simplified nav (see `@shared/uiRole`). */
   uiRole: DEFAULT_UI_ROLE,
+  /** Workspace visual density (focused / standard / expanded). */
+  workspaceDensity: 'standard',
   /** Codebases, formal tool profiles, and verification run history (see `@shared/codebaseRegistry`). */
   [CODEBASE_FORMAL_STORE_KEY]: emptyCodebaseFormalBundle()
 }
@@ -151,6 +159,24 @@ export function migrateChatProfileSettings(store: Store<Record<string, unknown>>
   if (typeof store.get('chatResponsePostProcess') !== 'boolean') {
     store.set('chatResponsePostProcess', true)
   }
+  if (typeof store.get('ontologyEnabled') !== 'boolean') {
+    store.set('ontologyEnabled', true)
+  }
+  if (typeof store.get('ontologyMaxTriples') !== 'number' || !Number.isFinite(store.get('ontologyMaxTriples'))) {
+    store.set('ontologyMaxTriples', 40)
+  } else {
+    const n = Math.floor(Number(store.get('ontologyMaxTriples')))
+    store.set('ontologyMaxTriples', Math.min(200, Math.max(5, n)))
+  }
+  if (
+    typeof store.get('ontologyContextTokens') !== 'number' ||
+    !Number.isFinite(store.get('ontologyContextTokens'))
+  ) {
+    store.set('ontologyContextTokens', 512)
+  } else {
+    const n = Math.floor(Number(store.get('ontologyContextTokens')))
+    store.set('ontologyContextTokens', Math.min(3000, Math.max(64, n)))
+  }
   if (typeof store.get('formalVerificationInterpretWithLlm') !== 'boolean') {
     store.set('formalVerificationInterpretWithLlm', false)
   }
@@ -195,5 +221,9 @@ export function migrateRoleSetupIfNeeded(store: Store<Record<string, unknown>>):
   const roleRaw = store.get('uiRole')
   if (!parseUiRole(roleRaw)) {
     store.set('uiRole', DEFAULT_UI_ROLE)
+  }
+  const densityRaw = store.get('workspaceDensity')
+  if (densityRaw !== 'focused' && densityRaw !== 'standard' && densityRaw !== 'expanded') {
+    store.set('workspaceDensity', 'standard')
   }
 }
