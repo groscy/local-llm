@@ -7,7 +7,9 @@ import type Database from 'better-sqlite3'
 import { extractWikiGlossary, stripWikiControlMarkers, WIKI_REFERENCE_SECTION_MARKDOWN } from '@shared/wikiArticleExtras'
 import { wikiKindFromUri } from '@shared/wikiSourceGroups'
 import type {
+  CodebaseAnalysisItem,
   KbChunk,
+  KbIngestFileProgress,
   KbSearchHit,
   KbSource,
   KnowledgeGraphEdge,
@@ -15,6 +17,7 @@ import type {
   KnowledgeGraphPayload,
   WikiChatHighlightTerm,
   WikiPagePayload,
+  WikiReanalyzeResult,
   WikiRelatedSource,
   WikiSourceKind,
   WikiTopic
@@ -22,6 +25,128 @@ import type {
 
 const CHUNK_SIZE = 1200
 const CHUNK_OVERLAP = 200
+const WIKI_REANALYZE_PROMPT_VERSION = '2026-04-20.v1'
+
+type WikiEntryActiveRevisionRow = {
+  entryId: string
+  canonicalKeyword: string
+  activeRevisionId: string
+  updatedAt: number
+  revisionId: string
+  versionNo: number
+  title: string
+  body: string
+  modelId: string | null
+  promptVersion: string | null
+  sourceIdsJson: string
+  createdAt: number
+}
+
+type WikiEntryKeywordRelation = {
+  id: string
+  fromEntryId: string
+  toEntryId: string | null
+  toKeyword: string
+  relationType: string
+  confidence: number
+  sourceRevisionId: string
+}
+
+function tableExists(db: Database.Database, name: string): boolean {
+  const row = db
+    .prepare(`SELECT 1 as ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`)
+    .get(name) as { ok: number } | undefined
+  return Boolean(row?.ok)
+}
+
+function hasWikiEntryTables(db: Database.Database): boolean {
+  return (
+    tableExists(db, 'wiki_entries') &&
+    tableExists(db, 'wiki_entry_revisions') &&
+    tableExists(db, 'wiki_entry_sources') &&
+    tableExists(db, 'wiki_keyword_relations')
+  )
+}
+
+export function normalizeWikiKeyword(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[`"'“”‘’]/g, '')
+    .replace(/[_/\\]+/g, ' ')
+    .replace(/[^a-z0-9\s-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function titleCaseKeyword(keyword: string): string {
+  const cleaned = keyword.trim()
+  if (!cleaned) return 'Untitled'
+  return cleaned
+    .split(/\s+/)
+    .map((w) => w[0]?.toUpperCase() + w.slice(1))
+    .join(' ')
+}
+
+function readSourceIdsJson(raw: string): string[] {
+  try {
+    const arr = JSON.parse(raw)
+    if (!Array.isArray(arr)) return []
+    return arr.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+  } catch {
+    return []
+  }
+}
+
+function listActiveWikiEntryRows(db: Database.Database): WikiEntryActiveRevisionRow[] {
+  if (!hasWikiEntryTables(db)) return []
+  return db
+    .prepare(
+      `SELECT e.id as entryId,
+              e.canonical_keyword as canonicalKeyword,
+              e.active_revision_id as activeRevisionId,
+              e.updated_at as updatedAt,
+              r.id as revisionId,
+              r.version_no as versionNo,
+              r.title as title,
+              r.body as body,
+              r.model_id as modelId,
+              r.prompt_version as promptVersion,
+              r.source_ids_json as sourceIdsJson,
+              r.created_at as createdAt
+       FROM wiki_entries e
+       JOIN wiki_entry_revisions r ON r.id = e.active_revision_id
+       ORDER BY e.updated_at DESC`
+    )
+    .all() as WikiEntryActiveRevisionRow[]
+}
+
+function resolveActiveWikiEntryForSource(
+  db: Database.Database,
+  sourceId: string
+): WikiEntryActiveRevisionRow | undefined {
+  if (!hasWikiEntryTables(db)) return undefined
+  return db
+    .prepare(
+      `SELECT e.id as entryId,
+              e.canonical_keyword as canonicalKeyword,
+              e.active_revision_id as activeRevisionId,
+              e.updated_at as updatedAt,
+              r.id as revisionId,
+              r.version_no as versionNo,
+              r.title as title,
+              r.body as body,
+              r.model_id as modelId,
+              r.prompt_version as promptVersion,
+              r.source_ids_json as sourceIdsJson,
+              r.created_at as createdAt
+       FROM wiki_entry_sources es
+       JOIN wiki_entries e ON e.id = es.entry_id
+       JOIN wiki_entry_revisions r ON r.id = e.active_revision_id
+       WHERE es.source_id = ?
+       LIMIT 1`
+    )
+    .get(sourceId) as WikiEntryActiveRevisionRow | undefined
+}
 
 function chunkText(text: string, heading?: string): { text: string; heading?: string }[] {
   const normalized = text.replace(/\r\n/g, '\n').trim()
@@ -45,7 +170,8 @@ export function ingestText(
   uri: string,
   body: string,
   heading?: string,
-  conversationId?: string | null
+  conversationId?: string | null,
+  onProgress?: (payload: KbIngestFileProgress) => void
 ): KbSource {
   const sourceId = randomUUID()
   const t = Date.now()
@@ -53,30 +179,44 @@ export function ingestText(
     'INSERT INTO kb_sources (id, title, uri, created_at, conversation_id) VALUES (?, ?, ?, ?, ?)'
   ).run(sourceId, title, uri, t, conversationId ?? null)
   const chunks = chunkText(body, heading)
+  onProgress?.({ kind: 'chunking', chunkCount: chunks.length })
   let ord = 0
   const ins = db.prepare(
     `INSERT INTO kb_chunks (id, source_id, ord, heading, text) VALUES (?, ?, ?, ?, ?)`
   )
-  for (const c of chunks) {
+  const progressEvery = chunks.length <= 40 ? 1 : 8
+  for (const [i, c] of chunks.entries()) {
     const cid = randomUUID()
     ins.run(cid, sourceId, ord++, c.heading ?? null, c.text)
+    const inserted = i + 1
+    if (inserted === chunks.length || inserted % progressEvery === 0) {
+      onProgress?.({ kind: 'indexing', inserted, total: chunks.length })
+    }
   }
+  onProgress?.({ kind: 'done', sourceId, title, chunkCount: chunks.length })
   return { id: sourceId, title, uri, createdAt: t }
 }
 
-export async function ingestFile(db: Database.Database, filePath: string, title?: string): Promise<KbSource> {
+export async function ingestFile(
+  db: Database.Database,
+  filePath: string,
+  title?: string,
+  onProgress?: (payload: KbIngestFileProgress) => void
+): Promise<KbSource> {
   const name = title ?? filePath.split(/[/\\]/).pop() ?? filePath
   let body: string
   if (isPdfFilePath(filePath)) {
+    onProgress?.({ kind: 'reading', filePath, format: 'pdf' })
     const buf = readFileSync(filePath)
     body = await extractPdfPlainText(buf)
     if (!body.trim()) {
       throw new Error('No extractable text in this PDF (it may be image-only, encrypted, or empty).')
     }
   } else {
+    onProgress?.({ kind: 'reading', filePath, format: 'text' })
     body = readFileSync(filePath, 'utf8')
   }
-  return ingestText(db, name, `file://${filePath}`, body, undefined, null)
+  return ingestText(db, name, `file://${filePath}`, body, undefined, null, onProgress)
 }
 
 /** Chunk and index the full message thread of a conversation into the knowledge base (linked for later bulk delete). */
@@ -105,6 +245,24 @@ export function deleteKbSource(db: Database.Database, sourceId: string): void {
   const pageId = `src:${sourceId}`
   db.prepare('DELETE FROM wiki_page_chunks WHERE page_id = ?').run(pageId)
   db.prepare('DELETE FROM wiki_pages WHERE id = ?').run(pageId)
+  if (hasWikiEntryTables(db)) {
+    const mapped = db
+      .prepare('SELECT entry_id as entryId FROM wiki_entry_sources WHERE source_id = ?')
+      .get(sourceId) as { entryId: string } | undefined
+    db.prepare('DELETE FROM wiki_entry_sources WHERE source_id = ?').run(sourceId)
+    if (mapped?.entryId) {
+      const rem = db
+        .prepare('SELECT COUNT(*) as c FROM wiki_entry_sources WHERE entry_id = ?')
+        .get(mapped.entryId) as { c: number } | undefined
+      if (Number(rem?.c ?? 0) === 0) {
+        db.prepare('DELETE FROM wiki_keyword_relations WHERE from_entry_id = ? OR to_entry_id = ?').run(
+          mapped.entryId,
+          mapped.entryId
+        )
+        db.prepare('DELETE FROM wiki_entries WHERE id = ?').run(mapped.entryId)
+      }
+    }
+  }
   db.prepare('DELETE FROM kb_sources WHERE id = ?').run(sourceId)
 }
 
@@ -139,6 +297,12 @@ export function resetEntireWikiAndKeywords(db: Database.Database): ResetWikiAndK
     db.prepare('DELETE FROM prompt_domains').run()
     db.prepare('DELETE FROM wiki_page_chunks').run()
     db.prepare('DELETE FROM wiki_pages').run()
+    if (hasWikiEntryTables(db)) {
+      db.prepare('DELETE FROM wiki_keyword_relations').run()
+      db.prepare('DELETE FROM wiki_entry_sources').run()
+      db.prepare('DELETE FROM wiki_entry_revisions').run()
+      db.prepare('DELETE FROM wiki_entries').run()
+    }
     return { sourcesRemoved: ids.length, promptDomainsRemoved }
   })
   return tx()
@@ -263,6 +427,90 @@ export function listChunksForSource(db: Database.Database, sourceId: string): Kb
     .all(sourceId) as KbChunk[]
 }
 
+function defaultWikiBodyForSource(db: Database.Database, sourceId: string): string {
+  const pageId = `src:${sourceId}`
+  const page = db.prepare('SELECT body FROM wiki_pages WHERE id = ?').get(pageId) as { body: string } | undefined
+  if (page?.body?.trim()) return page.body
+  return getWikiPageBody(db, sourceId)
+}
+
+function createWikiEntryRevision(
+  db: Database.Database,
+  args: {
+    entryId: string
+    title: string
+    body: string
+    modelId?: string | null
+    promptVersion?: string | null
+    sourceIds: string[]
+  }
+): { revisionId: string; versionNo: number } {
+  const t = Date.now()
+  const next = db
+    .prepare('SELECT COALESCE(MAX(version_no), 0) + 1 as nextVersion FROM wiki_entry_revisions WHERE entry_id = ?')
+    .get(args.entryId) as { nextVersion: number }
+  const versionNo = Number(next.nextVersion || 1)
+  const revisionId = randomUUID()
+  db.prepare(
+    `INSERT INTO wiki_entry_revisions
+      (id, entry_id, version_no, title, body, model_id, prompt_version, source_ids_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    revisionId,
+    args.entryId,
+    versionNo,
+    args.title,
+    args.body,
+    args.modelId ?? null,
+    args.promptVersion ?? null,
+    JSON.stringify(args.sourceIds),
+    t
+  )
+  db.prepare('UPDATE wiki_entries SET active_revision_id = ?, updated_at = ? WHERE id = ?').run(revisionId, t, args.entryId)
+  return { revisionId, versionNo }
+}
+
+function insertWikiEntryForKeyword(db: Database.Database, canonicalKeyword: string): string {
+  const entryId = randomUUID()
+  const t = Date.now()
+  db.prepare(
+    'INSERT INTO wiki_entries (id, canonical_keyword, active_revision_id, created_at, updated_at) VALUES (?, ?, NULL, ?, ?)'
+  ).run(entryId, canonicalKeyword, t, t)
+  return entryId
+}
+
+export function ensureWikiVersioningBackfill(db: Database.Database): void {
+  if (!hasWikiEntryTables(db)) return
+  const existing = db.prepare('SELECT COUNT(*) as c FROM wiki_entries').get() as { c: number } | undefined
+  if (Number(existing?.c ?? 0) > 0) return
+  const sources = db
+    .prepare('SELECT id, title FROM kb_sources ORDER BY created_at ASC')
+    .all() as { id: string; title: string }[]
+  if (sources.length === 0) return
+  const tx = db.transaction(() => {
+    const keywordToEntry = new Map<string, string>()
+    for (const s of sources) {
+      const canonical = normalizeWikiKeyword(s.title) || normalizeWikiKeyword(`topic ${s.id.slice(0, 8)}`)
+      let entryId = keywordToEntry.get(canonical)
+      if (!entryId) {
+        entryId = insertWikiEntryForKeyword(db, canonical)
+        const body = defaultWikiBodyForSource(db, s.id)
+        createWikiEntryRevision(db, {
+          entryId,
+          title: titleCaseKeyword(canonical),
+          body,
+          modelId: null,
+          promptVersion: 'legacy-backfill',
+          sourceIds: [s.id]
+        })
+        keywordToEntry.set(canonical, entryId)
+      }
+      db.prepare('INSERT OR REPLACE INTO wiki_entry_sources (entry_id, source_id) VALUES (?, ?)').run(entryId, s.id)
+    }
+  })
+  tx()
+}
+
 const WIKI_HIGHLIGHT_SNIPPET_MAX = 220
 const WIKI_HIGHLIGHT_PHRASE_MIN = 3
 const WIKI_HIGHLIGHT_PHRASE_MAX = 200
@@ -280,6 +528,7 @@ function clipHighlightSnippet(text: string): string {
  * from compiled wiki page bodies when present.
  */
 export function listWikiChatHighlightTerms(db: Database.Database): WikiChatHighlightTerm[] {
+  ensureWikiVersioningBackfill(db)
   const out: WikiChatHighlightTerm[] = []
   const seen = new Set<string>()
 
@@ -325,17 +574,35 @@ export function listWikiChatHighlightTerms(db: Database.Database): WikiChatHighl
     push(c.sourceId, c.heading, c.text || c.heading)
   }
 
-  const pages = db.prepare('SELECT id, body FROM wiki_pages WHERE id LIKE ?').all('src:%') as {
-    id: string
-    body: string
-  }[]
-
-  for (const page of pages) {
-    const sourceId = page.id.startsWith('src:') ? page.id.slice(4) : ''
-    if (!sourceId) continue
-    const { glossary } = extractWikiGlossary(stripWikiControlMarkers(page.body ?? ''))
-    for (const g of glossary) {
-      push(sourceId, g.term, g.definition || g.term)
+  const activeEntries = listActiveWikiEntryRows(db)
+  if (activeEntries.length > 0) {
+    const repStmt = db.prepare(
+      `SELECT source_id as sourceId
+       FROM wiki_entry_sources
+       WHERE entry_id = ?
+       ORDER BY source_id ASC
+       LIMIT 1`
+    )
+    for (const entry of activeEntries) {
+      const rep = repStmt.get(entry.entryId) as { sourceId: string } | undefined
+      if (!rep?.sourceId) continue
+      const { glossary } = extractWikiGlossary(stripWikiControlMarkers(entry.body ?? ''))
+      for (const g of glossary) {
+        push(rep.sourceId, g.term, g.definition || g.term)
+      }
+    }
+  } else {
+    const pages = db.prepare('SELECT id, body FROM wiki_pages WHERE id LIKE ?').all('src:%') as {
+      id: string
+      body: string
+    }[]
+    for (const page of pages) {
+      const sourceId = page.id.startsWith('src:') ? page.id.slice(4) : ''
+      if (!sourceId) continue
+      const { glossary } = extractWikiGlossary(stripWikiControlMarkers(page.body ?? ''))
+      for (const g of glossary) {
+        push(sourceId, g.term, g.definition || g.term)
+      }
     }
   }
 
@@ -346,6 +613,43 @@ export function listWikiChatHighlightTerms(db: Database.Database): WikiChatHighl
 
 /** Topic = source title with chunk count and kind (wiki index). */
 export function listWikiTopics(db: Database.Database): WikiTopic[] {
+  ensureWikiVersioningBackfill(db)
+  if (hasWikiEntryTables(db)) {
+    const rows = db
+      .prepare(
+        `SELECT rep.source_id as id,
+                COALESCE(r.title, e.canonical_keyword) as title,
+                rep.uri as uri,
+                COALESCE(cc.chunkCount, 0) as chunkCount,
+                e.updated_at as updatedAt
+         FROM wiki_entries e
+         LEFT JOIN wiki_entry_revisions r ON r.id = e.active_revision_id
+         JOIN (
+           SELECT es.entry_id as entry_id, es.source_id as source_id, s.uri as uri
+           FROM wiki_entry_sources es
+           JOIN kb_sources s ON s.id = es.source_id
+           WHERE es.source_id = (
+             SELECT MIN(es2.source_id) FROM wiki_entry_sources es2 WHERE es2.entry_id = es.entry_id
+           )
+         ) rep ON rep.entry_id = e.id
+         LEFT JOIN (
+           SELECT es.entry_id as entry_id, COUNT(c.id) as chunkCount
+           FROM wiki_entry_sources es
+           LEFT JOIN kb_chunks c ON c.source_id = es.source_id
+           GROUP BY es.entry_id
+         ) cc ON cc.entry_id = e.id
+         ORDER BY updatedAt DESC`
+      )
+      .all() as { id: string; title: string; uri: string | null; chunkCount: number }[]
+    if (rows.length > 0) {
+      return rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        chunkCount: Number(r.chunkCount),
+        kind: wikiKindFromUri(r.uri ?? '')
+      }))
+    }
+  }
   const rows = db
     .prepare(
       `SELECT s.id, s.title, s.uri, COUNT(c.id) as chunkCount
@@ -530,8 +834,45 @@ function domainIdFromUri(uri: string): string | undefined {
   if (t.startsWith('chat:')) return 'chat'
   if (t.startsWith('wiki-extract:')) return 'wiki'
   if (t.startsWith('deep-learn:')) return 'research'
+  if (t.startsWith('codebase-analysis:')) return 'architecture'
   if (t.startsWith('file://')) return 'documents'
+  if (t.startsWith('dms:')) return 'documents'
   return undefined
+}
+
+function parseCodebaseAnalysisItems(raw: string): CodebaseAnalysisItem[] {
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    const out: CodebaseAnalysisItem[] = []
+    for (const x of parsed) {
+      if (!x || typeof x !== 'object') continue
+      const o = x as Record<string, unknown>
+      const name = typeof o.name === 'string' ? o.name.trim() : ''
+      if (!name) continue
+      const confidence =
+        typeof o.confidence === 'number' && Number.isFinite(o.confidence)
+          ? Math.min(1, Math.max(0, o.confidence))
+          : 0.55
+      out.push({
+        name,
+        summary: typeof o.summary === 'string' ? o.summary.trim() : '',
+        confidence,
+        source: o.source === 'llm' || o.source === 'heuristic' ? o.source : 'heuristic',
+        ...(Array.isArray(o.evidencePaths)
+          ? {
+              evidencePaths: o.evidencePaths
+                .filter((v): v is string => typeof v === 'string')
+                .slice(0, 6)
+            }
+          : {})
+      })
+      if (out.length >= 30) break
+    }
+    return out
+  } catch {
+    return []
+  }
 }
 
 /**
@@ -540,6 +881,7 @@ function domainIdFromUri(uri: string): string | undefined {
  * sources that share a long token in their titles.
  */
 export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload {
+  ensureWikiVersioningBackfill(db)
   const sources = db
     .prepare(`SELECT id, title, uri, created_at as createdAt FROM kb_sources ORDER BY created_at ASC`)
     .all() as { id: string; title: string; uri: string; createdAt: number }[]
@@ -621,49 +963,101 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
     }
   }
 
-  const wikiRowsAll = db.prepare(`SELECT id, title FROM wiki_pages`).all() as { id: string; title: string }[]
-  const wikiRows =
-    wikiRowsAll.length > GRAPH_MAX_WIKI_NODES
+  const chunkIds = new Set(nodes.filter((n) => n.kind === 'chunk').map((n) => n.id))
+  const sourceIdSet = new Set(sources.map((s) => s.id))
+  const sourceToChunkIds = new Map<string, string[]>()
+  for (const e of edges) {
+    if (e.kind !== 'contains') continue
+    if (!sourceToChunkIds.has(e.from)) sourceToChunkIds.set(e.from, [])
+    sourceToChunkIds.get(e.from)!.push(e.to)
+  }
+
+  const entryRowsAll = listActiveWikiEntryRows(db)
+  const entryRows =
+    entryRowsAll.length > GRAPH_MAX_WIKI_NODES
       ? (() => {
           truncated = true
-          return wikiRowsAll.slice(0, GRAPH_MAX_WIKI_NODES)
+          return entryRowsAll.slice(0, GRAPH_MAX_WIKI_NODES)
         })()
-      : wikiRowsAll
-  for (const w of wikiRows) {
-    const sourceBackref = w.id.startsWith('src:') ? w.id.slice(4) : undefined
-    const src = sourceBackref ? sources.find((s) => s.id === sourceBackref) : undefined
+      : entryRowsAll
+  const entryToNodeId = new Map<string, string>()
+  for (const entry of entryRows) {
+    const wikiNodeId = `wiki-entry:${entry.entryId}`
+    entryToNodeId.set(entry.entryId, wikiNodeId)
+    const sourceIds = readSourceIdsJson(entry.sourceIdsJson)
+    const src = sourceIds.map((sid) => sources.find((s) => s.id === sid)).find(Boolean)
     nodes.push({
-      id: w.id,
+      id: wikiNodeId,
       kind: 'wiki',
-      label: w.title,
-      shortLabel: semanticToken(w.title),
+      label: entry.title,
+      shortLabel: semanticToken(entry.title),
       domainId: src ? domainIdFromUri(src.uri) : undefined,
-      confidence: 0.78,
-      novelty: 0.48,
+      confidence: 0.82,
+      novelty: 0.56,
       provenance: 'knowledge-base'
     })
-  }
-
-  const linkRows = db
-    .prepare(`SELECT page_id as pageId, chunk_id as chunkId FROM wiki_page_chunks`)
-    .all() as { pageId: string; chunkId: string }[]
-
-  const chunkIds = new Set(nodes.filter((n) => n.kind === 'chunk').map((n) => n.id))
-  const wikiNodeIds = new Set(wikiRows.map((w) => w.id))
-  for (const l of linkRows) {
-    if (!chunkIds.has(l.chunkId)) continue
-    if (!wikiNodeIds.has(l.pageId)) continue
-    edges.push({ from: l.pageId, to: l.chunkId, kind: 'indexes', confidence: 0.74, recency: 0.55 })
-  }
-
-  const sourceIdSet = new Set(sources.map((s) => s.id))
-  for (const w of wikiRows) {
-    if (w.id.startsWith('src:')) {
-      const sid = w.id.slice(4)
-      if (sourceIdSet.has(sid)) {
-        edges.push({ from: w.id, to: sid, kind: 'compiled_from', confidence: 0.88, recency: 0.65 })
+    for (const sid of sourceIds) {
+      if (!sourceIdSet.has(sid)) continue
+      edges.push({ from: wikiNodeId, to: sid, kind: 'compiled_from', confidence: 0.9, recency: 0.7 })
+      const linkedChunks = sourceToChunkIds.get(sid) ?? []
+      for (const chunkId of linkedChunks) {
+        if (!chunkIds.has(chunkId)) continue
+        edges.push({ from: wikiNodeId, to: chunkId, kind: 'indexes', confidence: 0.76, recency: 0.58 })
       }
     }
+  }
+
+  const relationRows = db
+    .prepare(
+      `SELECT id,
+              from_entry_id as fromEntryId,
+              to_entry_id as toEntryId,
+              to_keyword as toKeyword,
+              relation_type as relationType,
+              confidence,
+              source_revision_id as sourceRevisionId
+       FROM wiki_keyword_relations`
+    )
+    .all() as WikiEntryKeywordRelation[]
+  const existingNodeIds = new Set(nodes.map((n) => n.id))
+  const syntheticByKeyword = new Map<string, string>()
+  for (const rel of relationRows) {
+    const fromNode = entryToNodeId.get(rel.fromEntryId)
+    if (!fromNode) continue
+    let toNode: string | undefined
+    if (rel.toEntryId) toNode = entryToNodeId.get(rel.toEntryId)
+    if (!toNode && rel.toKeyword) {
+      const k = normalizeWikiKeyword(rel.toKeyword)
+      if (k) {
+        if (syntheticByKeyword.has(k)) {
+          toNode = syntheticByKeyword.get(k)
+        } else {
+          const id = `wiki-keyword:${k}`
+          if (!existingNodeIds.has(id)) {
+            nodes.push({
+              id,
+              kind: 'wiki',
+              label: titleCaseKeyword(k),
+              shortLabel: semanticToken(k),
+              confidence: 0.48,
+              novelty: 0.34,
+              provenance: 'knowledge-base'
+            })
+            existingNodeIds.add(id)
+          }
+          syntheticByKeyword.set(k, id)
+          toNode = id
+        }
+      }
+    }
+    if (!toNode || toNode === fromNode) continue
+    edges.push({
+      from: fromNode,
+      to: toNode,
+      kind: 'semantic_related',
+      confidence: Math.min(1, Math.max(0.2, Number(rel.confidence) || 0.5)),
+      recency: 0.62
+    })
   }
 
   const titleTokens = new Map<string, string[]>()
@@ -680,6 +1074,68 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
       const shared = a.some((t) => b.includes(t))
       if (shared) {
         edges.push({ from: sources[i].id, to: sources[j].id, kind: 'related', confidence: 0.52, recency: 0.35 })
+      }
+    }
+  }
+
+  const sourceNodeIds = new Set(nodes.filter((n) => n.kind === 'source').map((n) => n.id))
+  const analysisRows = db
+    .prepare(
+      `SELECT r.id, r.codebase_id as codebaseId, r.kb_source_id as kbSourceId,
+              r.domain_model_json as domainModelJson, r.design_patterns_json as designPatternsJson,
+              r.architecture_patterns_json as architecturePatternsJson, r.created_at as createdAt
+       FROM codebase_analysis_runs r
+       JOIN (
+         SELECT codebase_id, MAX(created_at) as maxCreated
+         FROM codebase_analysis_runs
+         GROUP BY codebase_id
+       ) latest
+       ON latest.codebase_id = r.codebase_id AND latest.maxCreated = r.created_at`
+    )
+    .all() as Array<{
+    id: string
+    codebaseId: string
+    kbSourceId: string | null
+    domainModelJson: string
+    designPatternsJson: string
+    architecturePatternsJson: string
+    createdAt: number
+  }>
+  for (const row of analysisRows) {
+    const sourceId = row.kbSourceId ?? ''
+    if (!sourceNodeIds.has(sourceId)) continue
+    const facets: Array<{
+      key: 'domain_model' | 'design_pattern' | 'architecture_pattern'
+      items: CodebaseAnalysisItem[]
+    }> = [
+      { key: 'domain_model', items: parseCodebaseAnalysisItems(row.domainModelJson) },
+      { key: 'design_pattern', items: parseCodebaseAnalysisItems(row.designPatternsJson) },
+      { key: 'architecture_pattern', items: parseCodebaseAnalysisItems(row.architecturePatternsJson) }
+    ]
+    for (const facet of facets) {
+      for (const [idx, item] of facet.items.slice(0, 8).entries()) {
+        const nodeId = `kg-analysis:${row.id}:${facet.key}:${idx}`
+        nodes.push({
+          id: nodeId,
+          kind: 'chunk',
+          label: item.name,
+          shortLabel: semanticToken(item.name),
+          sublabel: facet.key.replace(/_/g, ' '),
+          sourceId,
+          domainId: 'architecture',
+          confidence: item.confidence,
+          novelty: 0.62,
+          provenance: 'knowledge-base',
+          analysisFacet: facet.key,
+          codebaseId: row.codebaseId
+        })
+        edges.push({
+          from: sourceId,
+          to: nodeId,
+          kind: 'contains',
+          confidence: Math.max(0.45, item.confidence),
+          recency: 0.72
+        })
       }
     }
   }
@@ -757,7 +1213,8 @@ export function ensureWikiPageForSource(db: Database.Database, sourceId: string)
   if (!s) throw new Error('source not found')
   const body = getWikiPageBody(db, sourceId)
   const t = Date.now()
-  const existing = db.prepare('SELECT id FROM wiki_pages WHERE id = ?').get(`src:${sourceId}`) as { id: string } | undefined
+  const pageId = `src:${sourceId}`
+  const existing = db.prepare('SELECT id FROM wiki_pages WHERE id = ?').get(pageId) as { id: string } | undefined
   if (existing) {
     db.prepare('UPDATE wiki_pages SET body = ?, title = ?, updated_at = ? WHERE id = ?').run(
       body,
@@ -765,15 +1222,41 @@ export function ensureWikiPageForSource(db: Database.Database, sourceId: string)
       t,
       existing.id
     )
-    return { id: existing.id, title: s.title, body }
+  } else {
+    db.prepare(
+      'INSERT INTO wiki_pages (id, title, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(pageId, s.title, body, t, t)
+    const chs = db.prepare('SELECT id FROM kb_chunks WHERE source_id = ?').all(sourceId) as { id: string }[]
+    const link = db.prepare('INSERT OR IGNORE INTO wiki_page_chunks (page_id, chunk_id) VALUES (?, ?)')
+    for (const c of chs) link.run(pageId, c.id)
   }
-  const pageId = `src:${sourceId}`
-  db.prepare(
-    'INSERT INTO wiki_pages (id, title, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(pageId, s.title, body, t, t)
-  const chs = db.prepare('SELECT id FROM kb_chunks WHERE source_id = ?').all(sourceId) as { id: string }[]
-  const link = db.prepare('INSERT OR IGNORE INTO wiki_page_chunks (page_id, chunk_id) VALUES (?, ?)')
-  for (const c of chs) link.run(pageId, c.id)
+  if (hasWikiEntryTables(db)) {
+    const canonical = normalizeWikiKeyword(s.title) || normalizeWikiKeyword(`topic ${sourceId.slice(0, 8)}`)
+    const mapped = db
+      .prepare('SELECT entry_id as entryId FROM wiki_entry_sources WHERE source_id = ?')
+      .get(sourceId) as { entryId: string } | undefined
+    let entryId = mapped?.entryId
+    if (!entryId) {
+      const existingEntry = db
+        .prepare('SELECT id FROM wiki_entries WHERE canonical_keyword = ? LIMIT 1')
+        .get(canonical) as { id: string } | undefined
+      entryId = existingEntry?.id ?? insertWikiEntryForKeyword(db, canonical)
+      db.prepare('INSERT OR REPLACE INTO wiki_entry_sources (entry_id, source_id) VALUES (?, ?)').run(entryId, sourceId)
+      const hasRevision = db
+        .prepare('SELECT 1 as ok FROM wiki_entry_revisions WHERE entry_id = ? LIMIT 1')
+        .get(entryId) as { ok: number } | undefined
+      if (!hasRevision?.ok) {
+        createWikiEntryRevision(db, {
+          entryId,
+          title: titleCaseKeyword(canonical),
+          body,
+          modelId: null,
+          promptVersion: 'source-sync',
+          sourceIds: [sourceId]
+        })
+      }
+    }
+  }
   return { id: pageId, title: s.title, body }
 }
 
@@ -826,6 +1309,18 @@ export function listRelatedWikiSources(
 
 /** Sync wiki page row, then return payload for the renderer (glossary stripped from body). */
 export function buildWikiPagePayload(db: Database.Database, sourceId: string): WikiPagePayload {
+  ensureWikiVersioningBackfill(db)
+  const activeEntry = resolveActiveWikiEntryForSource(db, sourceId)
+  if (activeEntry) {
+    const { body, glossary } = extractWikiGlossary(stripWikiControlMarkers(activeEntry.body))
+    return {
+      id: `src:${sourceId}`,
+      title: activeEntry.title,
+      body,
+      glossary,
+      relatedSources: listRelatedWikiSources(db, sourceId, 12)
+    }
+  }
   const page = ensureWikiPageForSource(db, sourceId)
   const { body, glossary } = extractWikiGlossary(stripWikiControlMarkers(page.body))
   return {
@@ -835,6 +1330,149 @@ export function buildWikiPagePayload(db: Database.Database, sourceId: string): W
     glossary,
     relatedSources: listRelatedWikiSources(db, sourceId, 12)
   }
+}
+
+type WikiReanalysisEntryInput = {
+  canonicalKeyword: string
+  title: string
+  body: string
+  sourceIds: string[]
+  relations: Array<{ toKeyword: string; relationType: string; confidence: number }>
+}
+
+function clampConfidence(v: number): number {
+  if (!Number.isFinite(v)) return 0.5
+  return Math.min(1, Math.max(0, v))
+}
+
+export function applyWikiReanalysis(
+  db: Database.Database,
+  args: {
+    modelId: string
+    promptVersion?: string
+    entries: WikiReanalysisEntryInput[]
+  }
+): WikiReanalyzeResult {
+  ensureWikiVersioningBackfill(db)
+  if (!hasWikiEntryTables(db)) {
+    throw new Error('Wiki entry tables are unavailable. Restart after migrations are applied.')
+  }
+  const sourceSet = new Set(listSources(db).map((s) => s.id))
+  const tx = db.transaction(() => {
+    const keywordToEntry = new Map<string, string>()
+    const entryToRevision = new Map<string, string>()
+    let mergedCount = 0
+    const mappedSources = new Set<string>()
+
+    db.prepare('DELETE FROM wiki_entry_sources').run()
+    db.prepare('DELETE FROM wiki_keyword_relations').run()
+
+    for (const e of args.entries) {
+      const canonical = normalizeWikiKeyword(e.canonicalKeyword)
+      if (!canonical) continue
+      let entryId = keywordToEntry.get(canonical)
+      if (!entryId) {
+        const existing = db
+          .prepare('SELECT id FROM wiki_entries WHERE canonical_keyword = ? LIMIT 1')
+          .get(canonical) as { id: string } | undefined
+        entryId = existing?.id ?? insertWikiEntryForKeyword(db, canonical)
+        keywordToEntry.set(canonical, entryId)
+      } else {
+        mergedCount++
+      }
+      const usableSources = [...new Set(e.sourceIds.filter((sid) => sourceSet.has(sid)))]
+      const sourceIds = usableSources.length > 0 ? usableSources : []
+      for (const sid of sourceIds) {
+        db.prepare('INSERT OR REPLACE INTO wiki_entry_sources (entry_id, source_id) VALUES (?, ?)').run(entryId, sid)
+        mappedSources.add(sid)
+      }
+      const title = e.title.trim() || titleCaseKeyword(canonical)
+      const body = e.body.trim() || `::: glossary\n**${titleCaseKeyword(canonical)}** — No distilled definition was generated.\n:::`
+      const { revisionId } = createWikiEntryRevision(db, {
+        entryId,
+        title,
+        body,
+        modelId: args.modelId,
+        promptVersion: args.promptVersion ?? WIKI_REANALYZE_PROMPT_VERSION,
+        sourceIds
+      })
+      entryToRevision.set(entryId, revisionId)
+    }
+
+    const orphanSources = [...sourceSet].filter((sid) => !mappedSources.has(sid))
+    for (const sid of orphanSources) {
+      const source = db.prepare('SELECT title FROM kb_sources WHERE id = ?').get(sid) as { title: string } | undefined
+      const canonical = normalizeWikiKeyword(source?.title ?? sid)
+      let entryId = keywordToEntry.get(canonical)
+      if (!entryId) {
+        const existing = db
+          .prepare('SELECT id FROM wiki_entries WHERE canonical_keyword = ? LIMIT 1')
+          .get(canonical) as { id: string } | undefined
+        entryId = existing?.id ?? insertWikiEntryForKeyword(db, canonical)
+        keywordToEntry.set(canonical, entryId)
+      }
+      db.prepare('INSERT OR REPLACE INTO wiki_entry_sources (entry_id, source_id) VALUES (?, ?)').run(entryId, sid)
+      if (!entryToRevision.has(entryId)) {
+        const body = defaultWikiBodyForSource(db, sid)
+        const { revisionId } = createWikiEntryRevision(db, {
+          entryId,
+          title: titleCaseKeyword(canonical),
+          body,
+          modelId: args.modelId,
+          promptVersion: 'auto-fallback',
+          sourceIds: [sid]
+        })
+        entryToRevision.set(entryId, revisionId)
+      }
+    }
+
+    const existingEntryByKeyword = new Map<string, string>()
+    const allEntries = db
+      .prepare('SELECT id, canonical_keyword as canonicalKeyword FROM wiki_entries')
+      .all() as { id: string; canonicalKeyword: string }[]
+    for (const r of allEntries) existingEntryByKeyword.set(r.canonicalKeyword, r.id)
+
+    for (const e of args.entries) {
+      const fromCanonical = normalizeWikiKeyword(e.canonicalKeyword)
+      const fromEntry = existingEntryByKeyword.get(fromCanonical)
+      if (!fromEntry) continue
+      const revisionId = entryToRevision.get(fromEntry)
+      if (!revisionId) continue
+      for (const rel of e.relations) {
+        const toKeyword = normalizeWikiKeyword(rel.toKeyword)
+        if (!toKeyword || toKeyword === fromCanonical) continue
+        const toEntryId = existingEntryByKeyword.get(toKeyword)
+        db.prepare(
+          `INSERT INTO wiki_keyword_relations
+            (id, from_entry_id, to_entry_id, to_keyword, relation_type, confidence, source_revision_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          randomUUID(),
+          fromEntry,
+          toEntryId ?? null,
+          toKeyword,
+          rel.relationType.trim().slice(0, 96) || 'related',
+          clampConfidence(rel.confidence),
+          revisionId,
+          Date.now()
+        )
+      }
+    }
+
+    const processedEntries = Number(
+      (db.prepare('SELECT COUNT(*) as c FROM wiki_entries').get() as { c: number } | undefined)?.c ?? 0
+    )
+    return {
+      ok: true,
+      processedSources: sourceSet.size,
+      processedEntries,
+      mergedEntries: mergedCount,
+      skippedSources: 0,
+      modelId: args.modelId,
+      promptVersion: args.promptVersion ?? WIKI_REANALYZE_PROMPT_VERSION
+    } satisfies WikiReanalyzeResult
+  })
+  return tx()
 }
 
 function safeWikiExportFileStem(title: string): string {
