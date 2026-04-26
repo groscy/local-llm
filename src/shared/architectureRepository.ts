@@ -25,3 +25,8 @@ export type ArchitectureRepositoryScanResult = {
 export type ArchitectureRepositoryScanResponse =
   | { ok: true; result: ArchitectureRepositoryScanResult }
   | { ok: false; error: string }
+
+export type ArchitectureRepositoryScanRequest = {
+  /** Optional explicit root path; when omitted, main falls back to persisted config root. */
+  rootPath?: string
+}

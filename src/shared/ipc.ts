@@ -61,6 +61,11 @@ export const IPC = {
   RUNTIME_CHAT: 'runtime:chat',
   /** Main → renderer: streamed assistant tokens; correlate with `requestId` from `RUNTIME_CHAT`. */
   RUNTIME_CHAT_PROGRESS: 'runtime:chatProgress',
+  ONTOLOGY_STATS: 'ontology:stats',
+  ONTOLOGY_QUERY_SUBGRAPH: 'ontology:querySubgraph',
+  ONTOLOGY_ENTITY_DETAILS: 'ontology:entityDetails',
+  ONTOLOGY_REBUILD: 'ontology:rebuild',
+  ONTOLOGY_EXPORT: 'ontology:export',
   OPEN_EXTERNAL_URL: 'shell:openExternalUrl',
   /** Save dialog → copy bundled / dev-built plugin ZIP, or download from GitHub latest release. */
   APP_SAVE_INTELLIJ_PLUGIN_ZIP: 'app:saveIntellijPluginZip',
@@ -83,6 +88,7 @@ export const IPC = {
   // Knowledge / RAG
   KB_INGEST_TEXT: 'kb:ingestText',
   KB_INGEST_FILE: 'kb:ingestFile',
+  KB_INGEST_FILE_PROGRESS: 'kb:ingestFileProgress',
   KB_INGEST_CONVERSATION: 'kb:ingestConversation',
   KB_SOURCES: 'kb:sources',
   KB_SEARCH: 'kb:search',
@@ -105,6 +111,10 @@ export const IPC = {
   KB_GRAPH_ANALYSIS_RUN: 'kb:graphAnalysisRun',
   /** After a chat turn: run a short local model pass to extract wiki notes and ingest (optional). */
   KB_WIKI_EXTRACT_TURN: 'kb:wikiExtractTurn',
+  /** Reanalyze and distill all wiki entries with the currently loaded model. */
+  KB_WIKI_REANALYZE_RUN: 'kb:wikiReanalyzeRun',
+  /** Main → renderer: progress while `KB_WIKI_REANALYZE_RUN` is executing. */
+  KB_WIKI_REANALYZE_PROGRESS: 'kb:wikiReanalyzeProgress',
   /** Multi-round “learn everything about …” research → single KB ingest (wiki + graph). */
   KB_DEEP_LEARN_RUN: 'kb:deepLearnRun',
   /** Abort an in-flight `KB_DEEP_LEARN_RUN` by `jobId`. */
@@ -113,6 +123,18 @@ export const IPC = {
   KB_DEEP_LEARN_RESUME: 'kb:deepLearnResume',
   /** Main → renderer: progress for deep-learn (`jobId` matches renderer request). */
   KB_DEEP_LEARN_PROGRESS: 'kb:deepLearnProgress',
+
+  // DMS imports
+  DMS_CONNECT_START: 'dms:connectStart',
+  DMS_CONNECT_COMPLETE: 'dms:connectComplete',
+  DMS_CONNECT_WITH_TOKEN: 'dms:connectWithToken',
+  DMS_CONNECTIONS_LIST: 'dms:connectionsList',
+  DMS_FOLDERS_LIST: 'dms:foldersList',
+  DMS_IMPORT_ROOTS_LIST: 'dms:importRootsList',
+  DMS_IMPORT_START: 'dms:importStart',
+  DMS_SYNC_RUN: 'dms:syncRun',
+  DMS_SYNC_PROGRESS: 'dms:syncProgress',
+  DMS_DISCONNECT: 'dms:disconnect',
 
   // Metrics
   METRICS_SNAPSHOT: 'metrics:snapshot',
@@ -148,6 +170,7 @@ export const IPC = {
   /** Codebase registry + formal (external tool) verification — persisted bundle. */
   CODEBASE_FORMAL_GET: 'codebaseFormal:get',
   CODEBASE_FORMAL_ADD: 'codebaseFormal:add',
+  CODEBASE_FORMAL_ADD_GIT: 'codebaseFormal:addGit',
   CODEBASE_FORMAL_UPDATE: 'codebaseFormal:update',
   CODEBASE_FORMAL_REMOVE: 'codebaseFormal:remove',
   CODEBASE_FORMAL_PICK_ROOT: 'codebaseFormal:pickRoot',
@@ -161,7 +184,11 @@ export const IPC = {
   /** Renderer → main: summarize a completed run with the local model (advisory). */
   CODEBASE_FORMAL_INTERPRET_RUN: 'codebaseFormal:interpretRun',
   /** Main → renderer: formal verification stdout/stderr chunks and final row. */
-  CODEBASE_FORMAL_VERIFICATION_PROGRESS: 'codebaseFormal:verificationProgress'
+  CODEBASE_FORMAL_VERIFICATION_PROGRESS: 'codebaseFormal:verificationProgress',
+  CODEBASE_WIKI_ANALYZE: 'codebaseWiki:analyze',
+  CODEBASE_WIKI_ANALYSIS_LATEST: 'codebaseWiki:analysisLatest',
+  /** Main → renderer: progress for codebase scan + enrichment pipeline. */
+  CODEBASE_WIKI_ANALYSIS_PROGRESS: 'codebaseWiki:analysisProgress'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

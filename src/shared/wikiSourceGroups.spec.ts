@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { wikiNoteGroupKey, wikiSidebarRowsForKind } from './wikiSourceGroups'
+import { wikiKindFromUri, wikiNoteGroupKey, wikiSidebarRowsForKind } from './wikiSourceGroups'
 import type { WikiTopic } from './types'
 
 function topic(id: string, title: string, kind: WikiTopic['kind'] = 'extracted_note'): WikiTopic {
@@ -28,5 +28,11 @@ describe('wikiSidebarRowsForKind', () => {
     const rows = wikiSidebarRowsForKind('document', topics)
     expect(rows).toHaveLength(2)
     expect(rows.every((r) => r.rowKind === 'topic')).toBe(true)
+  })
+})
+
+describe('wikiKindFromUri', () => {
+  it('classifies codebase analysis sources', () => {
+    expect(wikiKindFromUri('codebase-analysis:abc:123')).toBe('codebase_analysis')
   })
 })

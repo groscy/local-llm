@@ -153,6 +153,16 @@ export interface KbSource {
   conversationId?: string | null
 }
 
+/** Main→renderer progress updates while importing one file into the wiki knowledge base. */
+export type KbIngestFileProgress =
+  | { kind: 'selected'; filePath: string }
+  | { kind: 'reading'; filePath: string; format: 'pdf' | 'text' }
+  | { kind: 'chunking'; chunkCount: number }
+  | { kind: 'indexing'; inserted: number; total: number }
+  | { kind: 'done'; sourceId: string; title: string; chunkCount: number }
+  | { kind: 'cancelled' }
+  | { kind: 'error'; message: string }
+
 export interface KbChunk {
   id: string
   sourceId: string
@@ -162,7 +172,7 @@ export interface KbChunk {
 }
 
 /** How a KB source was created; derived from its `uri` for library grouping. */
-export type WikiSourceKind = 'document' | 'extracted_note' | 'saved_chat' | 'other'
+export type WikiSourceKind = 'document' | 'extracted_note' | 'saved_chat' | 'codebase_analysis' | 'other'
 
 export interface WikiTopic {
   id: string
@@ -216,6 +226,101 @@ export interface WikiPagePayload {
   relatedSources: WikiRelatedSource[]
 }
 
+export interface WikiReanalyzeResult {
+  ok: boolean
+  processedSources: number
+  processedEntries: number
+  mergedEntries: number
+  skippedSources: number
+  modelId: string
+  promptVersion: string
+  error?: string
+}
+
+export type WikiReanalyzeProgress =
+  | { kind: 'started'; totalSources: number }
+  | { kind: 'source'; index: number; totalSources: number; sourceId: string; title: string }
+  | { kind: 'merging'; totalKeywords: number }
+  | { kind: 'done'; summary: WikiReanalyzeResult }
+
+export type DmsProvider = 'google-drive' | 'onedrive' | 'sharepoint'
+
+export interface DmsConnectionSummary {
+  id: string
+  provider: DmsProvider
+  displayName: string
+  accountEmail?: string | null
+  tenantId?: string | null
+  siteId?: string | null
+  status: 'connected' | 'error' | 'expired'
+  createdAt: number
+  updatedAt: number
+  lastSyncedAt?: number | null
+}
+
+export interface DmsFolderSummary {
+  id: string
+  name: string
+  path: string
+}
+
+export interface DmsImportRootSummary {
+  id: string
+  connectionId: string
+  externalFolderId: string
+  displayName: string
+  externalPath: string
+  createdAt: number
+  updatedAt: number
+  lastSyncedAt?: number | null
+}
+
+export type DmsConnectStartResponse =
+  | {
+      ok: true
+      authUrl: string
+      state: string
+    }
+  | { ok: false; error: string }
+
+export type DmsConnectResult =
+  | {
+      ok: true
+      connection: DmsConnectionSummary
+    }
+  | { ok: false; error: string }
+
+export type DmsSyncRunResult =
+  | {
+      ok: true
+      runId: string
+      importedCount: number
+      updatedCount: number
+      skippedCount: number
+      removedCount: number
+      reportSourceId?: string
+      graphReportSourceId?: string
+    }
+  | { ok: false; error: string; runId?: string }
+
+export type DmsSyncProgress =
+  | { kind: 'started'; runId: string; rootId: string; message: string; totalDiscovered?: number }
+  | { kind: 'scan'; runId: string; rootId: string; message: string; totalDiscovered: number }
+  | { kind: 'file'; runId: string; rootId: string; message: string; processed: number; totalDiscovered: number }
+  | { kind: 'analysis'; runId: string; rootId: string; message: string }
+  | {
+      kind: 'done'
+      runId: string
+      rootId: string
+      importedCount: number
+      updatedCount: number
+      skippedCount: number
+      removedCount: number
+      reportSourceId?: string
+      graphReportSourceId?: string
+    }
+  | { kind: 'error'; runId: string; rootId: string; message: string }
+
 export type WikiExportZipResult =
   | { ok: true; path: string }
   | { ok: false; canceled: true }
@@ -227,6 +332,14 @@ export type SaveIntellijPluginZipResult =
 
 /** Nodes and edges for the in-app knowledge graph visualization (sources, chunks, wiki pages). */
 export type KnowledgeGraphNodeKind = 'source' | 'chunk' | 'wiki'
+export type KnowledgeGraphClusterMode = 'related' | 'domain'
+
+export interface KnowledgeGraphSourceGroup {
+  id: string
+  mode: KnowledgeGraphClusterMode
+  label: string
+  sourceIds: string[]
+}
 
 export interface KnowledgeGraphNode {
   id: string
@@ -245,9 +358,17 @@ export interface KnowledgeGraphNode {
   novelty?: number
   /** Origin of the node's strongest evidence for trust overlays. */
   provenance?: 'electron' | 'intellij-plugin' | 'knowledge-base'
+  /** Optional facet for analysis-derived nodes attached to codebase scans. */
+  analysisFacet?: 'domain_model' | 'design_pattern' | 'architecture_pattern'
+  /** Codebase registry id this node relates to when analysis-derived. */
+  codebaseId?: string
+  /** Optional layout metadata for force-directed tuning (renderer only). */
+  layoutMass?: number
+  /** Optional precomputed grouping key for renderer clustering. */
+  layoutGroupId?: string
 }
 
-export type KnowledgeGraphEdgeKind = 'contains' | 'indexes' | 'compiled_from' | 'related'
+export type KnowledgeGraphEdgeKind = 'contains' | 'indexes' | 'compiled_from' | 'related' | 'semantic_related'
 
 export interface KnowledgeGraphEdge {
   from: string
@@ -257,6 +378,8 @@ export interface KnowledgeGraphEdge {
   confidence?: number
   /** Optional recency score (0..1), newer links can pull stronger in some modes. */
   recency?: number
+  /** Optional renderer salience hint (0..1) for edge clutter reduction. */
+  salience?: number
 }
 
 export interface KnowledgeGraphPayload {
@@ -264,6 +387,56 @@ export interface KnowledgeGraphPayload {
   edges: KnowledgeGraphEdge[]
   /** True when some chunks were omitted from the graph for performance. */
   truncated: boolean
+}
+
+export interface OntologyNode {
+  iri: string
+  label: string
+  type: string
+  confidence: number
+}
+
+export interface OntologyEdge {
+  id: string
+  subjectIri: string
+  predicateIri: string
+  objectIri?: string | null
+  objectLiteral?: string | null
+  sourceType: string
+  sourceRef: string
+  confidence: number
+  createdAt: number
+}
+
+export interface OntologySubgraphPayload {
+  nodes: OntologyNode[]
+  edges: OntologyEdge[]
+  truncated: boolean
+}
+
+export interface OntologyStats {
+  entityCount: number
+  tripleCount: number
+  recentTripleCount: number
+  predicateCount: number
+  topPredicates: Array<{ predicate: string; count: number }>
+  lastUpdatedAt?: number
+}
+
+export interface OntologyQueryRequest {
+  query?: string
+  limitEntities?: number
+  limitTriples?: number
+  maxHops?: number
+  typeFilters?: string[]
+  predicateFilters?: string[]
+  recentOnlyMs?: number
+}
+
+export interface OntologyEntityDetails {
+  entity: OntologyNode | null
+  outgoing: OntologyEdge[]
+  incoming: OntologyEdge[]
 }
 
 /** Result of distilling a chat turn into a wiki note (`kb:wikiExtractTurn`). */
@@ -496,3 +669,49 @@ export interface PluginIntegrationReport {
   /** Small structured fields (token counts, file counts, project name, etc.). */
   meta?: Record<string, string | number | boolean | null>
 }
+
+export type CodebaseAnalysisFacet = 'domain_model' | 'design_pattern' | 'architecture_pattern'
+
+export interface CodebaseAnalysisItem {
+  name: string
+  summary: string
+  confidence: number
+  source: 'heuristic' | 'llm'
+  evidencePaths?: string[]
+}
+
+export interface CodebaseAnalysisSnapshot {
+  id: string
+  codebaseId: string
+  rootPath: string
+  createdAt: number
+  gitUrl?: string | null
+  kbSourceId?: string | null
+  wikiSourceIds?: {
+    overview?: string
+    domainModel?: string
+    designPatterns?: string
+    architecturePatterns?: string
+  }
+  summaryMarkdown: string
+  domainModel: CodebaseAnalysisItem[]
+  designPatterns: CodebaseAnalysisItem[]
+  architecturePatterns: CodebaseAnalysisItem[]
+}
+
+export interface CodebaseAnalysisSummary {
+  codebaseId: string
+  rootPath: string
+  createdAt: number
+  domainModelCount: number
+  designPatternCount: number
+  architecturePatternCount: number
+}
+
+export type CodebaseWikiAnalysisProgress =
+  | { phase: 'start'; message: string }
+  | { phase: 'scan'; message: string; filesScanned: number }
+  | { phase: 'llm'; message: string }
+  | { phase: 'persist'; message: string }
+  | { phase: 'done'; message: string; snapshot: CodebaseAnalysisSnapshot }
+  | { phase: 'error'; message: string }

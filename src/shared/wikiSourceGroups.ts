@@ -1,11 +1,12 @@
 import type { WikiSourceKind, WikiTopic } from './types'
 
-export const WIKI_KIND_ORDER: WikiSourceKind[] = ['document', 'extracted_note', 'saved_chat', 'other']
+export const WIKI_KIND_ORDER: WikiSourceKind[] = ['document', 'extracted_note', 'saved_chat', 'codebase_analysis', 'other']
 
 export const WIKI_KIND_LABELS: Record<WikiSourceKind, string> = {
   document: 'Documents',
   extracted_note: 'Chat notes',
   saved_chat: 'Saved chats',
+  codebase_analysis: 'Codebase analyses',
   other: 'Other'
 }
 
@@ -13,9 +14,11 @@ export const WIKI_KIND_LABELS: Record<WikiSourceKind, string> = {
 export function wikiKindFromUri(uri: string): WikiSourceKind {
   const u = uri.toLowerCase()
   if (u.startsWith('file:')) return 'document'
+  if (u.startsWith('dms:')) return 'document'
   if (u.startsWith('wiki-extract:')) return 'extracted_note'
   if (u.startsWith('deep-learn:')) return 'extracted_note'
   if (u.startsWith('chat:')) return 'saved_chat'
+  if (u.startsWith('codebase-analysis:')) return 'codebase_analysis'
   return 'other'
 }
 
@@ -34,6 +37,7 @@ export function wikiKindCounts(topics: WikiTopic[]): Record<WikiSourceKind, numb
     document: 0,
     extracted_note: 0,
     saved_chat: 0,
+    codebase_analysis: 0,
     other: 0
   }
   for (const t of topics) {

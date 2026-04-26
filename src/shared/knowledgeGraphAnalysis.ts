@@ -3,6 +3,7 @@ import type {
   KnowledgeGraphNode,
   KnowledgeGraphPayload
 } from './types'
+import type { KnowledgeGraphClusterMode, KnowledgeGraphSourceGroup } from './types'
 
 export interface KnowledgeGraphCluster {
   /** Stable id (cluster index) */
@@ -81,6 +82,68 @@ class UnionFind {
   }
 }
 
+function normalizeGroupLabel(label: string): string {
+  const trimmed = label.trim()
+  return trimmed.length > 0 ? trimmed : 'Unscoped'
+}
+
+export function buildKnowledgeGraphSourceGroups(
+  data: KnowledgeGraphPayload,
+  mode: KnowledgeGraphClusterMode
+): KnowledgeGraphSourceGroup[] {
+  const sourceNodes = data.nodes.filter((n) => n.kind === 'source')
+  if (!sourceNodes.length) return []
+  const sourceIds = new Set(sourceNodes.map((n) => n.id))
+  const groups: KnowledgeGraphSourceGroup[] = []
+
+  if (mode === 'domain') {
+    const byDomain = new Map<string, KnowledgeGraphSourceGroup>()
+    for (const node of sourceNodes) {
+      const rawDomain = node.domainId?.trim() || 'domain:unscoped'
+      const domainGroup = byDomain.get(rawDomain) ?? {
+        id: rawDomain,
+        mode: 'domain',
+        label: normalizeGroupLabel(node.domainId ?? ''),
+        sourceIds: []
+      }
+      domainGroup.sourceIds.push(node.id)
+      byDomain.set(rawDomain, domainGroup)
+    }
+    for (const g of byDomain.values()) {
+      g.sourceIds.sort()
+      groups.push(g)
+    }
+  } else {
+    const uf = new UnionFind()
+    for (const source of sourceNodes) uf.find(source.id)
+    for (const edge of data.edges) {
+      if (edge.kind !== 'related') continue
+      if (!sourceIds.has(edge.from) || !sourceIds.has(edge.to)) continue
+      uf.union(edge.from, edge.to)
+    }
+    const clusterMap = new Map<string, string[]>()
+    for (const source of sourceNodes) {
+      const root = uf.find(source.id)
+      const arr = clusterMap.get(root) ?? []
+      arr.push(source.id)
+      clusterMap.set(root, arr)
+    }
+    let idx = 0
+    for (const ids of clusterMap.values()) {
+      ids.sort()
+      groups.push({
+        id: `related:${idx++}`,
+        mode: 'related',
+        label: ids.length > 1 ? `Related ${idx}` : 'Singleton',
+        sourceIds: ids
+      })
+    }
+  }
+
+  groups.sort((a, b) => b.sourceIds.length - a.sourceIds.length || a.id.localeCompare(b.id))
+  return groups
+}
+
 function nodeMap(data: KnowledgeGraphPayload): Map<string, KnowledgeGraphNode> {
   const m = new Map<string, KnowledgeGraphNode>()
   for (const n of data.nodes) m.set(n.id, n)
@@ -133,27 +196,12 @@ export function analyzeKnowledgeGraph(data: KnowledgeGraphPayload): KnowledgeGra
     if (!relatedAdj.has(id)) relatedAdj.set(id, new Set())
   }
 
-  const uf = new UnionFind()
-  for (const e of data.edges) {
-    if (e.kind !== 'related') continue
-    const a = nodes.get(e.from)
-    const b = nodes.get(e.to)
-    if (a?.kind === 'source' && b?.kind === 'source') uf.union(a.id, b.id)
-  }
-
-  const clusterMap = new Map<string, string[]>()
-  for (const id of sourceIds) {
-    const root = uf.find(id)
-    const arr = clusterMap.get(root) ?? []
-    arr.push(id)
-    clusterMap.set(root, arr)
-  }
-
+  const relatedGroups = buildKnowledgeGraphSourceGroups(data, 'related')
   const clusters: KnowledgeGraphCluster[] = []
-  let cidx = 0
-  for (const [, ids] of clusterMap) {
+  for (let cidx = 0; cidx < relatedGroups.length; cidx++) {
+    const ids = relatedGroups[cidx]?.sourceIds ?? []
     if (ids.length === 0) continue
-    const sorted = [...ids].sort()
+    const sorted = [...ids]
     clusters.push({
       id: `c${cidx++}`,
       sourceIds: sorted,
