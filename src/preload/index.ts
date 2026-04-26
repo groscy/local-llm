@@ -2,6 +2,15 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { IPC } from '@shared/ipc'
 import type { KnowledgeGraphAnalysisRunResponse } from '@shared/knowledgeGraphAnalysis'
 import type {
+  CodebaseAnalysisSnapshot,
+  CodebaseWikiAnalysisProgress,
+  DmsConnectResult,
+  DmsConnectStartResponse,
+  DmsConnectionSummary,
+  DmsFolderSummary,
+  DmsImportRootSummary,
+  DmsSyncProgress,
+  DmsSyncRunResult,
   DomainModelVersion,
   DomainProfile,
   DeepLearnRunProgress,
@@ -9,17 +18,24 @@ import type {
   EvidenceCard,
   KbSearchHit,
   PluginIntegrationReport,
+  OntologyEntityDetails,
+  OntologyQueryRequest,
+  OntologyStats,
+  OntologySubgraphPayload,
   RuntimeChatProgress,
   RuntimeLoadProgress,
   SaveIntellijPluginZipResult,
   TrainingManifest,
+  KbIngestFileProgress,
   WikiChatHighlightTerm,
   WikiExportZipResult,
   WikiPagePayload,
+  WikiReanalyzeProgress,
+  WikiReanalyzeResult,
   WikiTopic
 } from '@shared/types'
 import type { IntegrationBridgeSelfTestResult } from '@shared/ideJourney'
-import type { ArchitectureRepositoryScanResponse } from '@shared/architectureRepository'
+import type { ArchitectureRepositoryScanRequest, ArchitectureRepositoryScanResponse } from '@shared/architectureRepository'
 import type { AppUpdateStatusPayload } from '@shared/appUpdate'
 import type {
   CodebaseFormalBundle,
@@ -48,8 +64,8 @@ contextBridge.exposeInMainWorld('api', {
   setConfig: (c: unknown) => invoke(IPC.SET_CONFIG, c),
   pickModelsDirectory: () => invoke<string | null>(IPC.PICK_MODELS_DIRECTORY),
   pickArchitectureRepositoryRoot: () => invoke<string | null>(IPC.ARCHITECTURE_REPO_PICK_ROOT),
-  architectureRepositoryScan: () =>
-    invoke<ArchitectureRepositoryScanResponse>(IPC.ARCHITECTURE_REPO_SCAN),
+  architectureRepositoryScan: (request?: ArchitectureRepositoryScanRequest) =>
+    invoke<ArchitectureRepositoryScanResponse>(IPC.ARCHITECTURE_REPO_SCAN, request),
   clearDownloadCache: () =>
     invoke<{ downloadsRemoved: number; hfCacheRemoved: number; downloadsCancelled: number }>(
       IPC.CLEAR_DOWNLOAD_CACHE
@@ -112,6 +128,8 @@ contextBridge.exposeInMainWorld('api', {
   codebaseFormalPickRoot: () => invoke<string | null>(IPC.CODEBASE_FORMAL_PICK_ROOT),
   codebaseFormalAdd: (p: { rootPath: string; displayName?: string }) =>
     invoke<{ ok: true; record: CodebaseRecord } | { ok: false; error: string }>(IPC.CODEBASE_FORMAL_ADD, p),
+  codebaseFormalAddGit: (p: { gitUrl: string; displayName?: string }) =>
+    invoke<{ ok: true; record: CodebaseRecord } | { ok: false; error: string }>(IPC.CODEBASE_FORMAL_ADD_GIT, p),
   codebaseFormalUpdate: (p: { id: string; displayName?: string; disabled?: boolean }) =>
     invoke<{ ok: true; record: CodebaseRecord } | { ok: false; error: string }>(IPC.CODEBASE_FORMAL_UPDATE, p),
   codebaseFormalRemove: (id: string) =>
@@ -150,6 +168,15 @@ contextBridge.exposeInMainWorld('api', {
   onCodebaseFormalVerificationProgress: (callback: (payload: FormalVerificationProgressPayload) => void) => {
     const channel = IPC.CODEBASE_FORMAL_VERIFICATION_PROGRESS
     const listener = (_e: IpcRendererEvent, payload: FormalVerificationProgressPayload) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
+  codebaseWikiAnalyze: (p: { codebaseId: string }) =>
+    invoke<{ ok: true; snapshot: CodebaseAnalysisSnapshot } | { ok: false; error: string }>(IPC.CODEBASE_WIKI_ANALYZE, p),
+  codebaseWikiAnalysisLatest: () => invoke<CodebaseAnalysisSnapshot[]>(IPC.CODEBASE_WIKI_ANALYSIS_LATEST),
+  onCodebaseWikiAnalysisProgress: (callback: (payload: CodebaseWikiAnalysisProgress) => void) => {
+    const channel = IPC.CODEBASE_WIKI_ANALYSIS_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: CodebaseWikiAnalysisProgress) => callback(payload)
     ipcRenderer.on(channel, listener)
     return () => ipcRenderer.removeListener(channel, listener)
   },
@@ -202,6 +229,12 @@ contextBridge.exposeInMainWorld('api', {
   kbIngestText: (title: string, uri: string, body: string) => invoke(IPC.KB_INGEST_TEXT, title, uri, body),
   kbIngestConversation: (conversationId: string) => invoke(IPC.KB_INGEST_CONVERSATION, conversationId),
   kbIngestFile: () => invoke(IPC.KB_INGEST_FILE),
+  onKbIngestFileProgress: (callback: (payload: KbIngestFileProgress) => void) => {
+    const channel = IPC.KB_INGEST_FILE_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: KbIngestFileProgress) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
   kbSources: () => invoke(IPC.KB_SOURCES),
   kbSearch: (query: string, limit?: number) => invoke(IPC.KB_SEARCH, query, limit),
   kbSearchHits: (query: string, limit?: number) => invoke<KbSearchHit[]>(IPC.KB_SEARCH_HITS, query, limit),
@@ -216,6 +249,20 @@ contextBridge.exposeInMainWorld('api', {
   kbKnowledgeGraph: () => invoke(IPC.KB_KNOWLEDGE_GRAPH),
   kbGraphAnalysisRun: (opts?: { ingestReport?: boolean }) =>
     invoke<KnowledgeGraphAnalysisRunResponse>(IPC.KB_GRAPH_ANALYSIS_RUN, opts ?? {}),
+  ontologyStats: () => invoke<OntologyStats>(IPC.ONTOLOGY_STATS),
+  ontologyQuerySubgraph: (request?: OntologyQueryRequest) =>
+    invoke<OntologySubgraphPayload>(IPC.ONTOLOGY_QUERY_SUBGRAPH, request ?? {}),
+  ontologyEntityDetails: (iri: string, limit?: number) =>
+    invoke<OntologyEntityDetails>(IPC.ONTOLOGY_ENTITY_DETAILS, { iri, limit }),
+  ontologyRebuild: () => invoke<{ ok: true; snapshotId: string }>(IPC.ONTOLOGY_REBUILD),
+  ontologyExport: () => invoke<Record<string, unknown>>(IPC.ONTOLOGY_EXPORT),
+  kbWikiReanalyzeRun: () => invoke<WikiReanalyzeResult>(IPC.KB_WIKI_REANALYZE_RUN),
+  onWikiReanalyzeProgress: (callback: (payload: WikiReanalyzeProgress) => void) => {
+    const channel = IPC.KB_WIKI_REANALYZE_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: WikiReanalyzeProgress) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
   kbWikiExtractTurn: (p: {
     conversationId: string
     conversationTitle?: string
@@ -238,6 +285,50 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on(channel, listener)
     return () => ipcRenderer.removeListener(channel, listener)
   },
+  dmsConnectStart: (p: {
+    provider: 'google-drive' | 'onedrive' | 'sharepoint'
+    clientId: string
+    clientSecret?: string
+    redirectUri: string
+    scopes?: string[]
+    tenantId?: string
+    siteId?: string
+  }) => invoke<DmsConnectStartResponse>(IPC.DMS_CONNECT_START, p),
+  dmsConnectComplete: (p: { state: string; code: string; displayName?: string }) =>
+    invoke<DmsConnectResult>(IPC.DMS_CONNECT_COMPLETE, p),
+  dmsConnectWithToken: (p: {
+    provider: 'google-drive' | 'onedrive' | 'sharepoint'
+    accessToken: string
+    refreshToken?: string
+    expiresAt?: number
+    displayName?: string
+    accountEmail?: string
+    tenantId?: string
+    siteId?: string
+  }) => invoke<DmsConnectResult>(IPC.DMS_CONNECT_WITH_TOKEN, p),
+  dmsConnectionsList: () => invoke<DmsConnectionSummary[]>(IPC.DMS_CONNECTIONS_LIST),
+  dmsFoldersList: (connectionId: string) => invoke<DmsFolderSummary[]>(IPC.DMS_FOLDERS_LIST, connectionId),
+  dmsImportRootsList: (connectionId?: string) =>
+    invoke<DmsImportRootSummary[]>(IPC.DMS_IMPORT_ROOTS_LIST, connectionId ?? null),
+  dmsImportStart: (p: {
+    connectionId: string
+    folderId: string
+    folderName: string
+    folderPath?: string
+  }) => invoke<{ ok: true; root: DmsImportRootSummary } | { ok: false; error: string }>(IPC.DMS_IMPORT_START, p),
+  dmsSyncRun: (p: {
+    rootId: string
+    maxFilesPerRun?: number
+    maxBytesPerFile?: number
+    timeoutMs?: number
+  }) => invoke<DmsSyncRunResult>(IPC.DMS_SYNC_RUN, p),
+  onDmsSyncProgress: (callback: (payload: DmsSyncProgress) => void) => {
+    const channel = IPC.DMS_SYNC_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: DmsSyncProgress) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
+  dmsDisconnect: (connectionId: string) => invoke<{ ok: boolean }>(IPC.DMS_DISCONNECT, connectionId),
   metricsSnapshot: (opts?: { persist?: boolean }) => invoke(IPC.METRICS_SNAPSHOT, opts),
   metricsHistory: (limit?: number) => invoke(IPC.METRICS_HISTORY, limit),
   trainStart: (p: {
