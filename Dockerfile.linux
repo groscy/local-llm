@@ -1,6 +1,10 @@
 # Linux release build (deb, AppImage, zip, pacman for Arch). OCI image — use with Podman (or any container CLI).
 # From Windows/macOS:
 #   npm run dist:linux:podman
+# CPU flavor:
+#   podman build -f Dockerfile.linux --build-arg BUILD_FLAVOR=cpu -t localllm-linux-build-cpu .
+# Raspberry Pi 5 flavor (ARM64):
+#   podman build -f Dockerfile.linux --build-arg BUILD_FLAVOR=rpi5 -t localllm-linux-build-rpi5 .
 # Or manually from repo root:
 #   podman build -f Dockerfile.linux -t localllm-linux-build .
 #   podman create --name localllm-out localllm-linux-build
@@ -11,6 +15,7 @@ FROM node:22-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fakeroot \
     rpm \
+    libarchive-tools \
     openjdk-17-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
 
@@ -23,9 +28,9 @@ COPY . .
 
 ENV CSC_IDENTITY_AUTO_DISCOVERY=false
 ENV ALLOW_LINUX_PACKAGING_OUTSIDE_LINUX=1
+ARG BUILD_FLAVOR=default
+ENV BUILD_FLAVOR=${BUILD_FLAVOR}
 
-RUN npm run typecheck && npm run build \
-  && npm run build:intellij-plugin \
-  && npx electron-builder --publish never --linux deb AppImage zip pacman
+RUN npm run dist:linux
 
 # Artifacts: /app/release/

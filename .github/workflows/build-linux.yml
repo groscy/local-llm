@@ -20,7 +20,7 @@ jobs:
       - name: Install packaging tools (deb / rpm / AppImage helpers)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fakeroot rpm
+          sudo apt-get install -y --no-install-recommends fakeroot rpm libarchive-tools
 
       - name: Setup JDK 17 (IntelliJ Gradle plugin)
         uses: actions/setup-java@v4
@@ -54,4 +54,20 @@ jobs:
             release/*.AppImage
             release/*.zip
             release/*.pkg.tar.*
+          if-no-files-found: error
+
+      - name: Package CPU flavor (electron-builder)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never --config electron-builder.linux-cpu.yml --linux deb AppImage zip pacman
+
+      - name: Upload Linux CPU artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-llm-desktop-linux-cpu-x64
+          path: |
+            release/*-linux-cpu-*.deb
+            release/*-linux-cpu-*.AppImage
+            release/*-linux-cpu-*.zip
+            release/*-linux-cpu-*.pkg.tar.*
           if-no-files-found: error

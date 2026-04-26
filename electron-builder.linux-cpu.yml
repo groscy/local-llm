@@ -1,0 +1,18 @@
+extends: ./electron-builder.yml
+
+# Packaging-only CPU flavor for Linux artifacts.
+# Runtime behavior remains unchanged.
+linux:
+  artifactName: ${productName}-${version}-linux-cpu-${arch}.${ext}
+
+deb:
+  artifactName: ${productName}-${version}-linux-cpu-${arch}.${ext}
+
+rpm:
+  artifactName: ${productName}-${version}-linux-cpu-${arch}.${ext}
+
+appImage:
+  artifactName: ${productName}-${version}-linux-cpu-${arch}.${ext}
+
+pacman:
+  artifactName: ${productName}-${version}-linux-cpu-${arch}.${ext}

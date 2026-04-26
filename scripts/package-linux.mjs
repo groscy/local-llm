@@ -7,6 +7,7 @@
  * On Windows/macOS, use GitHub Actions (`.github/workflows/build-linux.yml`) or Podman:
  *
  *   npm run dist:linux:podman
+ *   npm run dist:linux:rpi5:podman
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
@@ -18,6 +19,24 @@ const isWin = process.platform === 'win32'
 const shell = isWin
 const npm = isWin ? 'npm.cmd' : 'npm'
 const npx = isWin ? 'npx.cmd' : 'npx'
+const argv = process.argv.slice(2)
+
+function resolveLinuxFlavor() {
+  const explicitFlavorArg = argv.find((arg) => arg.startsWith('--flavor='))
+  if (explicitFlavorArg) return explicitFlavorArg.slice('--flavor='.length).trim().toLowerCase()
+  if (argv.includes('--cpu')) return 'cpu'
+  if (argv.includes('--rpi5') || argv.includes('--arm64')) return 'rpi5'
+  return (process.env.BUILD_FLAVOR || 'default').trim().toLowerCase()
+}
+
+function resolveLinuxArchFlag(flavor) {
+  const explicitArchArg = argv.find((arg) => arg.startsWith('--arch='))
+  const envArch = (process.env.LINUX_PACKAGE_ARCH || '').trim().toLowerCase()
+  const argArch = explicitArchArg ? explicitArchArg.slice('--arch='.length).trim().toLowerCase() : ''
+  const arch = argArch || envArch || (flavor === 'rpi5' ? 'arm64' : 'x64')
+  if (arch === 'arm64' || arch === 'aarch64') return '--arm64'
+  return '--x64'
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
@@ -66,6 +85,7 @@ async function main() {
   From Windows or macOS, use Podman (full Linux build inside a container image):
 
     npm run dist:linux:podman
+    npm run dist:linux:rpi5:podman
 
   Other options:
     • CI: .github/workflows/build-linux.yml
@@ -87,8 +107,17 @@ async function main() {
 
   const outDir = await pickOutputDirRelative()
   process.env.CSC_IDENTITY_AUTO_DISCOVERY = 'false'
+  const flavor = resolveLinuxFlavor()
+  const builderConfig =
+    flavor === 'cpu'
+      ? 'electron-builder.linux-cpu.yml'
+      : flavor === 'rpi5'
+        ? 'electron-builder.linux-rpi5.yml'
+        : 'electron-builder.yml'
+  const archFlag = resolveLinuxArchFlag(flavor)
 
-  const targets = (process.env.LINUX_PACKAGE_TARGETS || 'deb AppImage zip pacman')
+  const targetsDefault = flavor === 'rpi5' ? 'deb AppImage zip' : 'deb AppImage zip pacman'
+  const targets = (process.env.LINUX_PACKAGE_TARGETS || targetsDefault)
     .trim()
     .split(/\s+/)
     .filter(Boolean)
@@ -97,7 +126,10 @@ async function main() {
     'electron-builder',
     '--publish',
     'never',
+    '--config',
+    builderConfig,
     `-c.directories.output=${outDir}`,
+    archFlag,
     '--linux',
     ...targets
   ]
@@ -105,6 +137,9 @@ async function main() {
   run('electron-builder (Linux)', npx, ebArgs)
 
   console.log(`\n✓ Linux build finished. Output: ${outDir}/\n`)
+  const flavorLabel = flavor === 'cpu' ? 'cpu' : flavor === 'rpi5' ? 'rpi5' : 'default'
+  console.log(`  Flavor: ${flavorLabel}\n`)
+  console.log(`  Architecture: ${archFlag === '--arm64' ? 'arm64' : 'x64'}\n`)
   console.log('  Typical files:\n')
   console.log('    *.deb          →  sudo apt install ./<file>.deb\n')
   console.log('    *.AppImage     →  chmod +x <file>.AppImage && ./<file>.AppImage\n')

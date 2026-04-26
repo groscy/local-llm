@@ -1,3 +1,28 @@
+# Dependencies and local caches
+node_modules
+.npm
+
+# Build outputs and release artifacts
+out
+release
+release-*
+release-*.zip
+*.AppImage
+*.deb
+*.rpm
+*.pacman
+*.pkg.tar.*
+
+# VCS / editor / agent metadata
+.git
+.github
+.cursor
+.vscode
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
 node_modules
 release
 release-linux

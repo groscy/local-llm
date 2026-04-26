@@ -1,0 +1,12 @@
+extends: ./electron-builder.yml
+
+# Packaging flavor for Raspberry Pi 5 (Linux ARM64).
+# Runtime behavior remains unchanged.
+linux:
+  artifactName: ${productName}-${version}-linux-rpi5-${arch}.${ext}
+
+deb:
+  artifactName: ${productName}-${version}-linux-rpi5-${arch}.${ext}
+
+appImage:
+  artifactName: ${productName}-${version}-linux-rpi5-${arch}.${ext}

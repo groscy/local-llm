@@ -28,7 +28,7 @@ jobs:
       - name: Install packaging tools (deb / rpm / AppImage helpers)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fakeroot rpm
+          sudo apt-get install -y --no-install-recommends fakeroot rpm libarchive-tools
 
       - name: Setup JDK 17 (IntelliJ Gradle plugin)
         uses: actions/setup-java@v4
