@@ -263,6 +263,216 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       ALTER TABLE train_jobs ADD COLUMN regression_risk TEXT;
       ALTER TABLE train_jobs ADD COLUMN manifest_id TEXT;
     `
+  },
+  {
+    version: 13,
+    sql: `
+      CREATE TABLE IF NOT EXISTS codebase_analysis_runs (
+        id TEXT PRIMARY KEY,
+        codebase_id TEXT NOT NULL,
+        root_path TEXT NOT NULL,
+        git_url TEXT,
+        kb_source_id TEXT,
+        summary_markdown TEXT NOT NULL,
+        domain_model_json TEXT NOT NULL,
+        design_patterns_json TEXT NOT NULL,
+        architecture_patterns_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_codebase_analysis_runs_codebase_created
+        ON codebase_analysis_runs(codebase_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_codebase_analysis_runs_kb_source
+        ON codebase_analysis_runs(kb_source_id);
+    `
+  },
+  {
+    version: 14,
+    sql: `
+      CREATE TABLE IF NOT EXISTS codebase_analysis_sources (
+        run_id TEXT NOT NULL,
+        facet TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        PRIMARY KEY (run_id, facet),
+        FOREIGN KEY (run_id) REFERENCES codebase_analysis_runs(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_codebase_analysis_sources_source
+        ON codebase_analysis_sources(source_id);
+    `
+  },
+  {
+    version: 15,
+    sql: `
+      CREATE TABLE IF NOT EXISTS wiki_entries (
+        id TEXT PRIMARY KEY,
+        canonical_keyword TEXT NOT NULL UNIQUE,
+        active_revision_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_wiki_entries_keyword ON wiki_entries(canonical_keyword);
+
+      CREATE TABLE IF NOT EXISTS wiki_entry_revisions (
+        id TEXT PRIMARY KEY,
+        entry_id TEXT NOT NULL,
+        version_no INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        model_id TEXT,
+        prompt_version TEXT,
+        source_ids_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (entry_id) REFERENCES wiki_entries(id) ON DELETE CASCADE
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_entry_revisions_entry_version
+        ON wiki_entry_revisions(entry_id, version_no);
+      CREATE INDEX IF NOT EXISTS idx_wiki_entry_revisions_entry_created
+        ON wiki_entry_revisions(entry_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS wiki_entry_sources (
+        entry_id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        PRIMARY KEY (entry_id, source_id),
+        UNIQUE (source_id),
+        FOREIGN KEY (entry_id) REFERENCES wiki_entries(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_id) REFERENCES kb_sources(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_wiki_entry_sources_source ON wiki_entry_sources(source_id);
+
+      CREATE TABLE IF NOT EXISTS wiki_keyword_relations (
+        id TEXT PRIMARY KEY,
+        from_entry_id TEXT NOT NULL,
+        to_entry_id TEXT,
+        to_keyword TEXT NOT NULL,
+        relation_type TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        source_revision_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (from_entry_id) REFERENCES wiki_entries(id) ON DELETE CASCADE,
+        FOREIGN KEY (to_entry_id) REFERENCES wiki_entries(id) ON DELETE SET NULL,
+        FOREIGN KEY (source_revision_id) REFERENCES wiki_entry_revisions(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_wiki_keyword_rel_from ON wiki_keyword_relations(from_entry_id);
+      CREATE INDEX IF NOT EXISTS idx_wiki_keyword_rel_to_entry ON wiki_keyword_relations(to_entry_id);
+      CREATE INDEX IF NOT EXISTS idx_wiki_keyword_rel_to_keyword ON wiki_keyword_relations(to_keyword);
+    `
+  },
+  {
+    version: 16,
+    sql: `
+      CREATE TABLE IF NOT EXISTS dms_connections (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        account_email TEXT,
+        tenant_id TEXT,
+        site_id TEXT,
+        token_ref TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'connected',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_synced_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_dms_connections_updated
+        ON dms_connections(updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS dms_import_roots (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        external_folder_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        external_path TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_synced_at INTEGER,
+        FOREIGN KEY (connection_id) REFERENCES dms_connections(id) ON DELETE CASCADE
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_dms_import_roots_conn_folder
+        ON dms_import_roots(connection_id, external_folder_id);
+      CREATE INDEX IF NOT EXISTS idx_dms_import_roots_updated
+        ON dms_import_roots(updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS dms_import_items (
+        id TEXT PRIMARY KEY,
+        root_id TEXT NOT NULL,
+        external_file_id TEXT NOT NULL,
+        external_path TEXT NOT NULL,
+        etag TEXT,
+        mime_type TEXT,
+        kb_source_id TEXT,
+        last_seen_at INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (root_id) REFERENCES dms_import_roots(id) ON DELETE CASCADE
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_dms_import_items_root_file
+        ON dms_import_items(root_id, external_file_id);
+      CREATE INDEX IF NOT EXISTS idx_dms_import_items_state
+        ON dms_import_items(root_id, state);
+
+      CREATE TABLE IF NOT EXISTS dms_sync_runs (
+        id TEXT PRIMARY KEY,
+        root_id TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        status TEXT NOT NULL,
+        imported_count INTEGER NOT NULL DEFAULT 0,
+        updated_count INTEGER NOT NULL DEFAULT 0,
+        skipped_count INTEGER NOT NULL DEFAULT 0,
+        removed_count INTEGER NOT NULL DEFAULT 0,
+        error_text TEXT,
+        artifacts_json TEXT,
+        FOREIGN KEY (root_id) REFERENCES dms_import_roots(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_dms_sync_runs_root_started
+        ON dms_sync_runs(root_id, started_at DESC);
+    `
+  },
+  {
+    version: 17,
+    sql: `
+      CREATE TABLE IF NOT EXISTS ontology_entities (
+        id TEXT PRIMARY KEY,
+        iri TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL,
+        type TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ontology_entities_type ON ontology_entities(type);
+      CREATE INDEX IF NOT EXISTS idx_ontology_entities_label ON ontology_entities(label);
+
+      CREATE TABLE IF NOT EXISTS ontology_triples (
+        id TEXT PRIMARY KEY,
+        subject_iri TEXT NOT NULL,
+        predicate_iri TEXT NOT NULL,
+        object_iri TEXT,
+        object_literal TEXT,
+        source_type TEXT NOT NULL,
+        source_ref TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ontology_triples_subject ON ontology_triples(subject_iri);
+      CREATE INDEX IF NOT EXISTS idx_ontology_triples_predicate ON ontology_triples(predicate_iri);
+      CREATE INDEX IF NOT EXISTS idx_ontology_triples_object ON ontology_triples(object_iri);
+      CREATE INDEX IF NOT EXISTS idx_ontology_triples_source_ref ON ontology_triples(source_ref);
+      CREATE INDEX IF NOT EXISTS idx_ontology_triples_created ON ontology_triples(created_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_ontology_triples_unique_fact
+        ON ontology_triples(subject_iri, predicate_iri, COALESCE(object_iri, ''), COALESCE(object_literal, ''), source_ref);
+
+      CREATE TABLE IF NOT EXISTS ontology_namespaces (
+        prefix TEXT PRIMARY KEY,
+        base_iri TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS ontology_snapshots (
+        id TEXT PRIMARY KEY,
+        summary_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ontology_snapshots_created ON ontology_snapshots(created_at DESC);
+    `
   }
 ]
 
