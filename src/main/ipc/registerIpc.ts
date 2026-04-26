@@ -70,7 +70,12 @@ import type Store from 'electron-store'
 import { z } from 'zod'
 import type Database from 'better-sqlite3'
 import { isValidStoredColorScheme } from '@shared/colorScheme'
-import type { RuntimeLoadProgress } from '@shared/types'
+import type {
+  CodebaseWikiAnalysisProgress,
+  KbIngestFileProgress,
+  RuntimeLoadProgress,
+  WikiReanalyzeProgress
+} from '@shared/types'
 import { is } from '@electron-toolkit/utils'
 import { IPC } from '@shared/ipc'
 import {
@@ -132,6 +137,7 @@ import {
   resolveDeepLearnRoundChoice,
   runDeepLearnResearch
 } from '../services/deepLearnResearchService'
+import { runWikiReanalysisBatch } from '../services/wikiReanalysisService'
 import { assertUrlAllowedForDeepLearnFetch } from '../services/deepLearnFetch'
 import * as metricsService from '../services/metricsService'
 import * as trainOrchestrator from '../services/trainOrchestrator'
@@ -141,6 +147,8 @@ import { collectHardwareSummary } from '../services/hardwareSummary'
 import { clearAllAppCaches, deleteAllChildrenInDirectory } from '../services/dataMaintenance'
 import { migrateChatProfileSettings, migrateRoleSetupIfNeeded, resetElectronStoreToFactory } from '../storeDefaults'
 import { configureIntegrationServer } from '../services/integrationServer'
+import { buildOntologyContext } from '../services/ontologyContextBuilder'
+import { createOntologyService } from '../services/ontologyService'
 import { getPluginReportHistory } from '../services/pluginIntegrationHub'
 import { listGgufModelsInDir } from '../services/localModelsScan'
 import { hfDownloadAbsolutePath } from '../services/hfDownloadNaming'
@@ -175,10 +183,16 @@ import {
   updateFormalRun
 } from '../services/codebaseFormalStore'
 import {
+  addCodebaseFromGitUrl,
+  listLatestCodebaseAnalysisSnapshots,
+  runCodebaseWikiAnalysis
+} from '../services/codebaseWikiPipeline'
+import {
   attachFormalRunLlmAdvisory,
   shouldAutoInterpretFormalRun,
   shouldIncludeKbContext
 } from '../services/formalVerificationInterpret'
+import { registerDmsIpc } from './registerDmsIpc'
 import {
   expandCommandTemplate,
   finalizeRunRow,
@@ -243,6 +257,9 @@ const configSchema = z.object({
   chatHistoryMaxMessages: z.number().int().min(2).max(500).optional(),
   chatDomainEnhancement: z.boolean().optional(),
   llamaRagGrounding: z.boolean().optional(),
+  ontologyEnabled: z.boolean().optional(),
+  ontologyMaxTriples: z.number().int().min(5).max(200).optional(),
+  ontologyContextTokens: z.number().int().min(64).max(3000).optional(),
   llamaTemperature: z.number().min(0).max(2).optional(),
   llamaTopP: z.number().min(0).max(1).optional(),
   llamaFrequencyPenalty: z.number().min(-2).max(2).optional(),
@@ -267,7 +284,8 @@ const configSchema = z.object({
   deepLearnMaxFetchBytes: z.number().int().min(4096).max(8_000_000).optional(),
   /** Bump when onboarding copy changes; user sees welcome until version matches latest in app. */
   welcomeGuideVersion: z.number().int().min(0).max(99).optional(),
-  uiRole: z.enum(['software_developer', 'software_architect', 'business_analyst', 'tester']).optional(),
+  uiRole: z.enum(['software_developer', 'software_architect', 'business_analyst', 'tester', 'builder_admin']).optional(),
+  workspaceDensity: z.enum(['focused', 'standard', 'expanded']).optional(),
   /** First-run role tour; see `@shared/uiRole` SETUP_TOUR_LATEST. */
   setupTourVersion: z.number().int().min(0).max(99).optional(),
   /** Chat: planner spawns parallel Ollama workers (Ollama runtime only). */
@@ -276,6 +294,31 @@ const configSchema = z.object({
   agentRemoteOllamaUrl: z.union([z.string().max(2048), z.literal('')]).optional(),
   /** Workspace folder for Architecture Repository bounded scan (Software architect UI). Clear with null or empty. */
   architectureRepositoryScanRoot: z.union([z.string().min(1).max(8192), z.literal(''), z.null()]).optional(),
+  /** Persisted generated chapter drafts + version history for TOGAF repository view. */
+  architectureRepositoryGeneratedChaptersSchemaVersion: z.number().int().min(1).max(20).optional(),
+  architectureRepositoryGeneratedChapters: z
+    .record(
+      z
+        .object({
+          activeVersion: z.number().int().min(1).max(10_000),
+          versions: z
+            .array(
+              z.object({
+                version: z.number().int().min(1).max(10_000),
+                createdAt: z.number().int().min(0),
+                markdown: z.string().max(250_000),
+                format: z.enum(['markdown', 'asciidoc']).optional(),
+                modelPath: z.string().max(8192).optional(),
+                artifactId: z.string().max(128).optional(),
+                subjectKey: z.string().max(8192).optional()
+              })
+            )
+            .min(1)
+            .max(40)
+        })
+        .strict()
+    )
+    .optional(),
   formalVerificationInterpretWithLlm: z.boolean().optional(),
   formalVerificationInterpretIncludeKb: z.boolean().optional()
 })
@@ -309,6 +352,7 @@ function ollamaTagConflictsWithLoaded(loaded: string, toDelete: string): boolean
 
 export function registerIpc(ctx: IpcContext): void {
   const { db, store, userData, getHfToken, setHfToken, getRuntime, setRuntime } = ctx
+  registerDmsIpc({ db, store })
   migrateChatProfileSettings(store)
   migrateRoleSetupIfNeeded(store)
 
@@ -347,6 +391,7 @@ export function registerIpc(ctx: IpcContext): void {
       logLine('warn', 'learning_event_append_failed', { error: e instanceof Error ? e.message : String(e) })
     }
   }
+  const ontology = createOntologyService(db)
 
   ipcMain.handle(IPC.GET_PATHS, () => ({
     userData,
@@ -413,9 +458,13 @@ export function registerIpc(ctx: IpcContext): void {
     )
     const configPatch = { ...parsed.data }
     if (configPatch.ideJourneyChecklist !== undefined) {
+      const checklistPatch =
+        configPatch.ideJourneyChecklist && typeof configPatch.ideJourneyChecklist === 'object'
+          ? configPatch.ideJourneyChecklist
+          : {}
       store.set(
         'ideJourneyChecklist',
-        mergeIdeJourneyChecklist(store.get('ideJourneyChecklist'), configPatch.ideJourneyChecklist)
+        mergeIdeJourneyChecklist(store.get('ideJourneyChecklist'), checklistPatch)
       )
       delete configPatch.ideJourneyChecklist
     }
@@ -442,7 +491,8 @@ export function registerIpc(ctx: IpcContext): void {
       configureIntegrationServer({
         store,
         getRuntime,
-        getDb: () => db
+        getDb: () => db,
+        getOntology: () => ontology
       })
     }
     return { ok: true }
@@ -466,9 +516,20 @@ export function registerIpc(ctx: IpcContext): void {
     return r.filePaths[0]
   })
 
-  ipcMain.handle(IPC.ARCHITECTURE_REPO_SCAN, () => {
+  const architectureRepoScanSchema = z
+    .object({
+      rootPath: z.string().min(1).max(8192).optional()
+    })
+    .optional()
+
+  ipcMain.handle(IPC.ARCHITECTURE_REPO_SCAN, (_event, payload: unknown) => {
+    const parsed = architectureRepoScanSchema.safeParse(payload)
+    if (!parsed.success) {
+      return { ok: false, error: 'Invalid payload' } as const
+    }
+    const rootOverride = parsed.data?.rootPath?.trim()
     const raw = store.get('architectureRepositoryScanRoot')
-    const root = typeof raw === 'string' ? raw.trim() : ''
+    const root = rootOverride?.length ? rootOverride : typeof raw === 'string' ? raw.trim() : ''
     if (!root) {
       return {
         ok: false,
@@ -497,6 +558,14 @@ export function registerIpc(ctx: IpcContext): void {
     }
   }
 
+  function sendCodebaseWikiAnalysisProgress(payload: CodebaseWikiAnalysisProgress): void {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) {
+        w.webContents.send(IPC.CODEBASE_WIKI_ANALYSIS_PROGRESS, payload)
+      }
+    }
+  }
+
   ipcMain.handle(IPC.CODEBASE_FORMAL_GET, () => readCodebaseFormalBundle(store))
 
   ipcMain.handle(IPC.CODEBASE_FORMAL_PICK_ROOT, async (event) => {
@@ -520,6 +589,64 @@ export function registerIpc(ctx: IpcContext): void {
     if (!rec) return { ok: false as const, error: 'Path is not an existing directory.' }
     return { ok: true as const, record: rec }
   })
+
+  const formalAddGitCodebaseSchema = z.object({
+    gitUrl: z.string().min(4).max(2048),
+    displayName: z.string().max(400).optional()
+  })
+
+  ipcMain.handle(IPC.CODEBASE_FORMAL_ADD_GIT, (_e, raw: unknown) => {
+    const parsed = formalAddGitCodebaseSchema.safeParse(raw)
+    if (!parsed.success) return { ok: false as const, error: 'Invalid payload' }
+    const r = addCodebaseFromGitUrl({
+      store,
+      userData,
+      gitUrl: parsed.data.gitUrl,
+      displayName: parsed.data.displayName
+    })
+    if (!r.ok) return { ok: false as const, error: r.error }
+    const bundle = readCodebaseFormalBundle(store)
+    const rec = bundle.codebases.find((c) => c.id === r.recordId)
+    if (!rec) return { ok: false as const, error: 'Codebase registered but could not reload record.' }
+    return { ok: true as const, record: rec }
+  })
+
+  const codebaseWikiAnalyzeSchema = z.object({
+    codebaseId: z.string().uuid()
+  })
+
+  ipcMain.handle(IPC.CODEBASE_WIKI_ANALYZE, async (_e, raw: unknown) => {
+    const parsed = codebaseWikiAnalyzeSchema.safeParse(raw)
+    if (!parsed.success) return { ok: false as const, error: 'Invalid payload' }
+    try {
+      const snapshot = await runCodebaseWikiAnalysis({
+        db,
+        store,
+        getRuntime,
+        codebaseId: parsed.data.codebaseId,
+        onProgress: sendCodebaseWikiAnalysisProgress
+      })
+      safeRecordLearningEvent({
+        source: 'electron',
+        actor: 'assistant',
+        interactionType: 'tool_outcome',
+        payloadRef: `codebase-analysis:${snapshot.codebaseId}:${snapshot.id}`,
+        summary: `Codebase wiki enrichment for ${snapshot.rootPath}`,
+        details: {
+          domainModelCount: snapshot.domainModel.length,
+          designPatternCount: snapshot.designPatterns.length,
+          architecturePatternCount: snapshot.architecturePatterns.length
+        }
+      })
+      return { ok: true as const, snapshot }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      sendCodebaseWikiAnalysisProgress({ phase: 'error', message: msg })
+      return { ok: false as const, error: msg }
+    }
+  })
+
+  ipcMain.handle(IPC.CODEBASE_WIKI_ANALYSIS_LATEST, () => listLatestCodebaseAnalysisSnapshots(db))
 
   const formalUpdateCodebaseSchema = z.object({
     id: z.string().uuid(),
@@ -1194,6 +1321,46 @@ export function registerIpc(ctx: IpcContext): void {
         ollamaBaseUrl = u
       }
       const requestId = typeof payload.requestId === 'string' ? payload.requestId : ''
+      const ontologyEnabled = store.get('ontologyEnabled') !== false
+      const ontologyMaxTriples =
+        typeof store.get('ontologyMaxTriples') === 'number' ? Number(store.get('ontologyMaxTriples')) : undefined
+      const ontologyContextTokens =
+        typeof store.get('ontologyContextTokens') === 'number' ? Number(store.get('ontologyContextTokens')) : undefined
+      const runtimeMessages =
+        ontologyEnabled
+          ? (() => {
+              const built = buildOntologyContext(ontology, {
+                messages: payload.messages,
+                maxTriples: ontologyMaxTriples,
+                maxTokens: ontologyContextTokens
+              })
+              if (!built.context) return payload.messages
+              const next = [...payload.messages]
+              const firstSystemIdx = next.findIndex((m) => m.role === 'system')
+              if (firstSystemIdx >= 0) {
+                const row = next[firstSystemIdx]
+                if (row) row.content = `${row.content}\n\n${built.context}`
+                return next
+              }
+              return [{ role: 'system' as const, content: built.context }, ...next]
+            })()
+          : payload.messages
+      const lastUser = [...payload.messages]
+        .reverse()
+        .find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.trim().length > 0)
+      if (lastUser) {
+        try {
+          ontology.ingestText({
+            text: lastUser.content,
+            sourceType: 'runtime_chat_user',
+            sourceRef: `runtime-chat:${requestId || Date.now()}:user`,
+            confidence: 0.72,
+            entityType: 'user_input'
+          })
+        } catch {
+          /* ontology is best-effort */
+        }
+      }
       const emit = (
         data:
           | { kind: 'started' }
@@ -1219,7 +1386,7 @@ export function registerIpc(ctx: IpcContext): void {
                 }
               })()
             : {}
-        const reply = await rt.chat(payload.messages, {
+        const reply = await rt.chat(runtimeMessages, {
           maxTokens: chatMaxTokens,
           ...(ollamaModel ? { ollamaModel } : {}),
           ...(ollamaBaseUrl ? { ollamaBaseUrl } : {}),
@@ -1237,6 +1404,17 @@ export function registerIpc(ctx: IpcContext): void {
             : {})
         })
         recordChatRoundtripMs(Date.now() - chatStarted)
+        try {
+          ontology.ingestText({
+            text: reply,
+            sourceType: 'runtime_chat_assistant',
+            sourceRef: `runtime-chat:${requestId || Date.now()}:assistant`,
+            confidence: 0.62,
+            entityType: 'assistant_output'
+          })
+        } catch {
+          /* ontology is best-effort */
+        }
         return reply
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -1278,6 +1456,17 @@ export function registerIpc(ctx: IpcContext): void {
     ) => {
       const row = chatService.appendMessage(db, cid, role, content, modelId, usage)
       if (role === 'user') {
+        try {
+          ontology.ingestText({
+            text: content,
+            sourceType: 'message_append_user',
+            sourceRef: `chat:${cid}:${row.id}`,
+            confidence: 0.65,
+            entityType: 'user_input'
+          })
+        } catch {
+          /* ontology is best-effort */
+        }
         safeRecordLearningEvent({
           source: 'electron',
           actor: 'user',
@@ -1301,6 +1490,17 @@ export function registerIpc(ctx: IpcContext): void {
         }
       }
       if (role === 'assistant') {
+        try {
+          ontology.ingestText({
+            text: content,
+            sourceType: 'message_append_assistant',
+            sourceRef: `chat:${cid}:${row.id}`,
+            confidence: 0.6,
+            entityType: 'assistant_output'
+          })
+        } catch {
+          /* ontology is best-effort */
+        }
         safeRecordLearningEvent({
           source: 'electron',
           actor: 'assistant',
@@ -1356,6 +1556,39 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle(IPC.PROMPT_DOMAINS_LIST, () => listPromptDomains(db))
 
+  ipcMain.handle(IPC.ONTOLOGY_STATS, () => ontology.getStats())
+
+  ipcMain.handle(IPC.ONTOLOGY_QUERY_SUBGRAPH, (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        query: z.string().max(2000).optional(),
+        limitEntities: z.number().int().min(5).max(300).optional(),
+        limitTriples: z.number().int().min(10).max(900).optional(),
+        maxHops: z.number().int().min(1).max(3).optional(),
+        typeFilters: z.array(z.string().max(120)).max(40).optional(),
+        predicateFilters: z.array(z.string().max(120)).max(40).optional(),
+        recentOnlyMs: z.number().int().min(1).max(31 * 24 * 60 * 60 * 1000).optional()
+      })
+      .optional()
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid ontology query payload')
+    return ontology.querySubgraph(parsed.data)
+  })
+
+  ipcMain.handle(IPC.ONTOLOGY_ENTITY_DETAILS, (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        iri: z.string().min(3).max(512),
+        limit: z.number().int().min(1).max(300).optional()
+      })
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid ontology entity details payload')
+    return ontology.entityDetails(parsed.data.iri, parsed.data.limit)
+  })
+
+  ipcMain.handle(IPC.ONTOLOGY_REBUILD, () => ontology.rebuildSnapshot())
+  ipcMain.handle(IPC.ONTOLOGY_EXPORT, () => ontology.exportJsonLd())
+
   ipcMain.handle(
     IPC.CONVERSATION_DELETE,
     (_e, payload: { id: string; removeLinkedKnowledge: boolean }) => {
@@ -1377,7 +1610,10 @@ export function registerIpc(ctx: IpcContext): void {
     return kbService.ingestConversationThread(db, conversationId)
   })
 
-  ipcMain.handle(IPC.KB_INGEST_FILE, async () => {
+  ipcMain.handle(IPC.KB_INGEST_FILE, async (event) => {
+    const emit = (payload: KbIngestFileProgress): void => {
+      event.sender.send(IPC.KB_INGEST_FILE_PROGRESS, payload)
+    }
     const r = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [
@@ -1386,8 +1622,18 @@ export function registerIpc(ctx: IpcContext): void {
         { name: 'Text / Markdown', extensions: ['txt', 'md', 'html', 'htm'] }
       ]
     })
-    if (r.canceled || !r.filePaths[0]) return null
-    return kbService.ingestFile(db, r.filePaths[0])
+    if (r.canceled || !r.filePaths[0]) {
+      emit({ kind: 'cancelled' })
+      return null
+    }
+    const fp = r.filePaths[0]
+    emit({ kind: 'selected', filePath: fp })
+    try {
+      return await kbService.ingestFile(db, fp, undefined, (p) => emit(p))
+    } catch (e) {
+      emit({ kind: 'error', message: e instanceof Error ? e.message : String(e) })
+      throw e
+    }
   })
 
   ipcMain.handle(IPC.KB_SOURCES, () => kbService.listSources(db))
@@ -1448,6 +1694,45 @@ export function registerIpc(ctx: IpcContext): void {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return { ok: false as const, error: msg }
+    }
+  })
+
+  ipcMain.handle(IPC.KB_WIKI_REANALYZE_RUN, async (event) => {
+    const rt = getRuntime()
+    if (!rt?.getStatus().running) {
+      return {
+        ok: false as const,
+        error: 'Runtime is not running. Start a model before reanalyzing the wiki.',
+        processedSources: 0,
+        processedEntries: 0,
+        mergedEntries: 0,
+        skippedSources: 0,
+        modelId: 'none',
+        promptVersion: 'n/a'
+      }
+    }
+    try {
+      const sender = event.sender
+      const result = await runWikiReanalysisBatch({
+        db,
+        runtime: rt,
+        onProgress: (payload: WikiReanalyzeProgress) => {
+          sender.send(IPC.KB_WIKI_REANALYZE_PROGRESS, payload)
+        }
+      })
+      return result
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      return {
+        ok: false as const,
+        error: message,
+        processedSources: 0,
+        processedEntries: 0,
+        mergedEntries: 0,
+        skippedSources: 0,
+        modelId: rt.getStatus().modelPath?.trim() || rt.kind,
+        promptVersion: '2026-04-20.v1'
+      }
     }
   })
 
@@ -1934,6 +2219,7 @@ export function registerIpc(ctx: IpcContext): void {
   configureIntegrationServer({
     store,
     getRuntime,
-    getDb: () => db
+    getDb: () => db,
+    getOntology: () => ontology
   })
 }
