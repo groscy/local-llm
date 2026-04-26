@@ -13,6 +13,8 @@ import type { RuntimeStatus } from '@shared/types'
 /** llama-server often does not bind until weights are loaded; large GGUF / first load can exceed 10+ minutes. */
 const LLAMA_READY_TIMEOUT_MS = 3_600_000
 const LLAMA_READY_POLL_MS = 900
+const GPU_INIT_FAILURE_RE =
+  /vk_error_incompatible_driver|ggml_vulkan|vulkan.*(error|failed)|failed to initialize vulkan|cuda.*(error|failed)/i
 
 /** Buffer OpenAI-style SSE (`data: {...}\\n\\n`) and extract `delta.content` chunks. */
 class SseChatBuffer {
@@ -114,6 +116,12 @@ export class LlamaCppAdapter implements RuntimeAdapter {
   /** Turn progress lines that use `\r` into newlines so chunks are visible in the UI. */
   private normalizeServerChunk(s: string): string {
     return this.stripAnsi(s.replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
+  }
+
+  private shouldRetryCpuSafe(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err)
+    const hay = `${msg}\n${this.serverLogTail}`.toLowerCase()
+    return GPU_INIT_FAILURE_RE.test(hay)
   }
 
   private flushStderrUiBatch(report?: (e: RuntimeLoadProgress) => void, force = false): void {
@@ -336,7 +344,7 @@ export class LlamaCppAdapter implements RuntimeAdapter {
       typeof opts.contextTokens === 'number' && Number.isFinite(opts.contextTokens)
         ? clampLlamaContextTokens(opts.contextTokens)
         : LLAMA_CONTEXT_TOKENS_DEFAULT
-    const args = [
+    const baseArgs = [
       '--verbose',
       '-m',
       modelResolved,
@@ -348,80 +356,111 @@ export class LlamaCppAdapter implements RuntimeAdapter {
       String(ctx),
       ...(nPredict != null ? (['-n', String(nPredict)] as const) : [])
     ]
-    const spawnOpts: SpawnOptions = {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      cwd: binDir,
-      env: { ...process.env },
-      /**
-       * Must stay `false` on Windows: `windowsHide: true` applies CREATE_NO_WINDOW, which often
-       * breaks piped stdout/stderr and DLL loading for CUDA llama-server builds next to the exe.
-       */
-      windowsHide: false
-    }
-    const child = spawn(binResolved, args, spawnOpts)
-    this.proc = child
-    const argDisplay = args.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')
-    report?.({
-      phase: 'load_log',
-      message:
-        `Launching llama-server\n` +
-        `  exe: ${binResolved}\n` +
-        `  cwd: ${binDir}\n` +
-        `  pid (initial): ${String(child.pid ?? 'not yet assigned')}\n` +
-        `  ${path.basename(binResolved)} ${argDisplay}\n` +
-        `  API → http://127.0.0.1:${this.port}\n\n`
-    })
-    const onChunk = (stream: 'stdout' | 'stderr', d: Buffer | string): void => {
-      const s = typeof d === 'string' ? d : d.toString('utf8')
-      this.appendServerLog(s)
-      const cleaned = this.normalizeServerChunk(s)
-      if (cleaned.trim()) this.queueStderrForUi(cleaned, report)
-      logLine('info', stream === 'stderr' ? 'llama_stderr' : 'llama_stdout', { chunk: s.slice(0, 200) })
-    }
-    child.stdout?.on('data', (d) => onChunk('stdout', d))
-    child.stderr?.on('data', (d) => onChunk('stderr', d))
-    child.on('spawn', () => {
+    const launchAttempt = async (cpuSafe: boolean): Promise<void> => {
+      this.serverLogTail = ''
+      this.lastExitCode = null
+      const args = cpuSafe ? [...baseArgs, '-ngl', '0'] : [...baseArgs]
+      const env = cpuSafe
+        ? {
+            ...process.env,
+            GGML_VK_DISABLE: '1',
+            CUDA_VISIBLE_DEVICES: '',
+            HIP_VISIBLE_DEVICES: '',
+            ROCR_VISIBLE_DEVICES: ''
+          }
+        : { ...process.env }
+      const spawnOpts: SpawnOptions = {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: binDir,
+        env,
+        /**
+         * Must stay `false` on Windows: `windowsHide: true` applies CREATE_NO_WINDOW, which often
+         * breaks piped stdout/stderr and DLL loading for CUDA llama-server builds next to the exe.
+         */
+        windowsHide: false
+      }
+      const child = spawn(binResolved, args, spawnOpts)
+      this.proc = child
+      const argDisplay = args.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')
       report?.({
         phase: 'load_log',
-        message: `Spawn event · pid=${String(child.pid ?? '?')} (stdio pipes attached)\n\n`
+        message:
+          `Launching llama-server${cpuSafe ? ' (CPU-safe fallback)' : ''}\n` +
+          `  exe: ${binResolved}\n` +
+          `  cwd: ${binDir}\n` +
+          `  pid (initial): ${String(child.pid ?? 'not yet assigned')}\n` +
+          `  ${path.basename(binResolved)} ${argDisplay}\n` +
+          `  API → http://127.0.0.1:${this.port}\n\n`
       })
-    })
-    child.on('error', (e) => {
-      this.lastError = e.message
-      logLine('error', 'llama_spawn_error', { error: e.message })
-      report?.({ phase: 'load_log', message: `\n[spawn error] ${e.message}\n\n` })
-    })
-    child.on('exit', (code) => {
-      this.lastExitCode = code
-      logLine('info', 'llama_exit', { code })
-      this.flushStderrUiBatch(report, true)
-      this.forwardStderrToUi = false
-      this.proc = null
-    })
-    const ext = path.extname(modelResolved).toLowerCase()
-    const weightKind =
-      ext === '.gguf' ? 'GGUF' : ext === '.safetensors' || ext === '.safetensor' ? 'Safetensors' : 'model'
-    report?.({
-      phase: 'load',
-      message: `Loading ${weightKind} weights into memory — server will accept chat when ready (may take several minutes for large files)…`,
-      percent: 22,
-      detail: `Model file:\n${this.displayModelPath || modelResolved}`
-    })
-    await new Promise((r) => setTimeout(r, 120))
-    if (child.exitCode != null || child.signalCode != null) {
-      const tail = this.serverLogTail.trim().slice(-2400)
-      throw new Error(
-        `llama-server exited immediately (code ${child.exitCode}, signal ${child.signalCode ?? 'none'}).` +
-          (tail
-            ? `\nCaptured output:\n${tail}`
-            : '\nNo output was captured. Copy the command from the log and run it in Command Prompt to see the error.') +
-          (process.platform === 'win32'
-            ? '\nTip: CUDA builds need matching GPU drivers; the working directory is set to the folder containing the exe so bundled DLLs load.'
-            : '')
-      )
+      const onChunk = (stream: 'stdout' | 'stderr', d: Buffer | string): void => {
+        const s = typeof d === 'string' ? d : d.toString('utf8')
+        this.appendServerLog(s)
+        const cleaned = this.normalizeServerChunk(s)
+        if (cleaned.trim()) this.queueStderrForUi(cleaned, report)
+        logLine('info', stream === 'stderr' ? 'llama_stderr' : 'llama_stdout', { chunk: s.slice(0, 200) })
+      }
+      child.stdout?.on('data', (d) => onChunk('stdout', d))
+      child.stderr?.on('data', (d) => onChunk('stderr', d))
+      child.on('spawn', () => {
+        report?.({
+          phase: 'load_log',
+          message: `Spawn event · pid=${String(child.pid ?? '?')} (stdio pipes attached)\n\n`
+        })
+      })
+      child.on('error', (e) => {
+        this.lastError = e.message
+        logLine('error', 'llama_spawn_error', { error: e.message })
+        report?.({ phase: 'load_log', message: `\n[spawn error] ${e.message}\n\n` })
+      })
+      child.on('exit', (code) => {
+        this.lastExitCode = code
+        logLine('info', 'llama_exit', { code })
+        this.flushStderrUiBatch(report, true)
+        this.forwardStderrToUi = false
+        this.proc = null
+      })
+      const ext = path.extname(modelResolved).toLowerCase()
+      const weightKind =
+        ext === '.gguf' ? 'GGUF' : ext === '.safetensors' || ext === '.safetensor' ? 'Safetensors' : 'model'
+      report?.({
+        phase: 'load',
+        message: `Loading ${weightKind} weights into memory — server will accept chat when ready (may take several minutes for large files)…`,
+        percent: 22,
+        detail: `Model file:\n${this.displayModelPath || modelResolved}`
+      })
+      await new Promise((r) => setTimeout(r, 120))
+      if (child.exitCode != null || child.signalCode != null) {
+        const tail = this.serverLogTail.trim().slice(-2400)
+        throw new Error(
+          `llama-server exited immediately (code ${child.exitCode}, signal ${child.signalCode ?? 'none'}).` +
+            (tail
+              ? `\nCaptured output:\n${tail}`
+              : '\nNo output was captured. Copy the command from the log and run it in Command Prompt to see the error.') +
+            (process.platform === 'win32'
+              ? '\nTip: CUDA builds need matching GPU drivers; the working directory is set to the folder containing the exe so bundled DLLs load.'
+              : '')
+        )
+      }
+      const deadline = Date.now() + LLAMA_READY_TIMEOUT_MS
+      await this.waitUntilLlamaReady(deadline, report)
     }
-    const deadline = Date.now() + LLAMA_READY_TIMEOUT_MS
-    await this.waitUntilLlamaReady(deadline, report)
+    try {
+      await launchAttempt(false)
+    } catch (e) {
+      if (!this.shouldRetryCpuSafe(e)) throw e
+      report?.({
+        phase: 'load_log',
+        message:
+          'GPU initialization failed (Vulkan/CUDA). Retrying with CPU-safe flags (`-ngl 0`) so the model can run without GPU support...\n\n'
+      })
+      try {
+        await this.stop()
+      } catch {
+        /* ignore stop errors between attempts */
+      }
+      this.forwardStderrToUi = true
+      await launchAttempt(true)
+    }
     this.forwardStderrToUi = false
     this.flushStderrUiBatch(report, true)
     report?.({ phase: 'ready', message: 'llama-server is ready.', percent: 100 })
