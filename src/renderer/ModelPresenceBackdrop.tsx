@@ -264,6 +264,8 @@ export function ModelPresenceBackdrop(props: ModelPresenceBackdropProps): ReactE
         (p.starting && p.loadPercent != null ? p.loadPercent / 220 : 0)
       let outerBlur = 72 + activity * 64 * (0.78 + expr * 0.42)
       let opacity = 0.26 + activity * 0.5 * (0.9 + expr * 0.3)
+      let orbitX = 0
+      let orbitY = 0
 
       hue = ((hue % 360) + 360) % 360
       sat = clamp(sat, 28, 92)
@@ -271,6 +273,15 @@ export function ModelPresenceBackdrop(props: ModelPresenceBackdropProps): ReactE
       orbScale = clamp(orbScale, 0.55, 2.1)
       outerBlur = clamp(outerBlur, 56, 228)
       opacity = clamp(opacity, 0.16, 0.94)
+
+      if (p.starting) {
+        const lp = p.loadPercent != null ? clamp(p.loadPercent / 100, 0, 1) : 0.4
+        const orbitRadiusPx = 14 + activity * 26 + (1 - lp) * 12
+        const orbitSpeed = 0.8 + activity * 1.25
+        const phase = (now / 1000) * orbitSpeed
+        orbitX = Math.cos(phase) * orbitRadiusPx
+        orbitY = Math.sin(phase) * orbitRadiusPx * 0.72
+      }
 
       el.style.setProperty('--mp-x', `${s.px}%`)
       el.style.setProperty('--mp-y', `${s.py}%`)
@@ -282,6 +293,8 @@ export function ModelPresenceBackdrop(props: ModelPresenceBackdropProps): ReactE
       el.style.setProperty('--mp-sat', `${sat.toFixed(1)}%`)
       el.style.setProperty('--mp-light', `${light.toFixed(1)}%`)
       el.style.setProperty('--mp-activity', activity.toFixed(4))
+      el.style.setProperty('--mp-orbit-x', `${orbitX.toFixed(2)}px`)
+      el.style.setProperty('--mp-orbit-y', `${orbitY.toFixed(2)}px`)
 
       raf = requestAnimationFrame(tick)
     }

@@ -1,4 +1,5 @@
-import type { KnowledgeGraphNode, KnowledgeGraphPayload } from '@shared/types'
+import { buildKnowledgeGraphSourceGroups } from '@shared/knowledgeGraphAnalysis'
+import type { KnowledgeGraphClusterMode, KnowledgeGraphNode, KnowledgeGraphPayload } from '@shared/types'
 
 export type KgPos = { x: number; y: number }
 export type KgBox = { x: number; y: number; w: number; h: number }
@@ -6,7 +7,7 @@ export type KgBox = { x: number; y: number; w: number; h: number }
 export type KnowledgeGraphLayoutOptions = {
   containerWidth: number
   collapsedSourceIds?: ReadonlySet<string>
-  clusterMode?: 'related' | 'domain'
+  clusterMode?: KnowledgeGraphClusterMode
 }
 
 export type KnowledgeGraphLayoutResult = {
@@ -27,25 +28,6 @@ export function nodeRadius(n: KnowledgeGraphNode): number {
 function circleBox(p: KgPos, r: number): KgBox {
   const d = r * 2
   return { x: p.x - r, y: p.y - r, w: d, h: d }
-}
-
-class UnionFind {
-  private readonly p = new Map<string, string>()
-  find(a: string): string {
-    if (!this.p.has(a)) this.p.set(a, a)
-    let x = a
-    while (this.p.get(x) !== x) {
-      const n = this.p.get(x)!
-      this.p.set(x, this.p.get(n)!)
-      x = this.p.get(x)!
-    }
-    return x
-  }
-  union(a: string, b: string): void {
-    const ra = this.find(a)
-    const rb = this.find(b)
-    if (ra !== rb) this.p.set(ra, rb)
-  }
 }
 
 /**
@@ -69,7 +51,6 @@ export function buildKnowledgeGraphLayout(
 
   const sources = data.nodes.filter((n) => n.kind === 'source')
   const wikis = data.nodes.filter((n) => n.kind === 'wiki')
-  const sourceIds = new Set(sources.map((s) => s.id))
 
   const chunksBySource = new Map<string, KnowledgeGraphNode[]>()
   for (const n of data.nodes) {
@@ -80,30 +61,7 @@ export function buildKnowledgeGraphLayout(
     }
   }
 
-  const clusterMap = new Map<string, string[]>()
-  if (clusterMode === 'domain') {
-    for (const s of sources) {
-      const key = s.domainId?.trim() || 'domain:unscoped'
-      const arr = clusterMap.get(key) ?? []
-      arr.push(s.id)
-      clusterMap.set(key, arr)
-    }
-  } else {
-    const uf = new UnionFind()
-    for (const s of sources) uf.find(s.id)
-    for (const e of data.edges) {
-      if (e.kind !== 'related') continue
-      if (sourceIds.has(e.from) && sourceIds.has(e.to)) uf.union(e.from, e.to)
-    }
-    for (const s of sources) {
-      const root = uf.find(s.id)
-      const arr = clusterMap.get(root) ?? []
-      arr.push(s.id)
-      clusterMap.set(root, arr)
-    }
-  }
-
-  const clusters = [...clusterMap.values()].sort((a, b) => b.length - a.length)
+  const clusters = buildKnowledgeGraphSourceGroups(data, clusterMode).map((g) => g.sourceIds)
 
   const innerW = Math.max(containerWidth - pad * 2, 360)
 

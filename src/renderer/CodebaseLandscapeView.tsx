@@ -5,6 +5,7 @@ import type {
   FormalVerificationProgressPayload,
   FormalVerificationRun
 } from '@shared/codebaseRegistry'
+import type { CodebaseWikiAnalysisProgress } from '@shared/types'
 
 function originLabel(o: CodebaseRecord['origin']): string {
   return o === 'manual' ? 'Manual' : 'IntelliJ'
@@ -35,6 +36,7 @@ function statusClass(s: FormalVerificationRun['status']): string {
 
 export type CodebaseLandscapeViewProps = {
   onOpenIntegrations: () => void
+  onEnrichmentComplete?: () => void
 }
 
 export function CodebaseLandscapeView(props: CodebaseLandscapeViewProps): ReactElement {
@@ -45,6 +47,13 @@ export function CodebaseLandscapeView(props: CodebaseLandscapeViewProps): ReactE
   const [toast, setToast] = useState<string | null>(null)
   const [interpretBusyRunId, setInterpretBusyRunId] = useState<string | null>(null)
   const [manualInterpretIncludeContext, setManualInterpretIncludeContext] = useState(false)
+  const [gitUrl, setGitUrl] = useState('')
+  const [analyzeBusyCodebaseId, setAnalyzeBusyCodebaseId] = useState<string | null>(null)
+  const [analysisProgressMsg, setAnalysisProgressMsg] = useState<string | null>(null)
+  const [analysisProgressLog, setAnalysisProgressLog] = useState<
+    Array<{ phase: string; message: string; at: number }>
+  >([])
+  const onEnrichmentComplete = props.onEnrichmentComplete
 
   const refresh = useCallback(async () => {
     setLoadErr(null)
@@ -67,6 +76,17 @@ export function CodebaseLandscapeView(props: CodebaseLandscapeViewProps): ReactE
     const off = window.api.onCodebaseFormalVerificationProgress((p: FormalVerificationProgressPayload) => {
       if (p.phase === 'finished' || (p.phase === 'started' && p.run)) {
         void window.api.codebaseFormalGet().then(setBundle).catch(() => {})
+      }
+    })
+    return off
+  }, [])
+
+  useEffect(() => {
+    const off = window.api.onCodebaseWikiAnalysisProgress((p: CodebaseWikiAnalysisProgress) => {
+      setAnalysisProgressMsg(p.message)
+      setAnalysisProgressLog((prev) => [...prev, { phase: p.phase, message: p.message, at: Date.now() }].slice(-14))
+      if (p.phase === 'done' || p.phase === 'error') {
+        setAnalyzeBusyCodebaseId(null)
       }
     })
     return off
@@ -108,6 +128,40 @@ export function CodebaseLandscapeView(props: CodebaseLandscapeViewProps): ReactE
     setToast('Codebase added.')
     await refresh()
   }, [refresh])
+
+  const addByGit = useCallback(async () => {
+    const url = gitUrl.trim()
+    if (!url) {
+      setToast('Enter a git URL first.')
+      return
+    }
+    const r = await window.api.codebaseFormalAddGit({ gitUrl: url })
+    if (!r.ok) {
+      setToast(r.error)
+      return
+    }
+    setGitUrl('')
+    setToast('Repository cloned and added.')
+    await refresh()
+  }, [gitUrl, refresh])
+
+  const analyzeCodebase = useCallback(
+    async (codebaseId: string) => {
+      setAnalyzeBusyCodebaseId(codebaseId)
+      setAnalysisProgressMsg('Starting scan…')
+      setAnalysisProgressLog([{ phase: 'start', message: 'Scan requested from codebase landscape.', at: Date.now() }])
+      const r = await window.api.codebaseWikiAnalyze({ codebaseId })
+      if (!r.ok) {
+        setToast(r.error)
+        setAnalyzeBusyCodebaseId(null)
+        return
+      }
+      setToast('Codebase analysis saved to wiki and graph.')
+      onEnrichmentComplete?.()
+      await refresh()
+    },
+    [onEnrichmentComplete, refresh]
+  )
 
   const interpretRun = useCallback(
     async (runId: string) => {
@@ -192,6 +246,17 @@ export function CodebaseLandscapeView(props: CodebaseLandscapeViewProps): ReactE
             <i className="fa-solid fa-folder-plus" aria-hidden />
             Add folder…
           </button>
+          <input
+            className="input"
+            style={{ minWidth: 260, maxWidth: 420 }}
+            placeholder="Git URL (https://... or git@...)"
+            value={gitUrl}
+            onChange={(e) => setGitUrl(e.target.value)}
+          />
+          <button type="button" className="btn-secondary settings-btn-icon" onClick={() => void addByGit()}>
+            <i className="fa-brands fa-git-alt" aria-hidden />
+            Clone and add
+          </button>
           <button type="button" className="btn-primary settings-btn-icon" onClick={() => props.onOpenIntegrations()}>
             <i className="fa-solid fa-sliders" aria-hidden />
             Integration settings…
@@ -203,6 +268,23 @@ export function CodebaseLandscapeView(props: CodebaseLandscapeViewProps): ReactE
         <p className="muted" style={{ marginTop: 0 }}>
           {toast}
         </p>
+      ) : null}
+      {analysisProgressMsg ? (
+        <p className="muted" style={{ marginTop: 0 }}>
+          {analysisProgressMsg}
+        </p>
+      ) : null}
+      {analysisProgressLog.length > 0 ? (
+        <details style={{ marginTop: 0 }}>
+          <summary className="muted">Analysis progress details</summary>
+          <ul className="muted" style={{ marginTop: 8, marginBottom: 0, paddingLeft: 18, fontSize: '0.9rem' }}>
+            {analysisProgressLog.map((x, i) => (
+              <li key={`${x.at}-${i}`}>
+                [{x.phase}] {x.message}
+              </li>
+            ))}
+          </ul>
+        </details>
       ) : null}
 
       {sortedCodebases.length === 0 ? (
@@ -241,6 +323,15 @@ export function CodebaseLandscapeView(props: CodebaseLandscapeViewProps): ReactE
                   >
                     <i className="fa-solid fa-folder-open" aria-hidden />
                     Open
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary settings-btn-icon"
+                    disabled={analyzeBusyCodebaseId === c.id}
+                    onClick={() => void analyzeCodebase(c.id)}
+                  >
+                    <i className="fa-solid fa-diagram-project" aria-hidden />
+                    {analyzeBusyCodebaseId === c.id ? 'Scanning…' : 'Scan+wiki'}
                   </button>
                 </div>
 

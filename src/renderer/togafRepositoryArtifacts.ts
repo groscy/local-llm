@@ -207,6 +207,35 @@ export function findGroupIdForArtifact(id: TogafRepositoryArtifactId): string | 
 export const TOGAF_REPOSITORY_DEFAULT_ARTIFACT: TogafRepositoryArtifactId =
   TOGAF_REPOSITORY_NAV_GROUPS[0].items[0].id
 
+/**
+ * Bump this when TOGAF chapter wording changes and users should see "new content" dots again.
+ * The view persists seen chapters per version in local storage.
+ */
+export const TOGAF_REPOSITORY_CHANGESET_VERSION = '2026-04-loaded-codebases-reframe-v1'
+
+/** Chapters updated in the current changelog scope. */
+export const TOGAF_REPOSITORY_CHANGED_ARTIFACTS: readonly TogafRepositoryArtifactId[] = [
+  'architecture_repository_overview',
+  'adm_preliminary_phase',
+  'architecture_vision',
+  'business_architecture_catalog',
+  'application_architecture_catalog',
+  'data_architecture_catalog',
+  'technology_architecture_catalog',
+  'adm_phase_e_opportunities_solutions',
+  'adm_phase_g_implementation_governance',
+  'architecture_requirements_catalog',
+  'acf_deliverables_artifacts',
+  'acf_catalogs_matrices',
+  'enterprise_continuum',
+  'repo_architecture_metamodel',
+  'repo_architecture_capability',
+  'repo_architecture_landscape',
+  'standards_information_base',
+  'reference_library',
+  'building_blocks_abb_sbb'
+]
+
 const REPOSITORY_OVERVIEW = `## Architecture Repository overview
 
 The TOGAF **Architecture Repository** holds the outputs of architecture work and the material that governs and describes it. The standard partitions the repository into the major areas shown in the interactive diagram below — select a partition to open the corresponding catalog in this view.
@@ -222,7 +251,7 @@ The TOGAF **Architecture Repository** holds the outputs of architecture work and
 
 Use the diagram to jump to a partition. **ADM**, **ACF**, and **Enterprise Continuum** entry points are shown as related domains below the core repository map.
 
-The prose above is **TOGAF reference framing** only. **Observed architecture evidence** from your own workspace (counts, scans, settings you have used) appears in the chapter-specific panel below when you select a catalog — it does not describe the hosting application.
+The prose above is **TOGAF reference framing** only. **Observed architecture evidence** from the loaded/selected codebases (counts, scans, run signals, settings) appears in the chapter-specific panel below when you select a catalog. The Electron desktop app is the repository workbench, not the architecture subject.
 `
 
 const PRELIMINARY = `## Preliminary Phase
@@ -236,7 +265,7 @@ The **Preliminary Phase** establishes the organizational expectation that enterp
 | Architecture principles | Architecture Principles catalog (this chapter) |
 | Tools & organization | Skills, repositories, collaboration with solution delivery |
 
-Record tailoring decisions and capability baselines in your engagement’s system of record; align this workspace’s **observed evidence** with that record where applicable.
+Record tailoring decisions and capability baselines in your engagement’s system of record; align this repository’s **observed codebase evidence** with that record where applicable.
 `
 
 const GOVERNANCE_LOG = `## Governance Repository
@@ -278,7 +307,7 @@ Phase **A** agrees **why** architecture is needed, for **whom**, and what **succ
 | Scope statement | In / out of scope for the architecture effort |
 | Solution concept | Candidate high-level shape (not detailed design) |
 
-Capture Vision material in your engagement’s documents or ingested notes; this view does not substitute a Vision document — it only holds **TOGAF structure** and **observed evidence** you attach through usage of the workspace.
+Capture Vision material in your engagement’s documents or ingested notes; this view does not substitute a Vision document — it only holds **TOGAF structure** and **observed evidence** attached to selected projects/codebases.
 `
 
 const BUSINESS = `## Phase B — Business Architecture catalog
@@ -291,7 +320,7 @@ Business Architecture describes **what the enterprise does** independently of sy
 | Value stream | End-to-end delivery paths and hand-offs |
 | Business information | Canonical business terms and relationships |
 
-**Observed evidence** for this chapter is drawn from **knowledge-base topics you have accumulated** (as a proxy for business-information artifacts in this workspace), not from the tool’s own design.
+**Observed evidence** for this chapter is drawn from **knowledge-base topics you have accumulated** (as a proxy for business-information artifacts in the loaded project landscape), not from the tool’s own design.
 `
 
 const APPLICATION_STATIC = `## Phase C — Application Architecture catalog
@@ -304,9 +333,9 @@ Application Architecture catalogs **logical applications**, their interfaces, an
 | Interface | APIs, events, batch exchanges |
 | Application communication | Who talks to whom, and on what protocols |
 
-### Observed application evidence (workspace)
+### Observed application evidence (selected codebase)
 
-Use **Choose workspace folder** and **Run workspace scan** below to collect **bounded** filesystem evidence from a codebase you are assessing (vendor trees such as \`node_modules\` are skipped). Results are **observations about the workspace you selected**, not a description of the tool hosting this repository.
+Use **Codebase landscape** registration and **Run workspace scan** below to collect **bounded** filesystem evidence from the codebase you are assessing (vendor trees such as \`node_modules\` are skipped). Results are **observations about the selected architecture subject**, not a description of the tool hosting this repository.
 `
 
 const DATA_STATIC = `## Phase C — Data Architecture catalog
@@ -319,9 +348,9 @@ Data Architecture catalogs **business and application data**: entities, relation
 | Logical data model | Relationships and cardinalities |
 | Data lifecycle | Create, read, retain, archive, delete policies |
 
-### Observed data evidence (this workspace)
+### Observed data evidence (loaded project context)
 
-When you load or refresh the **knowledge graph** for ingested material, structural counts and truncation flags appear in the **Observed evidence** panel for this chapter. Those metrics describe **your captured knowledge**, not the product’s internal storage design.
+When you load or refresh the **knowledge graph** for ingested material, structural counts and truncation flags appear in the **Observed evidence** panel for this chapter. Those metrics describe **captured project knowledge**, not the workbench application's internal storage design.
 `
 
 const TECH_STATIC = `## Phase D — Technology Architecture catalog
@@ -334,9 +363,9 @@ Technology Architecture catalogs **platforms, hardware, communications, and stan
 | Technology standard | Approved versions, patching posture |
 | Deployment / hosting | Where workloads run and how they fail over |
 
-### Observed technology evidence (this session)
+### Observed technology evidence (selected architecture subject)
 
-The **Observed evidence** panel for this chapter shows **integration endpoints and paths you have configured**, **models directory selection**, and an optional **workstation hardware sample** when one has been collected during your session — all as **usage observations**, not as a product datasheet.
+The **Observed evidence** panel for this chapter shows **integration endpoints and paths you have configured**, **models directory selection**, and an optional **workstation hardware sample** when one has been collected during your session — all as **assessment observations** about the selected subject context, not as a product datasheet.
 `
 
 const PHASE_E = `## Phase E — Opportunities & Solutions
@@ -349,7 +378,7 @@ Phase **E** identifies delivery groupings (work packages, transition architectur
 | Dependencies & constraints | Cross-portfolio coordination |
 | Value/risk sketch | Prioritization input for migration |
 
-Treat **recorded training or transformation jobs**, **runtime choices**, and **integration enablement** you observe in this workspace as **candidate solution components** to be reconciled with your wider roadmap and decision logs.
+Treat **recorded training or transformation jobs**, **runtime choices**, and **integration enablement** you observe while assessing a codebase as **candidate solution components** to be reconciled with your wider roadmap and decision logs.
 `
 
 const PHASE_F = `## Phase F — Migration Planning
@@ -375,7 +404,7 @@ Phase **G** ensures that implementation projects conform to the target architect
 | Compliance reviews | Against Technology and Application standards |
 | Change request | When implementation diverges from approved architecture |
 
-Use your SDLC tooling as the system of record; this workspace surfaces **observed implementation signals** (for example integration activity) as adjunct evidence only.
+Use your SDLC tooling as the system of record; this repository workbench surfaces **observed implementation signals** (for example integration activity and formal run outcomes) as adjunct evidence only.
 `
 
 const PHASE_H = `## Phase H — Architecture Change Management
@@ -401,7 +430,7 @@ Requirements Management runs **throughout** the ADM: capture, baseline, trace, a
 | Allocate | Map requirements to ADM phases and building blocks |
 | Trace | Link requirements to catalog entries, tests, and releases |
 
-**Observed requirement signals** in this workspace are **examples only** (for example integration and hardware observations captured in-session). Authoritative requirements belong in your requirements tool.
+**Observed requirement signals** in this repository are **examples only** (for example integration, verification, and hardware observations captured in-session). Authoritative requirements belong in your requirements tool.
 `
 
 const ACF_DELIVERABLES = `## Architecture Content Framework — Deliverables & artifacts
@@ -414,7 +443,7 @@ TOGAF distinguishes **deliverables** (reviewable outputs), **artifacts** (descri
 | Artifact | Catalog entry, matrix, diagram, or model fragment |
 | Building Block | Reusable specification (ABB) or implementation (SBB) |
 
-Use your document control system for formal **deliverables**; use this workspace for **artifact-shaped evidence** you choose to capture (text, scans, metrics) under the TOGAF categories above.
+Use your document control system for formal **deliverables**; use this repository workbench for **artifact-shaped evidence** you choose to capture (text, scans, metrics) under the TOGAF categories above.
 `
 
 const ACF_CATALOGS = `## Architecture Content Framework — Catalogs & matrices
@@ -427,7 +456,7 @@ const ACF_CATALOGS = `## Architecture Content Framework — Catalogs & matrices
 | Application–Technology | Which standards each application relies on |
 | Role–Concern | Stakeholder mapping to views |
 
-**Observed evidence** for matrices in this workspace is limited to **cross-cutting counts** (for example topics vs. graph size) that you can treat as seeds for fuller matrices in your EA tools.
+**Observed evidence** for matrices in this repository is limited to **cross-cutting counts** (for example topics vs. graph size and run history) that you can treat as seeds for fuller matrices in your EA tools.
 `
 
 const CONTINUUM = `## Enterprise Continuum
@@ -450,7 +479,7 @@ flowchart LR
   F --> C --> I --> O
 \`\`\`
 
-Classify **your own** solution assets along the continuum (from generic reference patterns through organization-specific deployments). **Observed evidence** here uses **top-level folder names** from an optional workspace scan as a coarse hint only.
+Classify **your own** solution assets along the continuum (from generic reference patterns through organization-specific deployments). **Observed evidence** here uses **top-level folder names** from selected-codebase scans as a coarse hint only.
 `
 
 const ABB_SBB = `## Architecture Building Blocks and Solution Building Blocks
@@ -465,7 +494,7 @@ const ABB_SBB = `## Architecture Building Blocks and Solution Building Blocks
 | Customer record | “Customer master” logical service | Vendor CRM module + API version |
 | Payment | “Payment capture” capability | PSP connector deployment |
 
-Maintain traceability **ABB → SBB** when you record implementation choices. **Observed file-type mixes** from a workspace scan can hint at concrete SBBs on disk for the selected codebase.
+Maintain traceability **ABB → SBB** when you record implementation choices. **Observed file-type mixes** from codebase scans can hint at concrete SBBs on disk for the selected codebase.
 `
 
 const METAMODEL = `## Architecture Metamodel
@@ -479,7 +508,7 @@ The **Architecture Metamodel** defines the types of things you describe (classes
 | Information Systems | Applications, data entities, interfaces |
 | Technology | Platforms, hardware, communications |
 
-Define and govern your **enterprise metamodel** in your central EA repository; this workspace does not replace that authority.
+Define and govern your **enterprise metamodel** in your central EA repository; this workbench does not replace that authority.
 `
 
 const CAPABILITY = `## Architecture Capability
@@ -493,7 +522,7 @@ const CAPABILITY = `## Architecture Capability
 | Tools | Authoring, modeling, repository automation |
 | Collaboration | Review boards, workshops, async commentary |
 
-Assess maturity in your organization’s **capability assessments**; this workspace only stores **usage-derived signals** where you have configured integrations or similar probes.
+Assess maturity in your organization’s **capability assessments**; this workbench only stores **usage-derived signals** where you have configured integrations or similar probes.
 `
 
 const LANDSCAPE = `## Architecture Landscape
@@ -507,7 +536,7 @@ The **Architecture Landscape** inventories building blocks at **Strategic**, **S
 | Capability | Services supporting value streams |
 | Operational | Deployed instances and versions |
 
-A **bounded filesystem scan** of a repository you select can contribute **operational / segment** inventory hints; it is not a full strategic landscape. **Observed evidence** for Landscape uses the last scan results you generated in this session.
+A **bounded filesystem scan** of selected repositories can contribute **operational / segment** inventory hints; it is not a full strategic landscape. **Observed evidence** for Landscape uses the latest scan results you generated for the selected architecture subject.
 `
 
 const STANDARDS_BASE = `## Standards Information Base
@@ -520,7 +549,7 @@ The **Standards Information Base** holds **normative** guidance: organizational 
 | Advisory | Preferred stacks, coding standards |
 | Retired | Superseded norms with end dates |
 
-Map **approved norms** and **exceptions** into your Standards Information Base in your system of record. **Observed evidence** here is limited to **high-level control settings** you have enabled in this workspace (for example integration listen state and whether an access token is configured).
+Map **approved norms** and **exceptions** into your Standards Information Base in your system of record. **Observed evidence** here is limited to **high-level control settings** you have enabled in this workbench (for example integration listen state and whether an access token is configured).
 `
 
 const REFERENCE_LIB = `## Reference Library
@@ -533,7 +562,7 @@ The **Reference Library** contains **non-normative** material: reference archite
 | External reference models | e.g. industry capability maps |
 | Vendor or product documentation | Integration surfaces and constraints |
 
-Ingest or link **reference** material (whitepapers, patterns, external models) through your normal knowledge pipeline; **observed topic counts** reflect what you have loaded, not tool documentation.
+Ingest or link **reference** material (whitepapers, patterns, external models) through your normal knowledge pipeline; **observed topic counts** reflect what you have loaded for assessed projects, not workbench documentation.
 `
 
 const DIAGRAMS = `## Architecture views (diagrams)

@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react'
 import type { ArchitectureRepositoryScanResult } from '@shared/architectureRepository'
-import type { HardwareSummary, WikiTopic } from '@shared/types'
+import type { CodebaseRecord, FormalVerificationRun } from '@shared/codebaseRegistry'
+import type { CodebaseAnalysisSnapshot, HardwareSummary, WikiTopic } from '@shared/types'
 import { WIKI_KIND_LABELS, WIKI_KIND_ORDER, wikiKindCounts } from '@shared/wikiSourceGroups'
 import { formatBytes } from './downloadProgressUi'
 import type { TogafRepositoryArtifactId } from './togafRepositoryArtifacts'
@@ -18,9 +19,12 @@ export type ArchitectureEvidenceProps = {
   hardwareSummary: HardwareSummary | null
   modelsDefaultPath: string | null
   scanRoot: string | null
+  selectedCodebase: CodebaseRecord | null
   scanResult: ArchitectureRepositoryScanResult | null
+  formalRuns: FormalVerificationRun[]
   trainJobCount: number
   pluginReportCount: number
+  codebaseAnalysisSnapshots: CodebaseAnalysisSnapshot[]
 }
 
 function EvidenceShell(props: {
@@ -52,8 +56,19 @@ export function renderObservedArchitectureEvidence(
   artifact: TogafRepositoryArtifactId,
   p: ArchitectureEvidenceProps
 ): ReactElement | null {
+  const selectedSnapshots = p.selectedCodebase
+    ? p.codebaseAnalysisSnapshots.filter((s) => s.codebaseId === p.selectedCodebase?.id)
+    : p.codebaseAnalysisSnapshots
+  const selectedRuns = p.selectedCodebase
+    ? p.formalRuns.filter((r) => r.codebaseId === p.selectedCodebase?.id)
+    : p.formalRuns
+  const latestRun = [...selectedRuns].sort((a, b) => b.startedAt - a.startedAt)[0]
   const wikiByKind = wikiKindCounts(p.wikiTopics)
   const wikiTotal = p.wikiTopics.length
+  const codebaseAnalysisCount = selectedSnapshots.length
+  const totalDomainModel = selectedSnapshots.reduce((n, s) => n + s.domainModel.length, 0)
+  const totalDesignPatterns = selectedSnapshots.reduce((n, s) => n + s.designPatterns.length, 0)
+  const totalArchitecturePatterns = selectedSnapshots.reduce((n, s) => n + s.architecturePatterns.length, 0)
 
   const techIntegrationTable = (
     <table className="arch-repo-table">
@@ -140,7 +155,7 @@ export function renderObservedArchitectureEvidence(
       return (
         <EvidenceShell
           chapterTitle="Observed evidence — cross-domain snapshot"
-          lead="Single-session observations gathered from this workspace (not a description of the tool itself)."
+          lead="Single-session observations for the selected architecture subject (not a description of the tool itself)."
         >
           <table className="arch-repo-table">
             <tbody>
@@ -155,8 +170,8 @@ export function renderObservedArchitectureEvidence(
                 </td>
               </tr>
               <tr>
-                <th scope="row">Workspace scan root configured</th>
-                <td>{p.scanRoot ? 'Yes' : 'No'}</td>
+                <th scope="row">Architecture subject selected</th>
+                <td>{p.selectedCodebase?.displayName || p.selectedCodebase?.rootPath || 'No'}</td>
               </tr>
               <tr>
                 <th scope="row">Training jobs recorded</th>
@@ -169,6 +184,18 @@ export function renderObservedArchitectureEvidence(
               <tr>
                 <th scope="row">Integration listen (observed)</th>
                 <td>{p.integrationListenEnabled ? 'On' : 'Off'}</td>
+              </tr>
+              <tr>
+                <th scope="row">Codebase analysis snapshots</th>
+                <td>{codebaseAnalysisCount}</td>
+              </tr>
+              <tr>
+                <th scope="row">Formal verification runs</th>
+                <td>{selectedRuns.length}</td>
+              </tr>
+              <tr>
+                <th scope="row">Latest formal run status</th>
+                <td>{latestRun ? latestRun.status : 'No runs'}</td>
               </tr>
               <tr>
                 <th scope="row">Hardware sample available</th>
@@ -216,27 +243,49 @@ export function renderObservedArchitectureEvidence(
       return (
         <EvidenceShell
           chapterTitle="Observed evidence — Business Architecture catalog"
-          lead="Counts of knowledge-base topics you have accumulated (proxy for business-information artifacts in this workspace)."
+          lead="Counts of knowledge-base topics you have accumulated (proxy for business-information artifacts for the selected codebase context)."
         >
           {wikiTotal === 0 ? (
             <p className="muted" style={{ margin: 0 }}>No wiki topics observed yet.</p>
           ) : (
-            <table className="arch-repo-table">
-              <thead>
-                <tr>
-                  <th scope="col">Topic kind (observed)</th>
-                  <th scope="col">Count</th>
-                </tr>
-              </thead>
-              <tbody>
-                {WIKI_KIND_ORDER.map((k) => (
-                  <tr key={k}>
-                    <td>{WIKI_KIND_LABELS[k]}</td>
-                    <td>{wikiByKind[k]}</td>
+            <>
+              <table className="arch-repo-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Topic kind (observed)</th>
+                    <th scope="col">Count</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {WIKI_KIND_ORDER.map((k) => (
+                    <tr key={k}>
+                      <td>{WIKI_KIND_LABELS[k]}</td>
+                      <td>{wikiByKind[k]}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <table className="arch-repo-table" style={{ marginTop: 10 }}>
+                <tbody>
+                  <tr>
+                    <th scope="row">Codebase analyses</th>
+                    <td>{codebaseAnalysisCount}</td>
+                  </tr>
+                  <tr>
+                    <th scope="row">Domain model items</th>
+                    <td>{totalDomainModel}</td>
+                  </tr>
+                  <tr>
+                    <th scope="row">Design patterns</th>
+                    <td>{totalDesignPatterns}</td>
+                  </tr>
+                  <tr>
+                    <th scope="row">Architecture patterns</th>
+                    <td>{totalArchitecturePatterns}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </>
           )}
         </EvidenceShell>
       )
@@ -245,7 +294,7 @@ export function renderObservedArchitectureEvidence(
       return (
         <EvidenceShell
           chapterTitle="Observed evidence — Data Architecture catalog"
-          lead="Structural observations from the compiled knowledge graph in this workspace."
+          lead="Structural observations from the compiled knowledge graph available in this workspace context."
         >
           {dataKgBlock}
         </EvidenceShell>
@@ -255,7 +304,7 @@ export function renderObservedArchitectureEvidence(
       return (
         <EvidenceShell
           chapterTitle="Observed evidence — Technology Architecture catalog"
-          lead="Runtime and workstation observations captured during this session."
+          lead="Runtime and workstation observations captured while assessing the selected architecture subject."
         >
           <div className="arch-repo-live-grid">
             <div>
@@ -274,7 +323,7 @@ export function renderObservedArchitectureEvidence(
       return (
         <EvidenceShell
           chapterTitle="Observed evidence — Standards Information Base"
-          lead="Normative controls you have configured in this workspace (observed settings, not policy text)."
+          lead="Normative controls observed in this workspace tooling context (settings, not policy text)."
         >
           <table className="arch-repo-table">
             <tbody>
@@ -316,18 +365,24 @@ export function renderObservedArchitectureEvidence(
       return (
         <EvidenceShell
           chapterTitle="Observed evidence — Architecture Landscape"
-          lead="Inventory hints from the last workspace scan (configure and run the scan from Phase C — Application Architecture)."
+          lead="Inventory hints from the last selected-codebase scan (configure and run the scan from Phase C — Application Architecture)."
         >
           {!p.scanResult ? (
             <p className="muted" style={{ margin: 0 }}>
-              No scan results in memory. Run a bounded workspace scan under Application Architecture to populate landscape
-              observations.
+              No scan results in memory. Run a bounded scan under Application Architecture to populate landscape
+              observations for the selected project.
             </p>
           ) : (
             <table className="arch-repo-table">
               <tbody>
+                {p.selectedCodebase ? (
+                  <tr>
+                    <th scope="row">Selected codebase</th>
+                    <td className="arch-repo-path-cell">{p.selectedCodebase.rootPath}</td>
+                  </tr>
+                ) : null}
                 <tr>
-                  <th scope="row">Scan root (observed)</th>
+                  <th scope="row">Codebase root (observed)</th>
                   <td className="arch-repo-path-cell">{p.scanResult.root}</td>
                 </tr>
                 <tr>
@@ -343,6 +398,10 @@ export function renderObservedArchitectureEvidence(
                     {p.scanResult.topLevelNames.slice(0, 12).join(', ') || '—'}
                   </td>
                 </tr>
+                <tr>
+                  <th scope="row">Formal verification runs retained</th>
+                  <td>{selectedRuns.length}</td>
+                </tr>
               </tbody>
             </table>
           )}
@@ -353,10 +412,10 @@ export function renderObservedArchitectureEvidence(
       return (
         <EvidenceShell
           chapterTitle="Observed evidence — Building blocks (file mix)"
-          lead="Extension histogram from the last workspace scan proxies concrete building-block instances on disk."
+          lead="Extension histogram from the last selected-codebase scan proxies concrete building-block instances on disk."
         >
           {!p.scanResult ? (
-            <p className="muted" style={{ margin: 0 }}>Run a workspace scan under Application Architecture first.</p>
+            <p className="muted" style={{ margin: 0 }}>Run a codebase scan under Application Architecture first.</p>
           ) : (
             <table className="arch-repo-table">
               <thead>
@@ -387,20 +446,25 @@ export function renderObservedArchitectureEvidence(
       return (
         <EvidenceShell
           chapterTitle="Observed evidence — Enterprise Continuum"
-          lead="Top-level folders from the configured workspace scan suggest where material sits on the genericity spectrum (heuristic)."
+          lead="Top-level folders from the selected-codebase scan suggest where material sits on the genericity spectrum (heuristic)."
         >
           {!p.scanResult?.topLevelNames.length ? (
             <p className="muted" style={{ margin: 0 }}>
-              No scan data. Configure a workspace root and scan from Application Architecture.
+              No scan data. Select a codebase and scan from Application Architecture.
             </p>
           ) : (
-            <ul className="arch-repo-list" style={{ marginBottom: 0 }}>
-              {p.scanResult.topLevelNames.slice(0, 24).map((name) => (
-                <li key={name}>
-                  <code className="inline-code">{name}</code>
-                </li>
-              ))}
-            </ul>
+            <>
+              <ul className="arch-repo-list" style={{ marginBottom: 10 }}>
+                {p.scanResult.topLevelNames.slice(0, 24).map((name) => (
+                  <li key={name}>
+                    <code className="inline-code">{name}</code>
+                  </li>
+                ))}
+              </ul>
+              <p className="muted" style={{ margin: 0 }}>
+                Formal runs linked to this subject: {selectedRuns.length}
+              </p>
+            </>
           )}
         </EvidenceShell>
       )
@@ -423,6 +487,14 @@ export function renderObservedArchitectureEvidence(
                   {p.kgLoading ? '…' : `${p.kgNodeCount} / ${p.kgEdgeCount}`}
                 </td>
               </tr>
+              <tr>
+                <th scope="row">Codebase analyses represented</th>
+                <td>{codebaseAnalysisCount}</td>
+              </tr>
+              <tr>
+                <th scope="row">Formal runs represented</th>
+                <td>{selectedRuns.length}</td>
+              </tr>
             </tbody>
           </table>
         </EvidenceShell>
@@ -443,6 +515,10 @@ export function renderObservedArchitectureEvidence(
               <tr>
                 <th scope="row">Graph edges (relationship proxies)</th>
                 <td>{p.kgLoading ? '…' : p.kgEdgeCount}</td>
+              </tr>
+              <tr>
+                <th scope="row">Extracted architecture patterns</th>
+                <td>{totalArchitecturePatterns}</td>
               </tr>
             </tbody>
           </table>

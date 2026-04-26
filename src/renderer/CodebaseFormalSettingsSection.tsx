@@ -6,6 +6,7 @@ import type {
   FormalVerificationProgressPayload,
   FormalVerificationRun
 } from '@shared/codebaseRegistry'
+import type { CodebaseWikiAnalysisProgress } from '@shared/types'
 
 function originLabel(o: CodebaseRecord['origin']): string {
   return o === 'manual' ? 'Manual' : 'IntelliJ'
@@ -28,7 +29,9 @@ function statusLabel(s: FormalVerificationRun['status']): string {
   }
 }
 
-export function CodebaseFormalSettingsSection(): React.ReactElement {
+export function CodebaseFormalSettingsSection(props: {
+  onEnrichmentComplete?: () => void
+}): React.ReactElement {
   const [bundle, setBundle] = useState<CodebaseFormalBundle | null>(null)
   const [loadErr, setLoadErr] = useState<string | null>(null)
   const [manualLabel, setManualLabel] = useState('')
@@ -46,12 +49,30 @@ export function CodebaseFormalSettingsSection(): React.ReactElement {
   const [interpretGlobal, setInterpretGlobal] = useState(false)
   const [interpretIncludeKb, setInterpretIncludeKb] = useState(false)
   const [profileInterpretLlm, setProfileInterpretLlm] = useState(false)
+  const [gitUrl, setGitUrl] = useState('')
+  const [analyzeBusyCodebaseId, setAnalyzeBusyCodebaseId] = useState<string | null>(null)
+  const [analysisProgressMsg, setAnalysisProgressMsg] = useState<string | null>(null)
+  const [analysisProgressLog, setAnalysisProgressLog] = useState<
+    Array<{ phase: string; message: string; at: number }>
+  >([])
+  const onEnrichmentComplete = props.onEnrichmentComplete
 
   useEffect(() => {
     void window.api.getConfig().then((c) => {
       setInterpretGlobal(c.formalVerificationInterpretWithLlm === true)
       setInterpretIncludeKb(c.formalVerificationInterpretIncludeKb === true)
     })
+  }, [])
+
+  useEffect(() => {
+    const off = window.api.onCodebaseWikiAnalysisProgress((p: CodebaseWikiAnalysisProgress) => {
+      setAnalysisProgressMsg(p.message)
+      setAnalysisProgressLog((prev) => [...prev, { phase: p.phase, message: p.message, at: Date.now() }].slice(-14))
+      if (p.phase === 'done' || p.phase === 'error') {
+        setAnalyzeBusyCodebaseId(null)
+      }
+    })
+    return off
   }, [])
 
   const refresh = useCallback(async () => {
@@ -98,6 +119,42 @@ export function CodebaseFormalSettingsSection(): React.ReactElement {
     setManualLabel('')
     await refresh()
   }, [manualLabel, refresh])
+
+  const addByGit = useCallback(async () => {
+    setActionMsg(null)
+    const url = gitUrl.trim()
+    if (!url) {
+      setActionMsg('Enter a git URL first.')
+      return
+    }
+    const r = await window.api.codebaseFormalAddGit({ gitUrl: url })
+    if (!r.ok) {
+      setActionMsg(r.error)
+      return
+    }
+    setGitUrl('')
+    setActionMsg('Repository cloned and added.')
+    await refresh()
+  }, [gitUrl, refresh])
+
+  const analyzeCodebase = useCallback(
+    async (codebaseId: string) => {
+      setActionMsg(null)
+      setAnalyzeBusyCodebaseId(codebaseId)
+      setAnalysisProgressMsg('Starting scan…')
+      setAnalysisProgressLog([{ phase: 'start', message: 'Scan requested from settings.', at: Date.now() }])
+      const r = await window.api.codebaseWikiAnalyze({ codebaseId })
+      if (!r.ok) {
+        setActionMsg(r.error)
+        setAnalyzeBusyCodebaseId(null)
+        return
+      }
+      setActionMsg('Codebase analysis saved to wiki and graph.')
+      onEnrichmentComplete?.()
+      await refresh()
+    },
+    [onEnrichmentComplete, refresh]
+  )
 
   const removeCodebase = useCallback(
     async (id: string, label: string) => {
@@ -223,6 +280,23 @@ export function CodebaseFormalSettingsSection(): React.ReactElement {
           {actionMsg}
         </p>
       ) : null}
+      {analysisProgressMsg ? (
+        <p className="muted" style={{ marginTop: 6 }}>
+          {analysisProgressMsg}
+        </p>
+      ) : null}
+      {analysisProgressLog.length > 0 ? (
+        <details style={{ marginTop: 6 }}>
+          <summary className="muted">Analysis progress details</summary>
+          <ul className="muted" style={{ marginTop: 8, marginBottom: 0, paddingLeft: 18, fontSize: '0.9rem' }}>
+            {analysisProgressLog.map((x, i) => (
+              <li key={`${x.at}-${i}`}>
+                [{x.phase}] {x.message}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
 
       <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
         <h4 className="settings-section-title" style={{ fontSize: '0.95rem', marginTop: 0 }}>
@@ -278,6 +352,19 @@ export function CodebaseFormalSettingsSection(): React.ReactElement {
           Refresh
         </button>
       </div>
+      <div className="row" style={{ flexWrap: 'wrap', gap: 8, marginTop: 8, alignItems: 'center' }}>
+        <input
+          className="input"
+          style={{ minWidth: 320, maxWidth: 500 }}
+          placeholder="Git URL (https://... or git@...)"
+          value={gitUrl}
+          onChange={(e) => setGitUrl(e.target.value)}
+        />
+        <button type="button" className="btn-secondary settings-btn-icon" onClick={() => void addByGit()}>
+          <i className="fa-brands fa-git-alt" aria-hidden />
+          Clone and add
+        </button>
+      </div>
       {bundle.codebases.length === 0 ? (
         <p className="muted" style={{ marginTop: 10 }}>
           No codebases yet. Add a folder or open a project in IntelliJ with the bridge enabled.
@@ -316,6 +403,14 @@ export function CodebaseFormalSettingsSection(): React.ReactElement {
                     onClick={() => void window.api.openPathInExplorer(c.rootPath)}
                   >
                     <i className="fa-solid fa-folder-open" aria-hidden />
+                  </button>{' '}
+                  <button
+                    type="button"
+                    className="btn-secondary settings-btn-icon"
+                    disabled={analyzeBusyCodebaseId === c.id}
+                    onClick={() => void analyzeCodebase(c.id)}
+                  >
+                    {analyzeBusyCodebaseId === c.id ? 'Scanning…' : 'Scan+wiki'}
                   </button>{' '}
                   <button
                     type="button"

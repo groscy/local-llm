@@ -7,7 +7,8 @@ import {
   UI_ROLE_CARD_BLURBS,
   UI_ROLE_LABELS,
   roleLayout,
-  type MainShellView
+  layoutDefaultMainArea,
+  type AppMainView
 } from '@shared/uiRole'
 import { applyColorSchemeToDocument } from './colorSchemeDom'
 
@@ -33,9 +34,9 @@ export type SetupTourFinishPayload = {
   uiRole: UiRole
   colorScheme: ColorSchemeId
   /** Open this drawer after closing (e.g. runtime). */
-  openDrawer: 'runtime' | 'hf' | null
+  openDrawer: 'runtime' | 'hf' | 'settings' | null
   /** Optional main view switch. */
-  mainView?: MainShellView
+  mainView?: AppMainView
 }
 
 type Step = 0 | 1 | 2 | 3 | 4
@@ -79,7 +80,7 @@ export function SetupRoleTour(props: {
   }, [props.initialRole, props.initialColorScheme])
 
   const finish = useCallback(
-    async (opts: { openDrawer: 'runtime' | 'hf' | null; mainView?: MainShellView }) => {
+    async (opts: { openDrawer: 'runtime' | 'hf' | 'settings' | null; mainView?: AppMainView }) => {
       applyColorSchemeToDocument(draftColorScheme)
       await props.onComplete({
         uiRole: draftRole,
@@ -107,8 +108,8 @@ export function SetupRoleTour(props: {
 
   const rt = props.runtime
   const layout = roleLayout(draftRole)
-  const primaryOpensWiki =
-    layout.defaultMainView === 'wiki' && layout.tourCtaPrimaryLabel.toLowerCase().includes('wiki')
+  const primaryMainView = layoutDefaultMainArea(layout)
+  const primaryNeedsRuntimeDrawer = primaryMainView === 'chat'
 
   return (
     <div className="modal-overlay welcome-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="setup-tour-title">
@@ -124,8 +125,9 @@ export function SetupRoleTour(props: {
               How will you use this app?
             </h2>
             <p id="setup-tour-role-desc" className="modal-text welcome-modal-lead">
-              <strong className="setup-tour-role-lead-strong">Tap one card</strong> to choose your role. This shapes the sidebar,
-              main screens, and defaults. You can switch anytime under <strong>Settings → General</strong>.
+              <strong className="setup-tour-role-lead-strong">Tap one card</strong> to choose your role. This shapes task
+              navigation, workspace defaults, and which settings are surfaced first. You can switch anytime under{' '}
+              <strong>Settings → General</strong>.
             </p>
             <div
               className="setup-tour-role-grid"
@@ -325,30 +327,20 @@ export function SetupRoleTour(props: {
           <>
             <h2 className="modal-title">Quick tip</h2>
             <p className="modal-text welcome-modal-lead">
-              <span className="setup-tour-em">{UI_ROLE_LABELS[draftRole]}:</span> {layout.tourTip}
+              <span className="setup-tour-em">{UI_ROLE_LABELS[draftRole]} workspace:</span> {layout.tourTip}
             </p>
             <div className="modal-actions welcome-modal-actions setup-tour-actions-split">
               <button type="button" className="btn-secondary" onClick={goBack}>
                 Back
               </button>
               <div className="setup-tour-actions-cluster">
-                {primaryOpensWiki ? (
-                  <button
-                    type="button"
-                    className="btn-primary"
-                    onClick={() => void finish({ openDrawer: null, mainView: 'wiki' })}
-                  >
-                    {layout.tourCtaPrimaryLabel}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn-primary"
-                    onClick={() => void finish({ openDrawer: 'runtime', mainView: 'chat' })}
-                  >
-                    {layout.tourCtaPrimaryLabel}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => void finish({ openDrawer: primaryNeedsRuntimeDrawer ? 'runtime' : null, mainView: primaryMainView })}
+                >
+                  {layout.tourCtaPrimaryLabel}
+                </button>
                 {layout.tourCtaSecondaryLabel ? (
                   <button
                     type="button"
@@ -356,7 +348,9 @@ export function SetupRoleTour(props: {
                     onClick={() =>
                       layout.tourSecondaryBehavior === 'open_runtime_finish'
                         ? void finish({ openDrawer: 'runtime' })
-                        : setStep(4)
+                        : layout.tourSecondaryBehavior === 'open_settings_finish'
+                          ? void finish({ openDrawer: 'settings', mainView: primaryMainView })
+                          : setStep(4)
                     }
                   >
                     {layout.tourCtaSecondaryLabel}

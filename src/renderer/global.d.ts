@@ -1,5 +1,14 @@
 import type { KnowledgeGraphAnalysisRunResponse } from '@shared/knowledgeGraphAnalysis'
 import type {
+  CodebaseAnalysisSnapshot,
+  CodebaseWikiAnalysisProgress,
+  DmsConnectResult,
+  DmsConnectStartResponse,
+  DmsConnectionSummary,
+  DmsFolderSummary,
+  DmsImportRootSummary,
+  DmsSyncProgress,
+  DmsSyncRunResult,
   DomainModelVersion,
   DomainProfile,
   DeepLearnRunProgress,
@@ -7,8 +16,13 @@ import type {
   DownloadRow,
   EvidenceCard,
   HardwareSummary,
+  KbIngestFileProgress,
   KbSearchHit,
   KnowledgeGraphPayload,
+  OntologyEntityDetails,
+  OntologyQueryRequest,
+  OntologyStats,
+  OntologySubgraphPayload,
   WikiExtractTurnResult,
   PluginIntegrationReport,
   RuntimeChatProgress,
@@ -19,11 +33,13 @@ import type {
   SaveIntellijPluginZipResult,
   WikiExportZipResult,
   WikiPagePayload,
+  WikiReanalyzeProgress,
+  WikiReanalyzeResult,
   WikiTopic,
   PromptDomainRow
 } from '@shared/types'
 import type { IntegrationBridgeSelfTestResult } from '@shared/ideJourney'
-import type { ArchitectureRepositoryScanResponse } from '@shared/architectureRepository'
+import type { ArchitectureRepositoryScanRequest, ArchitectureRepositoryScanResponse } from '@shared/architectureRepository'
 import type { AppUpdateStatusPayload } from '@shared/appUpdate'
 import type {
   CodebaseFormalBundle,
@@ -55,6 +71,7 @@ type Api = {
       hfTokenSet?: boolean
       showElectronDevMainView?: boolean
       uiRole?: string
+      workspaceDensity?: string
       setupTourVersion?: number
       typographyComfort?: string
       typographyFontFamily?: string
@@ -71,7 +88,7 @@ type Api = {
   /** Pick workspace root for Architecture Repository scan (does not persist until setConfig). */
   pickArchitectureRepositoryRoot: () => Promise<string | null>
   /** Bounded scan of `architectureRepositoryScanRoot` from settings. */
-  architectureRepositoryScan: () => Promise<ArchitectureRepositoryScanResponse>
+  architectureRepositoryScan: (request?: ArchitectureRepositoryScanRequest) => Promise<ArchitectureRepositoryScanResponse>
   clearDownloadCache: () => Promise<{
     downloadsRemoved: number
     hfCacheRemoved: number
@@ -143,6 +160,10 @@ type Api = {
     rootPath: string
     displayName?: string
   }) => Promise<{ ok: true; record: CodebaseRecord } | { ok: false; error: string }>
+  codebaseFormalAddGit: (p: {
+    gitUrl: string
+    displayName?: string
+  }) => Promise<{ ok: true; record: CodebaseRecord } | { ok: false; error: string }>
   codebaseFormalUpdate: (p: {
     id: string
     displayName?: string
@@ -175,6 +196,13 @@ type Api = {
   }) => Promise<{ ok: true; run: FormalVerificationRun } | { ok: false; error: string }>
   onCodebaseFormalVerificationProgress: (
     callback: (payload: FormalVerificationProgressPayload) => void
+  ) => () => void
+  codebaseWikiAnalyze: (
+    p: { codebaseId: string }
+  ) => Promise<{ ok: true; snapshot: CodebaseAnalysisSnapshot } | { ok: false; error: string }>
+  codebaseWikiAnalysisLatest: () => Promise<CodebaseAnalysisSnapshot[]>
+  onCodebaseWikiAnalysisProgress: (
+    callback: (payload: CodebaseWikiAnalysisProgress) => void
   ) => () => void
   openExternalUrl: (url: string) => Promise<{ ok: boolean }>
   /** Save dialog: copy local/bundled Gradle ZIP when present, else download from GitHub latest. */
@@ -223,6 +251,7 @@ type Api = {
   kbIngestText: (title: string, uri: string, body: string) => Promise<unknown>
   kbIngestConversation: (conversationId: string) => Promise<unknown>
   kbIngestFile: () => Promise<unknown>
+  onKbIngestFileProgress: (callback: (payload: KbIngestFileProgress) => void) => () => void
   kbSources: () => Promise<unknown[]>
   kbSearch: (query: string, limit?: number) => Promise<string[]>
   kbSearchHits: (query: string, limit?: number) => Promise<KbSearchHit[]>
@@ -235,6 +264,13 @@ type Api = {
   kbExportWikiZip: () => Promise<WikiExportZipResult>
   kbKnowledgeGraph: () => Promise<KnowledgeGraphPayload>
   kbGraphAnalysisRun: (opts?: { ingestReport?: boolean }) => Promise<KnowledgeGraphAnalysisRunResponse>
+  ontologyStats: () => Promise<OntologyStats>
+  ontologyQuerySubgraph: (request?: OntologyQueryRequest) => Promise<OntologySubgraphPayload>
+  ontologyEntityDetails: (iri: string, limit?: number) => Promise<OntologyEntityDetails>
+  ontologyRebuild: () => Promise<{ ok: true; snapshotId: string }>
+  ontologyExport: () => Promise<Record<string, unknown>>
+  kbWikiReanalyzeRun: () => Promise<WikiReanalyzeResult>
+  onWikiReanalyzeProgress: (callback: (payload: WikiReanalyzeProgress) => void) => () => void
   kbWikiExtractTurn: (p: {
     conversationId: string
     conversationTitle?: string
@@ -255,6 +291,43 @@ type Api = {
     followUp?: string
   }) => Promise<{ ok: boolean }>
   onDeepLearnProgress: (callback: (payload: DeepLearnRunProgress) => void) => () => void
+  dmsConnectStart: (p: {
+    provider: 'google-drive' | 'onedrive' | 'sharepoint'
+    clientId: string
+    clientSecret?: string
+    redirectUri: string
+    scopes?: string[]
+    tenantId?: string
+    siteId?: string
+  }) => Promise<DmsConnectStartResponse>
+  dmsConnectComplete: (p: { state: string; code: string; displayName?: string }) => Promise<DmsConnectResult>
+  dmsConnectWithToken: (p: {
+    provider: 'google-drive' | 'onedrive' | 'sharepoint'
+    accessToken: string
+    refreshToken?: string
+    expiresAt?: number
+    displayName?: string
+    accountEmail?: string
+    tenantId?: string
+    siteId?: string
+  }) => Promise<DmsConnectResult>
+  dmsConnectionsList: () => Promise<DmsConnectionSummary[]>
+  dmsFoldersList: (connectionId: string) => Promise<DmsFolderSummary[]>
+  dmsImportRootsList: (connectionId?: string) => Promise<DmsImportRootSummary[]>
+  dmsImportStart: (p: {
+    connectionId: string
+    folderId: string
+    folderName: string
+    folderPath?: string
+  }) => Promise<{ ok: true; root: DmsImportRootSummary } | { ok: false; error: string }>
+  dmsSyncRun: (p: {
+    rootId: string
+    maxFilesPerRun?: number
+    maxBytesPerFile?: number
+    timeoutMs?: number
+  }) => Promise<DmsSyncRunResult>
+  onDmsSyncProgress: (callback: (payload: DmsSyncProgress) => void) => () => void
+  dmsDisconnect: (connectionId: string) => Promise<{ ok: boolean }>
   metricsSnapshot: (opts?: { persist?: boolean }) => Promise<unknown>
   metricsHistory: (limit?: number) => Promise<unknown[]>
   trainStart: (p: {

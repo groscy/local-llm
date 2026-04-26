@@ -12,22 +12,35 @@ import {
 } from 'react'
 import type { AppBlockingIssue } from '@shared/appBlockingIssues'
 import type {
+  CodebaseAnalysisSnapshot,
+  DmsConnectionSummary,
+  DmsFolderSummary,
+  DmsImportRootSummary,
+  DmsProvider,
+  DmsSyncProgress,
   DownloadRow,
   DomainModelVersion,
   DomainProfile,
   HardwareSummary,
   DeepLearnExplorePath,
   EvidenceCard,
+  KbIngestFileProgress,
   HfModelDetail,
   HfModelSummary,
   KbSearchHit,
   KnowledgeGraphPayload,
+  OntologyEntityDetails,
+  OntologyQueryRequest,
+  OntologyStats,
+  OntologySubgraphPayload,
   MetricsSnapshot,
   PluginIntegrationReport,
   RuntimeLoadProgress,
   RuntimeStatus,
   WikiChatHighlightTerm,
   WikiGlossaryEntry,
+  WikiReanalyzeProgress,
+  WikiReanalyzeResult,
   WikiRelatedSource,
   WikiTopic,
   WikiSourceKind,
@@ -133,6 +146,7 @@ import { MetricsTimeSeries } from './MetricsTimeSeries'
 import { IssuesPinnedWidget } from './IssuesPinnedWidget'
 import { MetricsPinnedWidget } from './MetricsPinnedWidget'
 import { KnowledgeGraphView } from './KnowledgeGraphView'
+import { OntologyView } from './OntologyView'
 import { HfModelBrowserDrawer } from './components/HfModelBrowserDrawer'
 import { buildWikiTocGroupsFromRoot, WikiArticleTocNav, type WikiTocGroup } from './WikiArticleToc'
 import { ElectronDevDashboard } from './ElectronDevDashboard'
@@ -143,12 +157,21 @@ import { CodebaseLandscapeView } from './CodebaseLandscapeView'
 import { ViewToastRegion } from './ViewToastRegion'
 import { notifyWhenBackground, setViewToastNavigation } from './viewToastBus'
 import { SetupRoleTour, type SetupTourFinishPayload } from './SetupRoleTour'
+import {
+  ActionDock,
+  ContextRail,
+  PrimaryWork,
+  RoleWorkspaceShell,
+  UnifiedCommandSurfaceButton
+} from './RoleWorkspaceShell'
 import { WIKI_KIND_LABELS, WIKI_KIND_ORDER, groupWikiTopicsByKind, wikiSidebarRowsForKind } from '@shared/wikiSourceGroups'
 import { defaultIdeJourneyChecklist, mergeIdeJourneyChecklist, type IdeJourneyChecklist } from '@shared/ideJourney'
 import {
   WELCOME_GUIDE_LATEST,
   SETUP_TOUR_LATEST,
   DEFAULT_UI_ROLE,
+  WORKSPACE_DENSITY_IDS,
+  parseWorkspaceDensity,
   parseUiRole,
   parseUiRoleOrDefault,
   roleLayout,
@@ -157,6 +180,8 @@ import {
   clampMainViewForLayout,
   type UiRole,
   type AppMainView,
+  type WorkspaceDensity,
+  type SettingsSectionId,
   type ToolDrawerId,
   UI_ROLE_CARD_BLURBS,
   UI_ROLE_IDS,
@@ -332,15 +357,7 @@ function applyTypographyComfortToDocument(id: TypographyComfortId): void {
 type MainView = AppMainView
 type ToolDrawer = 'hf' | 'runtime' | 'train' | 'metrics' | 'settings' | null
 
-type SettingsNavId =
-  | 'general'
-  | 'appearance'
-  | 'chat'
-  | 'runtime'
-  | 'integrations'
-  | 'widgets'
-  | 'data'
-  | 'maintenance'
+type SettingsNavId = SettingsSectionId
 type HfLibraryMode = 'recommended' | 'search'
 
 /** Models drawer: browse Hub vs manage installed entries. */
@@ -1147,6 +1164,14 @@ function IconDockBottom(): React.ReactElement {
   )
 }
 
+const DMS_PROVIDER_LABELS: Record<DmsProvider, string> = {
+  'google-drive': 'Google Drive',
+  onedrive: 'OneDrive',
+  sharepoint: 'SharePoint'
+}
+
+const DMS_DEFAULT_OAUTH_REDIRECT_URI = 'http://localhost:3344/callback'
+
 export default function App(): React.ReactElement {
   const [mainView, setMainView] = useState<MainView>('chat')
   const [drawer, setDrawer] = useState<ToolDrawer>(null)
@@ -1164,6 +1189,8 @@ export default function App(): React.ReactElement {
   const [welcomeModalOpen, setWelcomeModalOpen] = useState(false)
   const [setupTourOpen, setSetupTourOpen] = useState(false)
   const [uiRole, setUiRole] = useState<UiRole>(DEFAULT_UI_ROLE)
+  const [workspaceDensity, setWorkspaceDensity] = useState<WorkspaceDensity>('standard')
+  const [settingsShowAdvanced, setSettingsShowAdvanced] = useState(false)
   const [showElectronDevMainView, setShowElectronDevMainView] = useState(false)
   const roleLayoutResolved = useMemo(() => roleLayout(parseUiRoleOrDefault(uiRole)), [uiRole])
   const devShellChrome = useMemo(
@@ -1178,6 +1205,15 @@ export default function App(): React.ReactElement {
       setDrawer('train')
     }
   }, [roleLayoutResolved.mainViews])
+  const settingsAdvancedVisible = settingsShowAdvanced || roleLayoutResolved.advancedSettingsByDefault === true
+  const visibleSettingsNavItems = useMemo(() => {
+    const advancedSections = new Set<SettingsNavId>(['maintenance', 'data', 'integrations'])
+    return SETTINGS_NAV_ITEMS.filter(
+      (item) =>
+        roleLayoutResolved.settingsSections.includes(item.id) &&
+        (settingsAdvancedVisible || !advancedSections.has(item.id))
+    )
+  }, [roleLayoutResolved.settingsSections, settingsAdvancedVisible])
   const [presenceWakeConfigReady, setPresenceWakeConfigReady] = useState(false)
   const [presenceWakeOpen, setPresenceWakeOpen] = useState(false)
   const [wakeBackdropIntensity, setWakeBackdropIntensity] = useState(0)
@@ -1412,7 +1448,36 @@ export default function App(): React.ReactElement {
   const [wikiSearchHits, setWikiSearchHits] = useState<KbSearchHit[]>([])
   const [wikiSearchBusy, setWikiSearchBusy] = useState(false)
   const [wikiExportBusy, setWikiExportBusy] = useState(false)
+  const [wikiUploadBusy, setWikiUploadBusy] = useState(false)
+  const [wikiUploadProgress, setWikiUploadProgress] = useState<KbIngestFileProgress | null>(null)
+  const [wikiReanalyzeBusy, setWikiReanalyzeBusy] = useState(false)
+  const [wikiReanalyzeProgress, setWikiReanalyzeProgress] = useState<WikiReanalyzeProgress | null>(null)
+  const [wikiReanalyzeResult, setWikiReanalyzeResult] = useState<WikiReanalyzeResult | null>(null)
   const [wikiTocGroups, setWikiTocGroups] = useState<WikiTocGroup[]>([])
+  const [dmsConnections, setDmsConnections] = useState<DmsConnectionSummary[]>([])
+  const [dmsImportRoots, setDmsImportRoots] = useState<DmsImportRootSummary[]>([])
+  const [dmsSelectedProvider, setDmsSelectedProvider] = useState<DmsProvider>('google-drive')
+  const [dmsConnectFormOpen, setDmsConnectFormOpen] = useState(false)
+  const [dmsConnectMethod, setDmsConnectMethod] = useState<'oauth2' | 'token'>('oauth2')
+  const [dmsAccessTokenDraft, setDmsAccessTokenDraft] = useState('')
+  const [dmsOauthClientIdDraft, setDmsOauthClientIdDraft] = useState('')
+  const [dmsOauthClientSecretDraft, setDmsOauthClientSecretDraft] = useState('')
+  const [dmsOauthRedirectUriDraft, setDmsOauthRedirectUriDraft] = useState('')
+  const [dmsOauthScopesDraft, setDmsOauthScopesDraft] = useState('')
+  const [dmsOauthTenantIdDraft, setDmsOauthTenantIdDraft] = useState('')
+  const [dmsOauthSiteIdDraft, setDmsOauthSiteIdDraft] = useState('')
+  const [dmsOauthStateDraft, setDmsOauthStateDraft] = useState('')
+  const [dmsOauthCodeDraft, setDmsOauthCodeDraft] = useState('')
+  const [dmsOauthCallbackUrlDraft, setDmsOauthCallbackUrlDraft] = useState('')
+  const [dmsConnectDisplayName, setDmsConnectDisplayName] = useState('')
+  const [dmsConnecting, setDmsConnecting] = useState(false)
+  const [dmsFolderOptions, setDmsFolderOptions] = useState<DmsFolderSummary[]>([])
+  const [dmsFoldersBusyForConnectionId, setDmsFoldersBusyForConnectionId] = useState<string | null>(null)
+  const [dmsSelectedConnectionId, setDmsSelectedConnectionId] = useState<string | null>(null)
+  const [dmsSelectedFolderId, setDmsSelectedFolderId] = useState('')
+  const [dmsSyncBusyRootId, setDmsSyncBusyRootId] = useState<string | null>(null)
+  const [dmsSyncProgress, setDmsSyncProgress] = useState<DmsSyncProgress | null>(null)
+  const [dmsSyncStatusLine, setDmsSyncStatusLine] = useState<string | null>(null)
   const wikiSearchSeqRef = useRef(0)
   const wikiMainSearchInputRef = useRef<HTMLInputElement>(null)
   const [kgPayload, setKgPayload] = useState<KnowledgeGraphPayload | null>(null)
@@ -1423,6 +1488,12 @@ export default function App(): React.ReactElement {
   const [kgAnalysisMarkdown, setKgAnalysisMarkdown] = useState<string | null>(null)
   const [kgAnalysisIngestedId, setKgAnalysisIngestedId] = useState<string | null>(null)
   const [kgAnalysisResult, setKgAnalysisResult] = useState<KnowledgeGraphAnalysisResult | null>(null)
+  const [ontologyPayload, setOntologyPayload] = useState<OntologySubgraphPayload | null>(null)
+  const [ontologyStats, setOntologyStats] = useState<OntologyStats | null>(null)
+  const [ontologyLoading, setOntologyLoading] = useState(false)
+  const [ontologyDetails, setOntologyDetails] = useState<OntologyEntityDetails | null>(null)
+  const [ontologyDetailLoading, setOntologyDetailLoading] = useState(false)
+  const [codebaseAnalysisSnapshots, setCodebaseAnalysisSnapshots] = useState<CodebaseAnalysisSnapshot[]>([])
 
   const [metricsBundle, setMetricsBundle] = useState<{
     snapshot: unknown
@@ -1522,6 +1593,9 @@ export default function App(): React.ReactElement {
   const [chatHistoryMaxMessagesDraft, setChatHistoryMaxMessagesDraft] = useState('80')
   const [chatDomainEnhancement, setChatDomainEnhancement] = useState(false)
   const [llamaRagGrounding, setLlamaRagGrounding] = useState(false)
+  const [ontologyEnabled, setOntologyEnabled] = useState(true)
+  const [ontologyMaxTriplesDraft, setOntologyMaxTriplesDraft] = useState('40')
+  const [ontologyContextTokensDraft, setOntologyContextTokensDraft] = useState('512')
   const [llamaTemperatureDraft, setLlamaTemperatureDraft] = useState('0.8')
   const [llamaTopPDraft, setLlamaTopPDraft] = useState('0.95')
   const [llamaFrequencyPenaltyDraft, setLlamaFrequencyPenaltyDraft] = useState('0')
@@ -1967,6 +2041,25 @@ export default function App(): React.ReactElement {
     }
   }, [])
 
+  const loadDmsConnectionsAndRoots = useCallback(async () => {
+    try {
+      const [connections, roots] = await Promise.all([
+        window.api.dmsConnectionsList(),
+        window.api.dmsImportRootsList()
+      ])
+      setDmsConnections(connections)
+      setDmsImportRoots(roots)
+      if (connections.length === 0) {
+        setDmsSelectedConnectionId(null)
+      } else if (!connections.some((c) => c.id === dmsSelectedConnectionId)) {
+        setDmsSelectedConnectionId(connections[0]?.id ?? null)
+      }
+    } catch {
+      setDmsConnections([])
+      setDmsImportRoots([])
+    }
+  }, [dmsSelectedConnectionId])
+
   const loadWiki = useCallback(async () => {
     setWikiTopics(await window.api.kbWikiTopics())
     try {
@@ -1974,8 +2067,9 @@ export default function App(): React.ReactElement {
     } catch {
       setWikiHighlightTerms([])
     }
+    await loadDmsConnectionsAndRoots()
     await refreshPromptDomains()
-  }, [refreshPromptDomains])
+  }, [refreshPromptDomains, loadDmsConnectionsAndRoots])
 
   useEffect(() => {
     if (drawer === 'settings' && settingsNav === 'chat') {
@@ -2034,6 +2128,32 @@ export default function App(): React.ReactElement {
   }, [mainView, wikiTitle])
 
   useEffect(() => {
+    const off = window.api.onDmsSyncProgress((ev) => {
+      setDmsSyncProgress(ev)
+      if (ev.kind === 'started') {
+        setDmsSyncStatusLine(ev.message)
+      } else if (ev.kind === 'scan' || ev.kind === 'file' || ev.kind === 'analysis') {
+        setDmsSyncStatusLine(ev.message)
+      } else if (ev.kind === 'done') {
+        setDmsSyncStatusLine(
+          `Sync done: ${ev.importedCount} imported, ${ev.updatedCount} updated, ${ev.removedCount} removed.`
+        )
+      } else if (ev.kind === 'error') {
+        setDmsSyncStatusLine(ev.message)
+      }
+    })
+    return () => off()
+  }, [])
+
+  useEffect(() => {
+    setDmsOauthStateDraft('')
+    setDmsOauthCodeDraft('')
+    setDmsOauthCallbackUrlDraft('')
+    setDmsOauthTenantIdDraft('')
+    setDmsOauthSiteIdDraft('')
+  }, [dmsSelectedProvider])
+
+  useEffect(() => {
     const q = ragQuery.trim()
     if (!q) {
       setRagSuggestHits([])
@@ -2080,6 +2200,69 @@ export default function App(): React.ReactElement {
     }
   }, [])
 
+  const loadOntology = useCallback(async (request?: OntologyQueryRequest) => {
+    setOntologyLoading(true)
+    try {
+      const [graph, stats] = await Promise.all([
+        window.api.ontologyQuerySubgraph(request),
+        window.api.ontologyStats()
+      ])
+      setOntologyPayload(graph)
+      setOntologyStats(stats)
+    } catch {
+      setOntologyPayload(null)
+      setOntologyStats(null)
+    } finally {
+      setOntologyLoading(false)
+    }
+  }, [])
+
+  const loadOntologyEntityDetails = useCallback(async (iri: string) => {
+    setOntologyDetailLoading(true)
+    try {
+      const d = await window.api.ontologyEntityDetails(iri, 80)
+      setOntologyDetails(d)
+    } catch {
+      setOntologyDetails(null)
+    } finally {
+      setOntologyDetailLoading(false)
+    }
+  }, [])
+
+  const rebuildOntologySnapshot = useCallback(async () => {
+    try {
+      await window.api.ontologyRebuild()
+      await loadOntology()
+    } catch {
+      /* ignore */
+    }
+  }, [loadOntology])
+
+  const exportOntologyJsonLd = useCallback(async () => {
+    try {
+      const payload = await window.api.ontologyExport()
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      const href = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = href
+      a.download = `ontology-export-${Date.now()}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(href)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const loadCodebaseAnalyses = useCallback(async () => {
+    try {
+      setCodebaseAnalysisSnapshots(await window.api.codebaseWikiAnalysisLatest())
+    } catch {
+      setCodebaseAnalysisSnapshots([])
+    }
+  }, [])
+
   const runKnowledgeGraphAnalysis = useCallback(
     async (opts: { ingestReport: boolean }) => {
       setKgAnalysisBusy(true)
@@ -2119,8 +2302,12 @@ export default function App(): React.ReactElement {
   useEffect(() => {
     if (mainView === 'knowledgeGraph' || mainView === 'architectureRepository') {
       void loadKnowledgeGraph()
+      void loadCodebaseAnalyses()
     }
-  }, [mainView, wikiTopics.length, loadKnowledgeGraph])
+    if (mainView === 'ontology') {
+      void loadOntology()
+    }
+  }, [mainView, wikiTopics.length, loadKnowledgeGraph, loadCodebaseAnalyses, loadOntology])
 
   useEffect(() => {
     if (!wikiTitle.trim()) setWikiTocGroups([])
@@ -2147,6 +2334,27 @@ export default function App(): React.ReactElement {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [wikiDeletePending])
+
+  useEffect(() => {
+    if (typeof window.api.onKbIngestFileProgress !== 'function') return
+    return window.api.onKbIngestFileProgress((payload) => {
+      setWikiUploadProgress(payload)
+      if (payload.kind === 'done' || payload.kind === 'error' || payload.kind === 'cancelled') {
+        setWikiUploadBusy(false)
+      }
+    })
+  }, [])
+
+  useEffect(() => {
+    if (typeof window.api.onWikiReanalyzeProgress !== 'function') return
+    return window.api.onWikiReanalyzeProgress((payload) => {
+      setWikiReanalyzeProgress(payload)
+      if (payload.kind === 'done') {
+        setWikiReanalyzeBusy(false)
+        setWikiReanalyzeResult(payload.summary)
+      }
+    })
+  }, [])
 
   const refreshRuntimeStatus = useCallback(async () => {
     const s = await window.api.runtimeStatus()
@@ -2206,9 +2414,11 @@ export default function App(): React.ReactElement {
   }, [refreshRunDrawerQuick, refreshLocalModelFiles])
 
   const openSettings = useCallback((section: SettingsNavId = 'general') => {
-    setSettingsNav(section)
+    const allowed = visibleSettingsNavItems.map((x) => x.id)
+    const target = allowed.includes(section) ? section : (allowed[0] ?? 'general')
+    setSettingsNav(target)
     setDrawer('settings')
-  }, [])
+  }, [visibleSettingsNavItems])
 
   const openTrainChatForAugment = useCallback(() => {
     setMainView('chat')
@@ -2303,9 +2513,11 @@ export default function App(): React.ReactElement {
     async (p: SetupTourFinishPayload) => {
       const lay = roleLayout(p.uiRole)
       const pin = lay.defaultPinnedWidgets ?? {}
+      const density = lay.defaultDensity
       const r = await window.api.setConfig({
         uiRole: p.uiRole,
         colorScheme: p.colorScheme,
+        workspaceDensity: density,
         setupTourVersion: SETUP_TOUR_LATEST,
         welcomeGuideVersion: WELCOME_GUIDE_LATEST,
         ...pin
@@ -2315,6 +2527,7 @@ export default function App(): React.ReactElement {
         return
       }
       setUiRole(p.uiRole)
+      setWorkspaceDensity(density)
       setColorScheme(p.colorScheme)
       applyColorSchemeToDocument(p.colorScheme)
       setSetupTourOpen(false)
@@ -2831,6 +3044,7 @@ export default function App(): React.ReactElement {
       else if (c.runtimeKind === 'ollama' || c.runtimeKind === 'llamacpp') setRuntimeKind(c.runtimeKind)
       setResumeRuntimeOnLaunch(c.resumeRuntimeOnLaunch === true)
       setUiRole(parseUiRoleOrDefault(c.uiRole))
+      setWorkspaceDensity(parseWorkspaceDensity(c.workspaceDensity))
       setShowElectronDevMainView(c.showElectronDevMainView === true)
       const stv = typeof c.setupTourVersion === 'number' ? c.setupTourVersion : 0
       const needSetupTour = stv < SETUP_TOUR_LATEST
@@ -2866,6 +3080,17 @@ export default function App(): React.ReactElement {
       }
       setChatDomainEnhancement(c.chatDomainEnhancement === true)
       setLlamaRagGrounding(c.llamaRagGrounding === true)
+      setOntologyEnabled(c.ontologyEnabled !== false)
+      if (typeof c.ontologyMaxTriples === 'number' && Number.isFinite(c.ontologyMaxTriples)) {
+        setOntologyMaxTriplesDraft(String(Math.min(200, Math.max(5, Math.floor(c.ontologyMaxTriples)))))
+      } else {
+        setOntologyMaxTriplesDraft('40')
+      }
+      if (typeof c.ontologyContextTokens === 'number' && Number.isFinite(c.ontologyContextTokens)) {
+        setOntologyContextTokensDraft(String(Math.min(3000, Math.max(64, Math.floor(c.ontologyContextTokens)))))
+      } else {
+        setOntologyContextTokensDraft('512')
+      }
       if (typeof c.llamaTemperature === 'number') setLlamaTemperatureDraft(String(c.llamaTemperature))
       if (typeof c.llamaTopP === 'number') setLlamaTopPDraft(String(c.llamaTopP))
       if (typeof c.llamaFrequencyPenalty === 'number') {
@@ -2919,6 +3144,21 @@ export default function App(): React.ReactElement {
     if (next !== mainView) setMainView(next)
   }, [mainView, roleLayoutResolved, devShellChrome])
 
+  useEffect(() => {
+    const allowed = visibleSettingsNavItems.map((x) => x.id)
+    if (allowed.length === 0) return
+    if (!allowed.includes(settingsNav)) setSettingsNav(allowed[0] ?? 'general')
+  }, [visibleSettingsNavItems, settingsNav])
+
+  useEffect(() => {
+    // Each role starts with its preferred density; users can still override from Settings.
+    setWorkspaceDensity(roleLayoutResolved.defaultDensity)
+  }, [roleLayoutResolved.defaultDensity, uiRole])
+
+  useEffect(() => {
+    setSettingsShowAdvanced(roleLayoutResolved.advancedSettingsByDefault === true)
+  }, [roleLayoutResolved.advancedSettingsByDefault, uiRole])
+
   useLayoutEffect(() => {
     setViewToastNavigation({ activeMainView: mainView, openDrawer: drawer })
   }, [mainView, drawer])
@@ -2931,6 +3171,11 @@ export default function App(): React.ReactElement {
       wordSpacingEm: typographyWordSpacingEm
     })
   }, [typographyFontFamily, typographyLineHeightFactor, typographyLetterSpacingExtraEm, typographyWordSpacingEm])
+
+  useEffect(() => {
+    if (workspaceDensity === 'standard') document.documentElement.removeAttribute('data-workspace-density')
+    else document.documentElement.setAttribute('data-workspace-density', workspaceDensity)
+  }, [workspaceDensity])
 
   useEffect(() => {
     const onVis = (): void => {
@@ -4735,6 +4980,203 @@ export default function App(): React.ReactElement {
     }
   }
 
+  async function connectDmsWithToken(): Promise<void> {
+    if (!dmsAccessTokenDraft.trim()) {
+      setErr('Enter an access token to connect a DMS provider.')
+      return
+    }
+    setDmsConnecting(true)
+    setErr(null)
+    try {
+      const res = await window.api.dmsConnectWithToken({
+        provider: dmsSelectedProvider,
+        accessToken: dmsAccessTokenDraft.trim(),
+        displayName: dmsConnectDisplayName.trim() || undefined
+      })
+      if (!res.ok) {
+        setErr(res.error)
+        return
+      }
+      setDmsAccessTokenDraft('')
+      setDmsConnectDisplayName('')
+      setDmsConnectFormOpen(false)
+      await loadDmsConnectionsAndRoots()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setDmsConnecting(false)
+    }
+  }
+
+  function parseDmsScopes(raw: string): string[] {
+    return raw
+      .split(/[,\n]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+  }
+
+  function parseOauthCallbackDraft(raw: string): { code?: string; state?: string } {
+    const t = raw.trim()
+    if (!t) return {}
+    try {
+      const u = new URL(t)
+      const code = u.searchParams.get('code')?.trim()
+      const state = u.searchParams.get('state')?.trim()
+      return {
+        ...(code ? { code } : {}),
+        ...(state ? { state } : {})
+      }
+    } catch {
+      return {}
+    }
+  }
+
+  async function startDmsOAuthConnect(): Promise<void> {
+    if (!dmsOauthClientIdDraft.trim()) {
+      setErr('Client ID is required for OAuth2 connect.')
+      return
+    }
+    setDmsConnecting(true)
+    setErr(null)
+    try {
+      const res = await window.api.dmsConnectStart({
+        provider: dmsSelectedProvider,
+        clientId: dmsOauthClientIdDraft.trim(),
+        clientSecret: dmsOauthClientSecretDraft.trim() || undefined,
+        redirectUri: dmsOauthRedirectUriDraft.trim() || DMS_DEFAULT_OAUTH_REDIRECT_URI,
+        scopes: dmsOauthScopesDraft.trim() ? parseDmsScopes(dmsOauthScopesDraft) : undefined,
+        tenantId: dmsOauthTenantIdDraft.trim() || undefined,
+        siteId: dmsOauthSiteIdDraft.trim() || undefined
+      })
+      if (!res.ok) {
+        setErr(res.error)
+        return
+      }
+      setDmsOauthStateDraft(res.state)
+      setDmsSyncStatusLine('OAuth started. Complete consent, then paste callback URL and press Complete OAuth2.')
+      await window.api.openExternalUrl(res.authUrl)
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setDmsConnecting(false)
+    }
+  }
+
+  async function completeDmsOAuthConnect(): Promise<void> {
+    const parsed = parseOauthCallbackDraft(dmsOauthCallbackUrlDraft)
+    const code = (parsed.code ?? dmsOauthCodeDraft).trim()
+    const state = (parsed.state ?? dmsOauthStateDraft).trim()
+    if (!code || !state) {
+      setErr('OAuth completion requires both code and state.')
+      return
+    }
+    setDmsConnecting(true)
+    setErr(null)
+    try {
+      const res = await window.api.dmsConnectComplete({
+        code,
+        state,
+        displayName: dmsConnectDisplayName.trim() || undefined
+      })
+      if (!res.ok) {
+        setErr(res.error)
+        return
+      }
+      setDmsOauthCodeDraft('')
+      setDmsOauthStateDraft('')
+      setDmsOauthCallbackUrlDraft('')
+      setDmsConnectDisplayName('')
+      setDmsConnectFormOpen(false)
+      await loadDmsConnectionsAndRoots()
+      setDmsSyncStatusLine('OAuth connection created.')
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setDmsConnecting(false)
+    }
+  }
+
+  async function loadDmsFolders(connectionId: string): Promise<void> {
+    setDmsFoldersBusyForConnectionId(connectionId)
+    setErr(null)
+    try {
+      const folders = await window.api.dmsFoldersList(connectionId)
+      setDmsFolderOptions(folders)
+      if (folders.length > 0) {
+        setDmsSelectedFolderId((prev) => prev || folders[0].id)
+      }
+    } catch (e) {
+      setErr(String(e))
+      setDmsFolderOptions([])
+    } finally {
+      setDmsFoldersBusyForConnectionId(null)
+    }
+  }
+
+  async function registerDmsFolderImport(): Promise<void> {
+    if (!dmsSelectedConnectionId || !dmsSelectedFolderId) {
+      setErr('Choose a DMS connection and folder first.')
+      return
+    }
+    const folder = dmsFolderOptions.find((f) => f.id === dmsSelectedFolderId)
+    if (!folder) {
+      setErr('Choose a valid folder to import.')
+      return
+    }
+    setErr(null)
+    const res = await window.api.dmsImportStart({
+      connectionId: dmsSelectedConnectionId,
+      folderId: folder.id,
+      folderName: folder.name,
+      folderPath: folder.path
+    })
+    if (!res.ok) {
+      setErr(res.error)
+      return
+    }
+    await loadDmsConnectionsAndRoots()
+    setDmsSyncStatusLine(`Registered folder ${folder.name}. Click Sync now to ingest files.`)
+  }
+
+  async function runDmsManualSync(rootId: string): Promise<void> {
+    setDmsSyncBusyRootId(rootId)
+    setErr(null)
+    setDmsSyncStatusLine('Running DMS sync…')
+    try {
+      const res = await window.api.dmsSyncRun({ rootId })
+      if (!res.ok) {
+        setErr(res.error)
+        setDmsSyncStatusLine(res.error)
+        return
+      }
+      setDmsSyncStatusLine(
+        `Sync complete: ${res.importedCount} imported, ${res.updatedCount} updated, ${res.removedCount} removed.`
+      )
+      await loadWiki()
+      void loadKnowledgeGraph({ keepAnalysis: true })
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setDmsSyncBusyRootId(null)
+    }
+  }
+
+  async function disconnectDmsConnection(connectionId: string): Promise<void> {
+    setErr(null)
+    try {
+      const ok = await window.api.dmsDisconnect(connectionId)
+      if (!ok.ok) {
+        setErr('Could not disconnect DMS connection.')
+        return
+      }
+      await loadDmsConnectionsAndRoots()
+      setDmsFolderOptions([])
+      setDmsSelectedFolderId('')
+    } catch (e) {
+      setErr(String(e))
+    }
+  }
+
   async function saveCurrentChatToKb(): Promise<void> {
     if (!convId) return
     setSaveChatKbBusy(true)
@@ -4827,6 +5269,70 @@ export default function App(): React.ReactElement {
     }
   }
 
+  async function runWikiReanalysisAll(): Promise<void> {
+    if (typeof window.api.kbWikiReanalyzeRun !== 'function') {
+      setErr('Wiki reanalysis is unavailable. Rebuild the app so preload includes kbWikiReanalyzeRun.')
+      return
+    }
+    if (wikiReanalyzeBusy) return
+    setErr(null)
+    setWikiReanalyzeBusy(true)
+    setWikiReanalyzeProgress(null)
+    setWikiReanalyzeResult(null)
+    try {
+      const result = await window.api.kbWikiReanalyzeRun()
+      setWikiReanalyzeResult(result)
+      if (!result.ok) {
+        setErr(result.error ?? 'Wiki reanalysis failed.')
+        return
+      }
+      await loadWiki()
+      if (wikiSelectedId) {
+        try {
+          await openWikiPage(wikiSelectedId)
+        } catch {
+          setWikiSelectedId(null)
+          setWikiTitle('')
+          setWikiBody('')
+          setWikiGlossary([])
+          setWikiRelated([])
+        }
+      }
+      void loadKnowledgeGraph({ keepAnalysis: true })
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setWikiReanalyzeBusy(false)
+    }
+  }
+
+  async function addWikiDocumentWithProgress(): Promise<void> {
+    if (wikiUploadBusy) return
+    setErr(null)
+    setWikiUploadBusy(true)
+    setWikiUploadProgress(null)
+    try {
+      await window.api.kbIngestFile()
+      await loadWiki()
+      notifyWhenBackground({
+        origin: 'wiki',
+        variant: 'success',
+        title: 'Wiki updated',
+        message: 'A new document was added to your library.',
+        action: {
+          label: 'Open wiki',
+          onClick: () => {
+            setMainView('wiki')
+            void loadWiki()
+          }
+        }
+      })
+    } catch (e) {
+      setWikiUploadBusy(false)
+      setErr(String(e))
+    }
+  }
+
   async function confirmDeleteWikiEntry(): Promise<void> {
     if (!wikiDeletePending) return
     const { id } = wikiDeletePending
@@ -4903,6 +5409,8 @@ export default function App(): React.ReactElement {
         ? 'Knowledge wiki'
         : mainView === 'knowledgeGraph'
           ? 'Knowledge graph'
+          : mainView === 'ontology'
+            ? 'Runtime ontology'
           : mainView === 'codebaseLandscape'
             ? 'Codebase landscape'
             : mainView === 'architectureRepository'
@@ -4917,6 +5425,8 @@ export default function App(): React.ReactElement {
         ? 'Browse sources built from files you ingest. Link snippets in chat.'
         : mainView === 'knowledgeGraph'
           ? 'Sources, chunks, wiki pages, and weak related links. Pan and zoom the canvas; use Layers for toggles and analysis.'
+          : mainView === 'ontology'
+            ? 'Runtime-generated entity relationships persisted across app runs, with provenance and confidence.'
           : mainView === 'codebaseLandscape'
             ? 'Implementation roots you track here, with tool-backed formal verification history per tree.'
             : mainView === 'architectureRepository'
@@ -4924,6 +5434,41 @@ export default function App(): React.ReactElement {
               : mainView === 'train'
                 ? 'Fine-tune from knowledge or JSONL; jobs write into finetunes for Run.'
                 : ''
+  const workspaceStatusState: 'Ready' | 'Running' | 'Blocked' | 'Needs input' = runtimeStarting
+    ? 'Running'
+    : runtimeOn
+      ? 'Ready'
+      : modelPath.trim().length === 0
+        ? 'Needs input'
+        : 'Blocked'
+  const workspaceStatusHint = runtimeStarting
+    ? runtimeLoadProgress?.message ?? 'Model is starting.'
+    : runtimeOn
+      ? 'Model is running and ready.'
+      : modelPath.trim().length === 0
+        ? 'Choose a model to continue.'
+        : 'Start the model from Run or the play button.'
+  const nextBestActionLabel = runtimeOn ? 'Open task command' : 'Start runtime'
+  const nextBestActionTitle = runtimeOn
+    ? 'Open settings to switch role, density, or tools.'
+    : 'Open Run panel and start your selected model.'
+  const actionDockItems = useMemo(
+    () => [
+      { id: 'run', label: 'Run', icon: 'fa-play', onClick: () => setDrawer('runtime') },
+      { id: 'command', label: 'Command', icon: 'fa-terminal', onClick: () => openSettings('general') },
+      { id: 'adjust', label: 'Adjust', icon: 'fa-sliders', onClick: () => openSettings('appearance') },
+      {
+        id: 'context',
+        label: 'Context',
+        icon: 'fa-book-open',
+        onClick: () => {
+          setMainView('wiki')
+          void loadWiki()
+        }
+      }
+    ],
+    [openSettings, loadWiki]
+  )
   const integrationPortLive = (() => {
     const n = parseInt(integrationPortDraft.trim(), 10)
     return Number.isFinite(n) ? clampIntegrationPort(n) : INTEGRATION_PORT_DEFAULT
@@ -5085,6 +5630,27 @@ export default function App(): React.ReactElement {
     />
   )
 
+  const openRoleTask = useCallback((task: (typeof roleLayoutResolved.taskNav)[number]) => {
+    if (task.drawer === 'settings') {
+      openSettings(task.settingsSection ?? 'general')
+      return
+    }
+    if (task.drawer) {
+      setDrawer(task.drawer)
+      return
+    }
+    if (!task.mainView) return
+    if (task.mainView === 'train') {
+      openTrainSurface()
+      return
+    }
+    setDrawer(null)
+    setMainView(task.mainView)
+    if (task.mainView === 'wiki') void loadWiki()
+    if (task.mainView === 'knowledgeGraph') void loadKnowledgeGraph()
+    if (task.mainView === 'ontology') void loadOntology()
+  }, [openSettings, openTrainSurface, loadKnowledgeGraph, loadOntology, loadWiki])
+
   return (
     <>
       <ViewToastRegion />
@@ -5131,108 +5697,33 @@ export default function App(): React.ReactElement {
           />
         </div>
         <nav className="nav-main">
-          {roleLayoutResolved.mainViews.map((id) => {
-            if (id === 'chat') {
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className={`nav-btn ${mainView === 'chat' ? 'active' : ''}`}
-                  onClick={() => setMainView('chat')}
-                  title="Chat"
-                >
-                  <IconChat />
-                  Chat
-                </button>
-              )
-            }
-            if (id === 'wiki') {
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className={`nav-btn wiki ${mainView === 'wiki' ? 'active' : ''}`}
-                  onClick={() => {
-                    setMainView('wiki')
-                    void loadWiki()
-                  }}
-                  title="Wiki"
-                >
-                  <IconBook />
-                  Wiki
-                </button>
-              )
-            }
-            if (id === 'architectureRepository') {
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className={`nav-btn ${mainView === 'architectureRepository' ? 'active' : ''}`}
-                  onClick={() => setMainView('architectureRepository')}
-                  title="Repo — TOGAF-aligned Architecture Repository (Software architect)"
-                >
-                  <i className="fa-solid fa-sitemap" aria-hidden />
-                  Repo
-                </button>
-              )
-            }
-            if (id === 'train') {
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className={`nav-btn ${mainView === 'train' ? 'active' : ''}`}
-                  onClick={() => openTrainSurface()}
-                  title="Training — fine-tune local models"
-                >
-                  <IconFlask />
-                  Train
-                </button>
-              )
-            }
-            if (id === 'knowledgeGraph') {
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className={`nav-btn ${mainView === 'knowledgeGraph' ? 'active' : ''}`}
-                  onClick={() => {
-                    setMainView('knowledgeGraph')
-                    void loadKnowledgeGraph()
-                  }}
-                  title="Knowledge graph — sources, chunks, wiki pages, related links"
-                >
-                  <i className="fa-solid fa-diagram-project" aria-hidden />
-                  Graph
-                </button>
-              )
-            }
-            if (id === 'codebaseLandscape') {
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className={`nav-btn ${mainView === 'codebaseLandscape' ? 'active' : ''}`}
-                  onClick={() => setMainView('codebaseLandscape')}
-                  title="Codebases — registered roots and formal verification results"
-                >
-                  <i className="fa-solid fa-layer-group" aria-hidden />
-                  Codebases
-                </button>
-              )
-            }
-            return null
+          {roleLayoutResolved.taskNav.map((task) => {
+            const active =
+              (task.mainView != null && mainView === task.mainView) ||
+              (task.drawer != null && drawer === task.drawer) ||
+              (task.drawer === 'settings' && drawer === 'settings')
+            return (
+              <button
+                key={task.id}
+                type="button"
+                className={`nav-btn ${active ? 'active' : ''}`}
+                onClick={() => openRoleTask(task)}
+                title={task.hint}
+              >
+                <i className={`fa-solid ${task.icon}`} aria-hidden />
+                {task.label}
+              </button>
+            )
           })}
-          {devShellChrome ? (
+          {devShellChrome && !roleLayoutResolved.taskNav.some((task) => task.mainView === 'electronDev') ? (
             <button
               type="button"
               className={`nav-btn ${mainView === 'electronDev' ? 'active' : ''}`}
               onClick={() => setMainView('electronDev')}
-              title="Developer hub — bridge, shortcuts, checklist (Software developer role, or unpackaged build)"
+              title="Developer hub — bridge, shortcuts, checklist"
             >
               <i className="fa-solid fa-code" aria-hidden />
-              Hub
+              Develop
             </button>
           ) : null}
         </nav>
@@ -5283,8 +5774,8 @@ export default function App(): React.ReactElement {
         </nav>
       </aside>
 
-      <div className={`shell-content shell-content--pinned-${pinnedWidgetsSide}`}>
-        <aside
+      <RoleWorkspaceShell className={`shell-content shell-content--pinned-${pinnedWidgetsSide}`}>
+        <ContextRail
           className={[
             'pinned-widgets-aside',
             pinnedBarResizing || pinnedWidgetSplitResizing ? 'pinned-widgets-aside--resizing' : '',
@@ -5609,12 +6100,18 @@ export default function App(): React.ReactElement {
             />
             </>
           )}
-          </aside>
-        <div className="main-column">
+          </ContextRail>
+        <PrimaryWork className="main-column">
         <header className="top-bar">
           <div className="top-bar-leading">
             <div className="top-bar-title">{topTitle}</div>
             {topSub ? <div className="top-bar-sub">{topSub}</div> : null}
+            <div className="workspace-status-row" role="status" aria-live="polite">
+              <span className={`workspace-status-chip workspace-status-chip--${workspaceStatusState.toLowerCase().replace(' ', '-')}`}>
+                {workspaceStatusState}
+              </span>
+              <span className="workspace-status-hint">{workspaceStatusHint}</span>
+            </div>
           </div>
           <div className="top-bar-runtime-wrap" aria-label="Model and runtime">
             <div className="top-bar-runtime-row">
@@ -5770,8 +6267,17 @@ export default function App(): React.ReactElement {
             >
               <span className={`runtime-pill-dot ${runtimeOn ? 'on' : ''}`} aria-hidden />
             </div>
+            <UnifiedCommandSurfaceButton
+              label={nextBestActionLabel}
+              title={nextBestActionTitle}
+              onClick={() => {
+                if (runtimeOn) openSettings('general')
+                else setDrawer('runtime')
+              }}
+            />
           </div>
         </header>
+        <ActionDock items={actionDockItems} />
 
         {err && <div className="err-banner">{err}</div>}
 
@@ -6685,30 +7191,258 @@ export default function App(): React.ReactElement {
                     <button
                       type="button"
                       className="btn-ingest"
-                      onClick={() => {
-                        void window.api
-                          .kbIngestFile()
-                          .then(async () => {
-                            await loadWiki()
-                            notifyWhenBackground({
-                              origin: 'wiki',
-                              variant: 'success',
-                              title: 'Wiki updated',
-                              message: 'A new document was added to your library.',
-                              action: {
-                                label: 'Open wiki',
-                                onClick: () => {
-                                  setMainView('wiki')
-                                  void loadWiki()
-                                }
-                              }
-                            })
-                          })
-                          .catch((e) => setErr(String(e)))
-                      }}
+                      disabled={wikiUploadBusy}
+                      onClick={() => void addWikiDocumentWithProgress()}
                     >
-                      + Add document
+                      {wikiUploadBusy ? 'Uploading…' : '+ Add document'}
                     </button>
+                    <div className="dms-quick-panel">
+                      <p className="dms-panel-title">Import from DMS</p>
+                      <div className="dms-inline-fields dms-inline-fields--row">
+                        <select
+                          className="dms-select"
+                          value={dmsSelectedProvider}
+                          onChange={(e) => setDmsSelectedProvider(e.target.value as DmsProvider)}
+                        >
+                          {(['google-drive', 'onedrive', 'sharepoint'] as DmsProvider[]).map((p) => (
+                            <option key={p} value={p}>
+                              {DMS_PROVIDER_LABELS[p]}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => setDmsConnectFormOpen((v) => !v)}
+                        >
+                          {dmsConnectFormOpen ? 'Hide connection details' : 'Connect new'}
+                        </button>
+                      </div>
+                      {dmsConnectFormOpen ? (
+                        <>
+                          <div className="dms-connect-methods" role="radiogroup" aria-label="DMS connection method">
+                            <button
+                              type="button"
+                              className={`btn-secondary dms-method-btn ${dmsConnectMethod === 'oauth2' ? 'active' : ''}`}
+                              onClick={() => setDmsConnectMethod('oauth2')}
+                              aria-pressed={dmsConnectMethod === 'oauth2'}
+                            >
+                              OAuth2
+                            </button>
+                            <button
+                              type="button"
+                              className={`btn-secondary dms-method-btn ${dmsConnectMethod === 'token' ? 'active' : ''}`}
+                              onClick={() => setDmsConnectMethod('token')}
+                              aria-pressed={dmsConnectMethod === 'token'}
+                            >
+                              Access token
+                            </button>
+                          </div>
+                          <div className="dms-inline-fields">
+                            <input
+                              type="text"
+                              className="dms-input"
+                              placeholder="Connection name (optional, advanced)"
+                              value={dmsConnectDisplayName}
+                              onChange={(e) => setDmsConnectDisplayName(e.target.value)}
+                            />
+                          </div>
+                          {dmsConnectMethod === 'token' ? (
+                        <div className="dms-inline-fields">
+                          <input
+                            type="password"
+                            className="dms-input"
+                            placeholder="Access token"
+                            value={dmsAccessTokenDraft}
+                            onChange={(e) => setDmsAccessTokenDraft(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={dmsConnecting}
+                            onClick={() => void connectDmsWithToken()}
+                          >
+                            {dmsConnecting ? 'Connecting…' : 'Connect with token'}
+                          </button>
+                        </div>
+                          ) : (
+                            <div className="dms-inline-fields">
+                              <input
+                                type="text"
+                                className="dms-input"
+                                placeholder="OAuth client ID (required)"
+                                value={dmsOauthClientIdDraft}
+                                onChange={(e) => setDmsOauthClientIdDraft(e.target.value)}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                disabled={dmsConnecting}
+                                onClick={() => void startDmsOAuthConnect()}
+                              >
+                                {dmsConnecting ? 'Starting…' : 'Start OAuth2'}
+                              </button>
+                              <input
+                                type="text"
+                                className="dms-input"
+                                placeholder="Paste callback URL"
+                                value={dmsOauthCallbackUrlDraft}
+                                onChange={(e) => setDmsOauthCallbackUrlDraft(e.target.value)}
+                              />
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                disabled={dmsConnecting}
+                                onClick={() => void completeDmsOAuthConnect()}
+                              >
+                                {dmsConnecting ? 'Completing…' : 'Complete OAuth2'}
+                              </button>
+                              <details className="dms-oauth-advanced">
+                                <summary>Advanced OAuth options</summary>
+                                <div className="dms-inline-fields">
+                                  <input
+                                    type="password"
+                                    className="dms-input"
+                                    placeholder="OAuth client secret (optional)"
+                                    value={dmsOauthClientSecretDraft}
+                                    onChange={(e) => setDmsOauthClientSecretDraft(e.target.value)}
+                                  />
+                                  <input
+                                    type="text"
+                                    className="dms-input"
+                                    placeholder={`Redirect URI (default: ${DMS_DEFAULT_OAUTH_REDIRECT_URI})`}
+                                    value={dmsOauthRedirectUriDraft}
+                                    onChange={(e) => setDmsOauthRedirectUriDraft(e.target.value)}
+                                  />
+                                  <input
+                                    type="text"
+                                    className="dms-input"
+                                    placeholder="Scopes (comma/newline separated, optional)"
+                                    value={dmsOauthScopesDraft}
+                                    onChange={(e) => setDmsOauthScopesDraft(e.target.value)}
+                                  />
+                                  {(dmsSelectedProvider === 'onedrive' || dmsSelectedProvider === 'sharepoint') ? (
+                                    <input
+                                      type="text"
+                                      className="dms-input"
+                                      placeholder="Tenant ID (optional)"
+                                      value={dmsOauthTenantIdDraft}
+                                      onChange={(e) => setDmsOauthTenantIdDraft(e.target.value)}
+                                    />
+                                  ) : null}
+                                  {dmsSelectedProvider === 'sharepoint' ? (
+                                    <input
+                                      type="text"
+                                      className="dms-input"
+                                      placeholder="SharePoint site ID (optional)"
+                                      value={dmsOauthSiteIdDraft}
+                                      onChange={(e) => setDmsOauthSiteIdDraft(e.target.value)}
+                                    />
+                                  ) : null}
+                                  <input
+                                    type="text"
+                                    className="dms-input"
+                                    placeholder="Authorization code (manual fallback)"
+                                    value={dmsOauthCodeDraft}
+                                    onChange={(e) => setDmsOauthCodeDraft(e.target.value)}
+                                  />
+                                  <input
+                                    type="text"
+                                    className="dms-input"
+                                    placeholder="OAuth state (manual fallback)"
+                                    value={dmsOauthStateDraft}
+                                    onChange={(e) => setDmsOauthStateDraft(e.target.value)}
+                                  />
+                                </div>
+                              </details>
+                            </div>
+                          )}
+                        </>
+                      ) : null}
+                      {dmsConnections.length > 0 && (
+                        <div className="dms-inline-fields">
+                          <select
+                            className="dms-select"
+                            value={dmsSelectedConnectionId ?? ''}
+                            onChange={(e) => {
+                              const next = e.target.value || null
+                              setDmsSelectedConnectionId(next)
+                              setDmsFolderOptions([])
+                              setDmsSelectedFolderId('')
+                            }}
+                          >
+                            {dmsConnections.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.displayName} ({DMS_PROVIDER_LABELS[c.provider]})
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={!dmsSelectedConnectionId || dmsFoldersBusyForConnectionId != null}
+                            onClick={() => {
+                              if (!dmsSelectedConnectionId) return
+                              void loadDmsFolders(dmsSelectedConnectionId)
+                            }}
+                          >
+                            {dmsFoldersBusyForConnectionId ? 'Loading folders…' : 'Load folders'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={!dmsSelectedConnectionId}
+                            onClick={() => {
+                              if (!dmsSelectedConnectionId) return
+                              void disconnectDmsConnection(dmsSelectedConnectionId)
+                            }}
+                          >
+                            Disconnect
+                          </button>
+                        </div>
+                      )}
+                      {dmsFolderOptions.length > 0 && (
+                        <div className="dms-inline-fields">
+                          <select
+                            className="dms-select"
+                            value={dmsSelectedFolderId}
+                            onChange={(e) => setDmsSelectedFolderId(e.target.value)}
+                          >
+                            {dmsFolderOptions.map((f) => (
+                              <option key={f.id} value={f.id}>
+                                {f.path}
+                              </option>
+                            ))}
+                          </select>
+                          <button type="button" className="btn-secondary" onClick={() => void registerDmsFolderImport()}>
+                            Add folder source
+                          </button>
+                        </div>
+                      )}
+                      {dmsImportRoots.length > 0 && (
+                        <div className="dms-import-roots">
+                          {dmsImportRoots.map((root) => (
+                            <div key={root.id} className="dms-root-row">
+                              <span className="dms-root-title">{root.displayName}</span>
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                disabled={dmsSyncBusyRootId === root.id}
+                                onClick={() => void runDmsManualSync(root.id)}
+                              >
+                                {dmsSyncBusyRootId === root.id ? 'Syncing…' : 'Sync now'}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {dmsSyncStatusLine ? <p className="dms-status-line">{dmsSyncStatusLine}</p> : null}
+                      {dmsSyncProgress?.kind === 'file' ? (
+                        <p className="dms-status-line dms-status-line--subtle">
+                          Processed {dmsSyncProgress.processed}/{dmsSyncProgress.totalDiscovered} files
+                        </p>
+                      ) : null}
+                    </div>
                     <button
                       type="button"
                       className="btn-secondary btn-wiki-export"
@@ -6716,6 +7450,15 @@ export default function App(): React.ReactElement {
                       onClick={() => void exportWikiZipToDisk()}
                     >
                       {wikiExportBusy ? 'Exporting…' : 'Export wiki (ZIP)'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={wikiReanalyzeBusy}
+                      onClick={() => void runWikiReanalysisAll()}
+                      title="Reanalyze all wiki entries with the currently loaded model"
+                    >
+                      {wikiReanalyzeBusy ? 'Reanalyzing…' : 'Reanalyze all (model)'}
                     </button>
                     <button
                       type="button"
@@ -6737,6 +7480,35 @@ export default function App(): React.ReactElement {
                       Reset wiki &amp; domains…
                     </button>
                   </div>
+                  {(wikiReanalyzeProgress || wikiReanalyzeResult) && (
+                    <p className="muted" style={{ marginTop: 8 }}>
+                      {wikiReanalyzeProgress?.kind === 'source'
+                        ? `Reanalyzing ${wikiReanalyzeProgress.index}/${wikiReanalyzeProgress.totalSources}: ${wikiReanalyzeProgress.title}`
+                        : wikiReanalyzeProgress?.kind === 'merging'
+                          ? `Merging into ${wikiReanalyzeProgress.totalKeywords} canonical keyword entries…`
+                          : null}
+                      {wikiReanalyzeResult
+                        ? ` Last run: ${wikiReanalyzeResult.processedSources} sources -> ${wikiReanalyzeResult.processedEntries} entries (${wikiReanalyzeResult.mergedEntries} merges, ${wikiReanalyzeResult.skippedSources} fallbacks).`
+                        : null}
+                    </p>
+                  )}
+                  {wikiUploadProgress && (
+                    <p className="muted" style={{ marginTop: 8 }}>
+                      {wikiUploadProgress.kind === 'selected'
+                        ? `Selected: ${wikiUploadProgress.filePath}`
+                        : wikiUploadProgress.kind === 'reading'
+                          ? `Reading ${wikiUploadProgress.format.toUpperCase()} file…`
+                          : wikiUploadProgress.kind === 'chunking'
+                            ? `Preparing ${wikiUploadProgress.chunkCount} chunk${wikiUploadProgress.chunkCount === 1 ? '' : 's'}…`
+                            : wikiUploadProgress.kind === 'indexing'
+                              ? `Indexing chunks: ${wikiUploadProgress.inserted}/${wikiUploadProgress.total}`
+                              : wikiUploadProgress.kind === 'done'
+                                ? `Upload complete: ${wikiUploadProgress.title} (${wikiUploadProgress.chunkCount} chunks indexed).`
+                                : wikiUploadProgress.kind === 'cancelled'
+                                  ? 'Upload cancelled.'
+                                  : `Upload failed: ${wikiUploadProgress.message}`}
+                    </p>
+                  )}
                 </div>
                 <div className="wiki-topic-list">
                   {wikiTopics.length === 0 && (
@@ -6976,6 +7748,23 @@ export default function App(): React.ReactElement {
             </div>
           ) : null}
 
+          {mainView === 'ontology' ? (
+            <div className="main-knowledge-graph-shell">
+              <OntologyView
+                data={ontologyPayload}
+                stats={ontologyStats}
+                loading={ontologyLoading}
+                detailLoading={ontologyDetailLoading}
+                details={ontologyDetails}
+                onQuery={(request) => void loadOntology(request)}
+                onSelectEntity={(iri) => void loadOntologyEntityDetails(iri)}
+                onRefresh={() => void loadOntology()}
+                onRebuild={() => void rebuildOntologySnapshot()}
+                onExport={() => void exportOntologyJsonLd()}
+              />
+            </div>
+          ) : null}
+
           {mainView === 'architectureRepository' ? (
             <div className="main-arch-repo-shell">
               <ArchitectureRepositoryView
@@ -6995,6 +7784,7 @@ export default function App(): React.ReactElement {
                 modelsDefaultPath={paths?.modelsDefault ?? null}
                 trainJobCount={trainJobs.length}
                 pluginReportCount={integrationPluginReports.length}
+                codebaseAnalysisSnapshots={codebaseAnalysisSnapshots}
               />
             </div>
           ) : null}
@@ -7003,7 +7793,14 @@ export default function App(): React.ReactElement {
 
           {mainView === 'codebaseLandscape' ? (
             <div className="main-codebase-landscape-shell">
-              <CodebaseLandscapeView onOpenIntegrations={() => openSettings('integrations')} />
+              <CodebaseLandscapeView
+                onOpenIntegrations={() => openSettings('integrations')}
+                onEnrichmentComplete={() => {
+                  void loadWiki()
+                  void loadKnowledgeGraph({ keepAnalysis: true })
+                  void loadCodebaseAnalyses()
+                }}
+              />
             </div>
           ) : null}
 
@@ -7091,7 +7888,8 @@ export default function App(): React.ReactElement {
             ) : null}
           </div>
         ) : null}
-      </div>
+      </PrimaryWork>
+      </RoleWorkspaceShell>
       </div>
 
       {drawer && (
@@ -7115,7 +7913,7 @@ export default function App(): React.ReactElement {
                     <i className="fa-solid fa-gear" aria-hidden style={{ marginRight: 10, opacity: 0.88 }} />
                     Settings
                     <span className="drawer-title-sub muted" style={{ marginLeft: 10, fontWeight: 500, fontSize: 13 }}>
-                      · {SETTINGS_NAV_ITEMS.find((x) => x.id === settingsNav)?.label ?? ''}
+                      · {visibleSettingsNavItems.find((x) => x.id === settingsNav)?.label ?? ''}
                     </span>
                   </>
                 )}
@@ -7685,7 +8483,17 @@ export default function App(): React.ReactElement {
               {drawer === 'settings' && (
                 <div className="settings-view">
                   <nav className="settings-view-nav" aria-label="Settings sections">
-                    {SETTINGS_NAV_ITEMS.map((item) => (
+                    {!roleLayoutResolved.advancedSettingsByDefault ? (
+                      <button
+                        type="button"
+                        className={`settings-view-nav-btn${settingsAdvancedVisible ? ' settings-view-nav-btn--active' : ''}`}
+                        onClick={() => setSettingsShowAdvanced((v) => !v)}
+                      >
+                        <i className="fa-solid fa-layer-group" aria-hidden />
+                        <span>{settingsAdvancedVisible ? 'Hide advanced' : 'Show advanced'}</span>
+                      </button>
+                    ) : null}
+                    {visibleSettingsNavItems.map((item) => (
                       <button
                         key={item.id}
                         type="button"
@@ -7742,8 +8550,8 @@ export default function App(): React.ReactElement {
                             Workspace role
                           </h3>
                           <p className="muted" style={{ marginTop: 0 }}>
-                            Simplifies the sidebar to match how you work. The Hub entry appears for the Software developer
-                            role, and for any role in unpackaged builds (or when LOCAL_LLM_FORCE_DEV_UI=1).
+                            Simplifies the sidebar to match how you work. Builder/Admin exposes all views and settings;
+                            Develop is also available in unpackaged builds (or when LOCAL_LLM_FORCE_DEV_UI=1).
                           </p>
                           <div
                             className="settings-role-grid"
@@ -7759,7 +8567,9 @@ export default function App(): React.ReactElement {
                                 className={`settings-role-option${uiRole === id ? ' settings-role-option--selected' : ''}`}
                                 onClick={() => {
                                   setUiRole(id)
-                                  void window.api.setConfig({ uiRole: id }).then((r) => {
+                                  const nextDensity = roleLayout(id).defaultDensity
+                                  setWorkspaceDensity(nextDensity)
+                                  void window.api.setConfig({ uiRole: id, workspaceDensity: nextDensity }).then((r) => {
                                     if (!r.ok) setErr(r.error ?? 'Could not save role')
                                   })
                                 }}
@@ -7946,6 +8756,37 @@ export default function App(): React.ReactElement {
                           <i className="fa-solid fa-palette" aria-hidden />
                           Appearance
                         </h2>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-layer-group" aria-hidden />
+                            Workspace density
+                          </h3>
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            Controls visual density for role workspaces: Focused removes noise, Standard balances clarity,
+                            Expanded keeps extra context visible.
+                          </p>
+                          <label style={{ display: 'block', marginTop: 12 }}>
+                            <span className="muted" style={{ display: 'block', marginBottom: 6 }}>Density mode</span>
+                            <select
+                              className="select"
+                              style={{ width: '100%', maxWidth: 320 }}
+                              value={workspaceDensity}
+                              onChange={(e) => {
+                                const next = parseWorkspaceDensity(e.target.value)
+                                setWorkspaceDensity(next)
+                                void window.api.setConfig({ workspaceDensity: next }).then((r) => {
+                                  if (!r.ok) setErr(r.error ?? 'Could not save workspace density')
+                                })
+                              }}
+                            >
+                              {WORKSPACE_DENSITY_IDS.map((id) => (
+                                <option key={id} value={id}>
+                                  {id.charAt(0).toUpperCase() + id.slice(1)}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
                         <div className="drawer-section">
                           <h3 className="settings-section-title">
                             <i className="fa-solid fa-swatchbook" aria-hidden />
@@ -8237,6 +9078,62 @@ export default function App(): React.ReactElement {
                           text to the system message (bounded to {MAX_PROMPT_DOMAIN_SUFFIX_CHARS} characters per turn).
                         </span>
                       </label>
+                      <label className="metrics-widget-check" style={{ marginTop: 12 }}>
+                        <input
+                          type="checkbox"
+                          checked={ontologyEnabled}
+                          onChange={(e) => {
+                            const v = e.target.checked
+                            setOntologyEnabled(v)
+                            void window.api.setConfig({ ontologyEnabled: v })
+                          }}
+                        />
+                        <span>
+                          Runtime ontology context - continuously build and inject relevant domain facts from previous runtime interactions.
+                        </span>
+                      </label>
+                      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 10 }}>
+                        <label style={{ display: 'block' }}>
+                          <span className="muted" style={{ display: 'block', marginBottom: 6, fontSize: 12 }}>
+                            Ontology triples per prompt
+                          </span>
+                          <input
+                            type="number"
+                            className="input"
+                            style={{ width: 210 }}
+                            min={5}
+                            max={200}
+                            value={ontologyMaxTriplesDraft}
+                            onChange={(e) => setOntologyMaxTriplesDraft(e.target.value)}
+                            onBlur={() => {
+                              const n = parseInt(ontologyMaxTriplesDraft.trim(), 10)
+                              const v = Math.min(200, Math.max(5, Number.isFinite(n) ? n : 40))
+                              setOntologyMaxTriplesDraft(String(v))
+                              void window.api.setConfig({ ontologyMaxTriples: v })
+                            }}
+                          />
+                        </label>
+                        <label style={{ display: 'block' }}>
+                          <span className="muted" style={{ display: 'block', marginBottom: 6, fontSize: 12 }}>
+                            Ontology context token budget
+                          </span>
+                          <input
+                            type="number"
+                            className="input"
+                            style={{ width: 210 }}
+                            min={64}
+                            max={3000}
+                            value={ontologyContextTokensDraft}
+                            onChange={(e) => setOntologyContextTokensDraft(e.target.value)}
+                            onBlur={() => {
+                              const n = parseInt(ontologyContextTokensDraft.trim(), 10)
+                              const v = Math.min(3000, Math.max(64, Number.isFinite(n) ? n : 512))
+                              setOntologyContextTokensDraft(String(v))
+                              void window.api.setConfig({ ontologyContextTokens: v })
+                            }}
+                          />
+                        </label>
+                      </div>
                       <div className="prompt-domains-panel" aria-label="Chat prompt domains">
                         <h4 className="prompt-domains-panel-title">Chat prompt domains</h4>
                         <p className="prompt-domains-panel-hint muted">
@@ -8554,7 +9451,13 @@ export default function App(): React.ReactElement {
                         />
                       </label>
                     </div>
-                    <CodebaseFormalSettingsSection />
+                    <CodebaseFormalSettingsSection
+                      onEnrichmentComplete={() => {
+                        void loadWiki()
+                        void loadKnowledgeGraph({ keepAnalysis: true })
+                        void loadCodebaseAnalyses()
+                      }}
+                    />
                     <div className="drawer-section">
                       <h3 className="settings-section-title">
                         <i className="fa-solid fa-cloud-arrow-down" aria-hidden />
@@ -9225,7 +10128,6 @@ export default function App(): React.ReactElement {
         </div>
       )}
       </div>
-    </div>
     </>
   )
 }
