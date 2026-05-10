@@ -24,10 +24,12 @@ import type {
   HardwareSummary,
   DeepLearnExplorePath,
   EvidenceCard,
+  IntegrationModelActivityEvent,
   KbIngestFileProgress,
   HfModelDetail,
   HfModelSummary,
   KbSearchHit,
+  KbImportConfidence,
   KnowledgeGraphPayload,
   OntologyEntityDetails,
   OntologyQueryRequest,
@@ -38,7 +40,9 @@ import type {
   RuntimeLoadProgress,
   RuntimeStatus,
   WikiChatHighlightTerm,
+  WikiKeywordCandidate,
   WikiGlossaryEntry,
+  WikiPassageSummary,
   WikiReanalyzeProgress,
   WikiReanalyzeResult,
   WikiRelatedSource,
@@ -150,6 +154,7 @@ import { OntologyView } from './OntologyView'
 import { HfModelBrowserDrawer } from './components/HfModelBrowserDrawer'
 import { buildWikiTocGroupsFromRoot, WikiArticleTocNav, type WikiTocGroup } from './WikiArticleToc'
 import { ElectronDevDashboard } from './ElectronDevDashboard'
+import { ReleaseReadinessView, defaultReleaseFeatureSet, normalizeReleaseFeatureSet } from './ReleaseReadinessView'
 import { TrainMainView } from './TrainMainView'
 import { ArchitectureRepositoryView } from './ArchitectureRepositoryView'
 import { CodebaseFormalSettingsSection } from './CodebaseFormalSettingsSection'
@@ -178,10 +183,14 @@ import {
   layoutDefaultMainArea,
   devShellChromeVisible,
   clampMainViewForLayout,
+  APP_MAIN_VIEW_COPY,
+  isAdvancedMainView,
   type UiRole,
   type AppMainView,
   type WorkspaceDensity,
+  type WorkspaceStatusLabel,
   type SettingsSectionId,
+  type SetupTourAction,
   type ToolDrawerId,
   UI_ROLE_CARD_BLURBS,
   UI_ROLE_IDS,
@@ -333,8 +342,8 @@ const METRICS_REFRESH_PRESETS_MS = [
   1000, 2000, 3000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000, 3_600_000
 ] as const
 
-/** Poll interval for the ambient model-presence backdrop (tokens / CPU / context). */
-const BACKDROP_METRICS_MS = 1200
+/** Poll interval for ambient backdrop metrics; intentionally conservative to minimize overhead. */
+const BACKDROP_METRICS_MS = 5000
 
 function clampMetricsRefreshMs(ms: number): number {
   return Math.min(3_600_000, Math.max(500, Math.floor(ms)))
@@ -356,6 +365,7 @@ function applyTypographyComfortToDocument(id: TypographyComfortId): void {
 
 type MainView = AppMainView
 type ToolDrawer = 'hf' | 'runtime' | 'train' | 'metrics' | 'settings' | null
+type WikiSubview = 'article' | 'knowledgeGraph'
 
 type SettingsNavId = SettingsSectionId
 type HfLibraryMode = 'recommended' | 'search'
@@ -519,6 +529,18 @@ function settingsPluginKindLabel(kind: PluginIntegrationReport['kind']): string 
     default:
       return kind
   }
+}
+
+type IdePromptMonitorState = {
+  modelState: 'idle' | 'processing'
+  requestId: string | null
+  source: string | null
+  startedAt: number | null
+  promptPreview: string
+  generatedResponse: string
+  actions: string[]
+  error: string | null
+  updatedAt: number | null
 }
 
 const PINNED_WIDGETS_BAR_COLLAPSED_W = 40
@@ -1188,14 +1210,32 @@ export default function App(): React.ReactElement {
   const [err, setErr] = useState<string | null>(null)
   const [welcomeModalOpen, setWelcomeModalOpen] = useState(false)
   const [setupTourOpen, setSetupTourOpen] = useState(false)
+  const [setupTourOnStartup, setSetupTourOnStartup] = useState(true)
+  const [animatedBackdropEnabled, setAnimatedBackdropEnabled] = useState(true)
   const [uiRole, setUiRole] = useState<UiRole>(DEFAULT_UI_ROLE)
   const [workspaceDensity, setWorkspaceDensity] = useState<WorkspaceDensity>('standard')
+  const [releaseFeatureSet, setReleaseFeatureSet] = useState<Record<string, boolean>>(defaultReleaseFeatureSet())
+  const [presentationModeEnabled, setPresentationModeEnabled] = useState(true)
+  const [showAdvancedSurfaces, setShowAdvancedSurfaces] = useState(false)
   const [settingsShowAdvanced, setSettingsShowAdvanced] = useState(false)
   const [showElectronDevMainView, setShowElectronDevMainView] = useState(false)
   const roleLayoutResolved = useMemo(() => roleLayout(parseUiRoleOrDefault(uiRole)), [uiRole])
   const devShellChrome = useMemo(
     () => devShellChromeVisible(parseUiRoleOrDefault(uiRole), showElectronDevMainView),
     [uiRole, showElectronDevMainView]
+  )
+  const advancedSurfacesVisible = !presentationModeEnabled || showAdvancedSurfaces
+  const visibleRoleTasks = useMemo(
+    () =>
+      roleLayoutResolved.taskNav.filter((task) => {
+        if (!task.mainView) return true
+        return advancedSurfacesVisible || !isAdvancedMainView(task.mainView)
+      }),
+    [roleLayoutResolved.taskNav, advancedSurfacesVisible]
+  )
+  const visibleToolDrawers = useMemo(
+    () => (advancedSurfacesVisible ? roleLayoutResolved.toolDrawers : roleLayoutResolved.toolDrawers.filter((id) => id !== 'hf')),
+    [advancedSurfacesVisible, roleLayoutResolved.toolDrawers]
   )
   const openTrainSurface = useCallback(() => {
     if (roleLayoutResolved.mainViews.includes('train')) {
@@ -1233,6 +1273,7 @@ export default function App(): React.ReactElement {
   const [ollamaInstallLog, setOllamaInstallLog] = useState<string[]>([])
   const ollamaInstallLogRef = useRef<HTMLPreElement>(null)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
+  const presentationStarterToastShownRef = useRef(false)
   const [localDownloads, setLocalDownloads] = useState<DownloadRow[]>([])
   const [localModelFilePaths, setLocalModelFilePaths] = useState<string[]>([])
   const [ollamaChatTags, setOllamaChatTags] = useState<string[]>([])
@@ -1425,6 +1466,7 @@ export default function App(): React.ReactElement {
   const [composerSuggestBusy, setComposerSuggestBusy] = useState(false)
   const [ragQuery, setRagQuery] = useState('')
   const [ragSnippets, setRagSnippets] = useState<string[]>([])
+  const [ragLayerEnabled, setRagLayerEnabled] = useState(true)
   const [ragLoading, setRagLoading] = useState(false)
   const [ragSuggestHits, setRagSuggestHits] = useState<KbSearchHit[]>([])
   const [ragSuggestFocused, setRagSuggestFocused] = useState(false)
@@ -1439,10 +1481,19 @@ export default function App(): React.ReactElement {
   const [promptDomainSuffixDrafts, setPromptDomainSuffixDrafts] = useState<Record<string, string>>({})
   const [wikiHighlightTerms, setWikiHighlightTerms] = useState<WikiChatHighlightTerm[]>([])
   const [wikiBody, setWikiBody] = useState('')
+  const [wikiImportConfidence, setWikiImportConfidence] = useState<KbImportConfidence | null>(null)
   const [wikiTitle, setWikiTitle] = useState('')
   const [wikiGlossary, setWikiGlossary] = useState<WikiGlossaryEntry[]>([])
   const [wikiRelated, setWikiRelated] = useState<WikiRelatedSource[]>([])
+  const [wikiPassages, setWikiPassages] = useState<WikiPassageSummary[]>([])
+  const [wikiKeywordCandidates, setWikiKeywordCandidates] = useState<WikiKeywordCandidate[]>([])
+  const [wikiSelectedPassageIds, setWikiSelectedPassageIds] = useState<Record<string, boolean>>({})
+  const [wikiPassageFilterDraft, setWikiPassageFilterDraft] = useState('')
+  const [wikiExtractKeywordDraft, setWikiExtractKeywordDraft] = useState('')
+  const [wikiExtractBusy, setWikiExtractBusy] = useState(false)
+  const [wikiExtractStatus, setWikiExtractStatus] = useState<string | null>(null)
   const [wikiSelectedId, setWikiSelectedId] = useState<string | null>(null)
+  const [wikiSubview, setWikiSubview] = useState<WikiSubview>('article')
   const [wikiDeletePending, setWikiDeletePending] = useState<{ id: string; title: string } | null>(null)
   const [wikiSearchQuery, setWikiSearchQuery] = useState('')
   const [wikiSearchHits, setWikiSearchHits] = useState<KbSearchHit[]>([])
@@ -1450,10 +1501,12 @@ export default function App(): React.ReactElement {
   const [wikiExportBusy, setWikiExportBusy] = useState(false)
   const [wikiUploadBusy, setWikiUploadBusy] = useState(false)
   const [wikiUploadProgress, setWikiUploadProgress] = useState<KbIngestFileProgress | null>(null)
+  const [wikiUploadFormat, setWikiUploadFormat] = useState<'pdf' | 'text' | null>(null)
   const [wikiReanalyzeBusy, setWikiReanalyzeBusy] = useState(false)
   const [wikiReanalyzeProgress, setWikiReanalyzeProgress] = useState<WikiReanalyzeProgress | null>(null)
   const [wikiReanalyzeResult, setWikiReanalyzeResult] = useState<WikiReanalyzeResult | null>(null)
   const [wikiTocGroups, setWikiTocGroups] = useState<WikiTocGroup[]>([])
+  const pendingWikiSectionOrdRef = useRef<number | null>(null)
   const [dmsConnections, setDmsConnections] = useState<DmsConnectionSummary[]>([])
   const [dmsImportRoots, setDmsImportRoots] = useState<DmsImportRootSummary[]>([])
   const [dmsSelectedProvider, setDmsSelectedProvider] = useState<DmsProvider>('google-drive')
@@ -1894,6 +1947,17 @@ export default function App(): React.ReactElement {
   const activityChatTokensRef = useRef<ActivityChatTokens | null>(null)
   const [activityTokenHistory, setActivityTokenHistory] = useState<ActivityTokenHistoryPoint[]>([])
   const [integrationPluginReports, setIntegrationPluginReports] = useState<PluginIntegrationReport[]>([])
+  const [idePromptMonitor, setIdePromptMonitor] = useState<IdePromptMonitorState>({
+    modelState: 'idle',
+    requestId: null,
+    source: null,
+    startedAt: null,
+    promptPreview: '',
+    generatedResponse: '',
+    actions: [],
+    error: null,
+    updatedAt: null
+  })
   const [pinnedWidgetsSide, setPinnedWidgetsSide] = useState<PinnedWidgetsSide>('right')
 
   useEffect(() => {
@@ -2030,7 +2094,22 @@ export default function App(): React.ReactElement {
   }, [renamingConvId])
 
   const onWikiRichDomReady = useCallback((root: HTMLDivElement) => {
+    const h3s = [...root.querySelectorAll('h3')]
+    for (const [idx, h] of h3s.entries()) {
+      const id = h.getAttribute('id')
+      if (!id) h.setAttribute('id', `wiki-passage-${idx + 1}`)
+    }
     setWikiTocGroups(buildWikiTocGroupsFromRoot(root))
+    const sectionOrd = pendingWikiSectionOrdRef.current
+    if (sectionOrd != null) {
+      const target = h3s[sectionOrd] ?? null
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        target.classList.add('wiki-passage-focus')
+        window.setTimeout(() => target.classList.remove('wiki-passage-focus'), 1400)
+      }
+      pendingWikiSectionOrdRef.current = null
+    }
   }, [])
 
   const refreshPromptDomains = useCallback(async () => {
@@ -2070,6 +2149,12 @@ export default function App(): React.ReactElement {
     await loadDmsConnectionsAndRoots()
     await refreshPromptDomains()
   }, [refreshPromptDomains, loadDmsConnectionsAndRoots])
+  const openKnowledgeLibrary = useCallback(() => {
+    setDrawer(null)
+    setMainView('wiki')
+    setWikiSubview('article')
+    void loadWiki()
+  }, [loadWiki])
 
   useEffect(() => {
     if (drawer === 'settings' && settingsNav === 'chat') {
@@ -2122,10 +2207,15 @@ export default function App(): React.ReactElement {
   }, [wikiSearchQuery, mainView])
 
   useEffect(() => {
-    if (mainView !== 'wiki' || wikiTitle.trim().length > 0) return
+    if (mainView !== 'wiki' || wikiSubview !== 'article' || wikiTitle.trim().length > 0) return
     const id = window.requestAnimationFrame(() => wikiMainSearchInputRef.current?.focus())
     return () => window.cancelAnimationFrame(id)
-  }, [mainView, wikiTitle])
+  }, [mainView, wikiSubview, wikiTitle])
+
+  useEffect(() => {
+    // Keyword suggestions for subpage extraction were replaced by direct in-text term clicks.
+    setWikiKeywordCandidates([])
+  }, [wikiSelectedId, wikiPassages, wikiSelectedPassageIds])
 
   useEffect(() => {
     const off = window.api.onDmsSyncProgress((ev) => {
@@ -2295,19 +2385,20 @@ export default function App(): React.ReactElement {
   )
 
   const openKnowledgeGraph = useCallback(() => {
-    setMainView('knowledgeGraph')
+    setMainView('wiki')
+    setWikiSubview('knowledgeGraph')
     void loadKnowledgeGraph()
   }, [loadKnowledgeGraph])
 
   useEffect(() => {
-    if (mainView === 'knowledgeGraph' || mainView === 'architectureRepository') {
+    if (mainView === 'architectureRepository' || ((mainView === 'wiki' || mainView === 'knowledgeGraph') && wikiSubview === 'knowledgeGraph')) {
       void loadKnowledgeGraph()
       void loadCodebaseAnalyses()
     }
     if (mainView === 'ontology') {
       void loadOntology()
     }
-  }, [mainView, wikiTopics.length, loadKnowledgeGraph, loadCodebaseAnalyses, loadOntology])
+  }, [mainView, wikiSubview, wikiTopics.length, loadKnowledgeGraph, loadCodebaseAnalyses, loadOntology])
 
   useEffect(() => {
     if (!wikiTitle.trim()) setWikiTocGroups([])
@@ -2339,8 +2430,12 @@ export default function App(): React.ReactElement {
     if (typeof window.api.onKbIngestFileProgress !== 'function') return
     return window.api.onKbIngestFileProgress((payload) => {
       setWikiUploadProgress(payload)
+      if (payload.kind === 'reading') {
+        setWikiUploadFormat(payload.format)
+      }
       if (payload.kind === 'done' || payload.kind === 'error' || payload.kind === 'cancelled') {
         setWikiUploadBusy(false)
+        setWikiUploadFormat(null)
       }
     })
   }, [])
@@ -2455,30 +2550,50 @@ export default function App(): React.ReactElement {
     setWelcomeModalOpen(false)
   }, [])
 
-  const onWelcomeOpenRunSetup = useCallback(async () => {
-    setRuntimeKind('ollama')
-    const r = await window.api.setConfig({
-      runtimeKind: 'ollama',
-      welcomeGuideVersion: WELCOME_GUIDE_LATEST
-    })
-    if (!r.ok) {
-      setErr(r.error ?? 'Could not save preferences')
-      return
-    }
-    setWelcomeModalOpen(false)
-    setDrawer('runtime')
-    void refreshRunDrawerQuick()
-  }, [refreshRunDrawerQuick])
+  const applySetupTourAction = useCallback(
+    (action: SetupTourAction) => {
+      if (action.mainView === 'wiki') {
+        setMainView('wiki')
+        setWikiSubview('article')
+        void loadWiki()
+      } else if (action.mainView === 'knowledgeGraph') {
+        setMainView('wiki')
+        setWikiSubview('knowledgeGraph')
+        void loadWiki()
+        void loadKnowledgeGraph()
+      } else if (action.mainView === 'ontology') {
+        setMainView('ontology')
+        void loadOntology()
+      } else if (action.mainView === 'train') {
+        openTrainSurface()
+      } else if (action.mainView) {
+        setMainView(action.mainView)
+      }
+      if (action.openDrawer === 'settings') {
+        openSettings(action.settingsSection ?? 'general')
+      } else {
+        setDrawer(action.openDrawer)
+      }
+    },
+    [loadKnowledgeGraph, loadOntology, loadWiki, openSettings, openTrainSurface]
+  )
 
-  const onWelcomeOpenIntegrations = useCallback(async () => {
-    const r = await window.api.setConfig({ welcomeGuideVersion: WELCOME_GUIDE_LATEST })
-    if (!r.ok) {
-      setErr(r.error ?? 'Could not save preferences')
-      return
-    }
-    setWelcomeModalOpen(false)
-    openSettings('integrations')
-  }, [openSettings])
+  const onWelcomeApplyAction = useCallback(
+    async (action: SetupTourAction) => {
+      if (action.openDrawer === 'runtime') setRuntimeKind('ollama')
+      const configPatch: Record<string, unknown> = { welcomeGuideVersion: WELCOME_GUIDE_LATEST }
+      if (action.openDrawer === 'runtime') configPatch.runtimeKind = 'ollama'
+      const r = await window.api.setConfig(configPatch)
+      if (!r.ok) {
+        setErr(r.error ?? 'Could not save preferences')
+        return
+      }
+      setWelcomeModalOpen(false)
+      applySetupTourAction(action)
+      if (action.openDrawer === 'runtime') void refreshRunDrawerQuick()
+    },
+    [applySetupTourAction, refreshRunDrawerQuick]
+  )
 
   const showWelcomeGuideAgain = useCallback(async () => {
     const r = await window.api.setConfig({ welcomeGuideVersion: 0 })
@@ -2519,6 +2634,7 @@ export default function App(): React.ReactElement {
         colorScheme: p.colorScheme,
         workspaceDensity: density,
         setupTourVersion: SETUP_TOUR_LATEST,
+        setupTourOnStartup: p.showOnStartup,
         welcomeGuideVersion: WELCOME_GUIDE_LATEST,
         ...pin
       })
@@ -2530,13 +2646,17 @@ export default function App(): React.ReactElement {
       setWorkspaceDensity(density)
       setColorScheme(p.colorScheme)
       applyColorSchemeToDocument(p.colorScheme)
+      setSetupTourOnStartup(p.showOnStartup)
       setSetupTourOpen(false)
       const target: MainView = p.mainView ?? layoutDefaultMainArea(lay)
       if (target === 'wiki') {
         setMainView('wiki')
+        setWikiSubview('article')
         void loadWiki()
       } else if (target === 'knowledgeGraph') {
-        setMainView('knowledgeGraph')
+        setMainView('wiki')
+        setWikiSubview('knowledgeGraph')
+        void loadWiki()
         void loadKnowledgeGraph()
       } else {
         setMainView(target)
@@ -2912,6 +3032,12 @@ export default function App(): React.ReactElement {
       setWikiBody('')
       setWikiGlossary([])
       setWikiRelated([])
+      setWikiPassages([])
+      setWikiKeywordCandidates([])
+      setWikiSelectedPassageIds({})
+      setWikiPassageFilterDraft('')
+      setWikiExtractKeywordDraft('')
+      setWikiExtractStatus(null)
       setWikiSearchQuery('')
       setWikiSearchHits([])
       setPromptDomains([])
@@ -3045,9 +3171,15 @@ export default function App(): React.ReactElement {
       setResumeRuntimeOnLaunch(c.resumeRuntimeOnLaunch === true)
       setUiRole(parseUiRoleOrDefault(c.uiRole))
       setWorkspaceDensity(parseWorkspaceDensity(c.workspaceDensity))
+      setReleaseFeatureSet(normalizeReleaseFeatureSet(c.releaseFeatureSet))
+      setPresentationModeEnabled(c.presentationModeEnabled !== false)
+      setShowAdvancedSurfaces(c.showAdvancedSurfaces === true)
       setShowElectronDevMainView(c.showElectronDevMainView === true)
+      const setupTourPref = c.setupTourOnStartup !== false
+      setSetupTourOnStartup(setupTourPref)
+      setAnimatedBackdropEnabled(c.animatedBackdropEnabled !== false)
       const stv = typeof c.setupTourVersion === 'number' ? c.setupTourVersion : 0
-      const needSetupTour = stv < SETUP_TOUR_LATEST
+      const needSetupTour = stv < SETUP_TOUR_LATEST && setupTourPref
       setSetupTourOpen(needSetupTour)
       const wv = c.welcomeGuideVersion
       const welcomeSeen = typeof wv === 'number' && wv >= WELCOME_GUIDE_LATEST
@@ -3145,6 +3277,13 @@ export default function App(): React.ReactElement {
   }, [mainView, roleLayoutResolved, devShellChrome])
 
   useEffect(() => {
+    if (advancedSurfacesVisible) return
+    if (!isAdvancedMainView(mainView)) return
+    setMainView(layoutDefaultMainArea(roleLayoutResolved))
+    setDrawer(null)
+  }, [advancedSurfacesVisible, mainView, roleLayoutResolved])
+
+  useEffect(() => {
     const allowed = visibleSettingsNavItems.map((x) => x.id)
     if (allowed.length === 0) return
     if (!allowed.includes(settingsNav)) setSettingsNav(allowed[0] ?? 'general')
@@ -3223,14 +3362,101 @@ export default function App(): React.ReactElement {
   ])
 
   useEffect(() => {
+    if (presentationStarterToastShownRef.current) return
+    if (!presenceWakeConfigReady || !presentationModeEnabled) return
+    if (welcomeModalOpen || setupTourOpen || presenceWakeOpen) return
+    presentationStarterToastShownRef.current = true
+    notifyWhenBackground({
+      origin: 'global',
+      title: 'Presentation workflow ready',
+      message: runtimeOn
+        ? 'Continue with Knowledge -> Train -> Release Readiness.'
+        : 'Start the runtime first, then continue with Knowledge -> Train -> Release Readiness.',
+      action: runtimeOn
+        ? {
+            label: 'Open Knowledge',
+            onClick: () => openKnowledgeLibrary()
+          }
+        : {
+            label: 'Open Run',
+            onClick: () => setDrawer('runtime')
+          }
+    })
+  }, [
+    openKnowledgeLibrary,
+    presenceWakeConfigReady,
+    presentationModeEnabled,
+    welcomeModalOpen,
+    setupTourOpen,
+    presenceWakeOpen,
+    runtimeOn
+  ])
+
+  useEffect(() => {
     const cap = 15
     void window.api.integrationPluginReportsList().then((list) => {
       setIntegrationPluginReports(list.slice(-cap))
     })
     const off = window.api.onIntegrationPluginReport((r) => {
       setIntegrationPluginReports((prev) => [...prev, r].slice(-cap))
+      setIdePromptMonitor((prev) => {
+        if (prev.modelState !== 'processing') return prev
+        const line = [settingsPluginKindLabel(r.kind), r.message?.trim(), r.meta ? JSON.stringify(r.meta) : '']
+          .filter((x) => Boolean(x))
+          .join(' · ')
+          .slice(0, 320)
+        if (!line) return prev
+        return {
+          ...prev,
+          actions: [...prev.actions, line].slice(-8),
+          updatedAt: Date.now()
+        }
+      })
     })
     return off
+  }, [])
+
+  useEffect(() => {
+    return window.api.onIntegrationModelActivity((evt: IntegrationModelActivityEvent) => {
+      setIdePromptMonitor((prev) => {
+        if (evt.kind === 'started') {
+          return {
+            modelState: 'processing',
+            requestId: evt.requestId,
+            source: evt.source,
+            startedAt: evt.receivedAt,
+            promptPreview: (evt.promptPreview ?? '').trim(),
+            generatedResponse: '',
+            actions: [],
+            error: null,
+            updatedAt: evt.receivedAt
+          }
+        }
+        if (prev.requestId !== evt.requestId) return prev
+        if (evt.kind === 'token') {
+          const nextText = `${prev.generatedResponse}${evt.tokenText ?? ''}`.slice(0, 16_000)
+          return { ...prev, generatedResponse: nextText, updatedAt: evt.receivedAt }
+        }
+        if (evt.kind === 'completed') {
+          return {
+            ...prev,
+            modelState: 'idle',
+            generatedResponse: (evt.responseText ?? prev.generatedResponse).slice(0, 16_000),
+            error: null,
+            updatedAt: evt.receivedAt
+          }
+        }
+        if (evt.kind === 'error') {
+          return {
+            ...prev,
+            modelState: 'idle',
+            error: evt.error?.slice(0, 400) ?? 'Unknown error',
+            updatedAt: evt.receivedAt
+          }
+        }
+        return prev
+      })
+    })
   }, [])
 
   useEffect(() => {
@@ -3402,6 +3628,13 @@ export default function App(): React.ReactElement {
     []
   )
 
+  const saveReleaseFeatureSet = useCallback((next: Record<string, boolean>) => {
+    setReleaseFeatureSet(next)
+    void window.api.setConfig({ releaseFeatureSet: next }).then((r) => {
+      if (!r.ok) setErr(r.error ?? 'Could not save release feature set')
+    })
+  }, [])
+
   const saveColorScheme = useCallback(async (id: ColorSchemeId) => {
     setColorScheme(id)
     applyColorSchemeToDocument(id)
@@ -3448,7 +3681,7 @@ export default function App(): React.ReactElement {
   }, [metricsPinned, metricsRefreshMs])
 
   useEffect(() => {
-    const active = Boolean(runtimeStatus?.running) || runtimeStarting || chatSending
+    const active = animatedBackdropEnabled && (Boolean(runtimeStatus?.running) || runtimeStarting || chatSending)
     if (!active) {
       setBackdropSnap(null)
       return
@@ -3468,7 +3701,7 @@ export default function App(): React.ReactElement {
       cancelled = true
       window.clearInterval(id)
     }
-  }, [runtimeStatus?.running, runtimeStarting, chatSending])
+  }, [animatedBackdropEnabled, runtimeStatus?.running, runtimeStarting, chatSending])
 
   const personalityModelKey = useMemo(() => {
     if (runtimeStatus?.running && runtimeStatus.modelPath?.trim()) return runtimeStatus.modelPath.trim()
@@ -4392,11 +4625,12 @@ export default function App(): React.ReactElement {
     const historyForApi = sliceChatHistoryMessages(fullHistoryRows, histCap)
     const historyDropped = fullHistoryRows.length - historyForApi.length
 
+    const activeRagSnippets = ragLayerEnabled ? ragSnippets : []
     let context = userText
-    if (ragSnippets.length) {
+    if (activeRagSnippets.length) {
       context =
         'Use the following knowledge snippets when relevant:\n' +
-        ragSnippets.map((s, i) => `[${i + 1}] ${s}`).join('\n') +
+        activeRagSnippets.map((s, i) => `[${i + 1}] ${s}`).join('\n') +
         '\n\nUser question:\n' +
         userText
       if (runtimeStatus.kind === 'llamacpp' && llamaRagGrounding) {
@@ -4440,6 +4674,9 @@ export default function App(): React.ReactElement {
       notices.push(
         'This message matched an “opinion / personal stance” prompt — mood and journal markers are enabled for this reply only.'
       )
+    }
+    if (!ragLayerEnabled) {
+      notices.push('RAG layer is off for this message — model receives your prompt without wiki snippets.')
     }
     setChatTurnNotice(notices.length > 0 ? notices.join(' ') : null)
 
@@ -4883,8 +5120,8 @@ export default function App(): React.ReactElement {
       if (
         runtimeStatus.kind === 'llamacpp' &&
         llamaRagGrounding &&
-        ragSnippets.length > 0 &&
-        ragReplyMissingSnippetCitations(replyForRagCheck, ragSnippets.length)
+        activeRagSnippets.length > 0 &&
+        ragReplyMissingSnippetCitations(replyForRagCheck, activeRagSnippets.length)
       ) {
         setChatTurnNotice((prev) => {
           const extra =
@@ -4974,6 +5211,12 @@ export default function App(): React.ReactElement {
         setWikiTitle('')
         setWikiGlossary([])
         setWikiRelated([])
+        setWikiPassages([])
+        setWikiKeywordCandidates([])
+        setWikiSelectedPassageIds({})
+        setWikiPassageFilterDraft('')
+        setWikiExtractKeywordDraft('')
+        setWikiExtractStatus(null)
       }
     } catch (e) {
       setErr(String(e))
@@ -5196,7 +5439,10 @@ export default function App(): React.ReactElement {
     if (!t) return
     setRagLoading(true)
     try {
-      const snippets = await window.api.kbSearch(t, 8)
+      const snippets =
+        typeof window.api.kbSearchRetrieval === 'function'
+          ? (await window.api.kbSearchRetrieval({ query: t, limit: 8 })).map((hit) => hit.snippet)
+          : await window.api.kbSearch(t, 8)
       setRagSnippets(snippets)
     } finally {
       setRagLoading(false)
@@ -5239,18 +5485,85 @@ export default function App(): React.ReactElement {
     }
   }
 
-  async function openWikiPage(sourceId: string): Promise<void> {
+  async function openWikiPage(sourceId: string, opts?: { sectionOrd?: number | null }): Promise<void> {
+    setWikiSubview('article')
     setWikiSelectedId(sourceId)
+    pendingWikiSectionOrdRef.current =
+      typeof opts?.sectionOrd === 'number' && Number.isFinite(opts.sectionOrd) ? Math.max(0, opts.sectionOrd) : null
     const p = await window.api.kbWikiPage(sourceId)
     setWikiTitle(p.title)
     setWikiBody(p.body)
+    setWikiImportConfidence(p.confidence ?? null)
     setWikiGlossary(p.glossary)
     setWikiRelated(p.relatedSources)
+    setWikiPassages(p.passages ?? [])
+    setWikiKeywordCandidates(p.suggestedKeywords ?? [])
+    const preselected = Object.fromEntries((p.passages ?? []).map((x) => [x.chunkId, true]))
+    setWikiSelectedPassageIds(preselected)
+    setWikiPassageFilterDraft('')
+    setWikiExtractKeywordDraft(p.suggestedKeywords?.[0]?.keyword ?? p.title.split(/\s+/).slice(0, 3).join(' '))
+    setWikiExtractStatus(null)
   }
 
   async function navigateChatKeywordToWiki(sourceId: string): Promise<void> {
     setMainView('wiki')
+    setWikiSubview('article')
     await openWikiPage(sourceId)
+  }
+
+  async function handleWikiTermClick(sourceId: string, phrase: string): Promise<void> {
+    const trimmedPhrase = phrase.trim()
+    if (!trimmedPhrase) {
+      await navigateChatKeywordToWiki(sourceId)
+      return
+    }
+    try {
+      const resolved = await window.api.kbWikiResolveTerm({
+        term: trimmedPhrase,
+        contextSourceId: wikiSelectedId ?? sourceId,
+        contextSnippet: trimmedPhrase.slice(0, 220)
+      })
+      if (resolved.matched && resolved.sourceId) {
+        await navigateChatKeywordToWiki(resolved.sourceId)
+        return
+      }
+      setWikiExtractKeywordDraft(resolved.keyword || trimmedPhrase)
+      setWikiExtractStatus(`No existing page found for "${trimmedPhrase}". Review selected passages and extract a new article.`)
+    } catch {
+      setWikiExtractKeywordDraft(trimmedPhrase)
+      setWikiExtractStatus(`No existing page found for "${trimmedPhrase}". Review selected passages and extract a new article.`)
+    }
+  }
+
+  async function runWikiManualExtraction(): Promise<void> {
+    if (!wikiSelectedId || wikiExtractBusy) return
+    const chunkIds = Object.entries(wikiSelectedPassageIds)
+      .filter(([, on]) => on)
+      .map(([id]) => id)
+    const keyword = wikiExtractKeywordDraft.trim()
+    if (!keyword || chunkIds.length === 0) {
+      setWikiExtractStatus('Select at least one passage and a keyword.')
+      return
+    }
+    setWikiExtractBusy(true)
+    setWikiExtractStatus(null)
+    setErr(null)
+    try {
+      const res = await window.api.kbWikiExtractArticle({
+        sourceId: wikiSelectedId,
+        keyword,
+        chunkIds
+      })
+      await loadWiki()
+      setWikiExtractStatus(`Created "${res.title}" from ${res.chunkCount} passage(s).`)
+      await openWikiPage(res.sourceId)
+    } catch (e) {
+      const msg = String(e)
+      setErr(msg)
+      setWikiExtractStatus(msg)
+    } finally {
+      setWikiExtractBusy(false)
+    }
   }
 
   async function exportWikiZipToDisk(): Promise<void> {
@@ -5296,6 +5609,12 @@ export default function App(): React.ReactElement {
           setWikiBody('')
           setWikiGlossary([])
           setWikiRelated([])
+          setWikiPassages([])
+          setWikiKeywordCandidates([])
+          setWikiSelectedPassageIds({})
+          setWikiPassageFilterDraft('')
+          setWikiExtractKeywordDraft('')
+          setWikiExtractStatus(null)
         }
       }
       void loadKnowledgeGraph({ keepAnalysis: true })
@@ -5311,6 +5630,7 @@ export default function App(): React.ReactElement {
     setErr(null)
     setWikiUploadBusy(true)
     setWikiUploadProgress(null)
+    setWikiUploadFormat(null)
     try {
       await window.api.kbIngestFile()
       await loadWiki()
@@ -5322,8 +5642,7 @@ export default function App(): React.ReactElement {
         action: {
           label: 'Open wiki',
           onClick: () => {
-            setMainView('wiki')
-            void loadWiki()
+            openKnowledgeLibrary()
           }
         }
       })
@@ -5351,6 +5670,12 @@ export default function App(): React.ReactElement {
         setWikiBody('')
         setWikiGlossary([])
         setWikiRelated([])
+        setWikiPassages([])
+        setWikiKeywordCandidates([])
+        setWikiSelectedPassageIds({})
+        setWikiPassageFilterDraft('')
+        setWikiExtractKeywordDraft('')
+        setWikiExtractStatus(null)
       }
       await loadWiki()
       void loadKnowledgeGraph()
@@ -5402,39 +5727,12 @@ export default function App(): React.ReactElement {
     }
     return raw
   }, [runtimeStatus, localDownloads, paths?.platform])
-  const topTitle =
-    mainView === 'electronDev'
-      ? 'Developer hub'
-      : mainView === 'wiki'
-        ? 'Knowledge wiki'
-        : mainView === 'knowledgeGraph'
-          ? 'Knowledge graph'
-          : mainView === 'ontology'
-            ? 'Runtime ontology'
-          : mainView === 'codebaseLandscape'
-            ? 'Codebase landscape'
-            : mainView === 'architectureRepository'
-              ? 'Architecture Repository'
-              : mainView === 'train'
-                ? 'Training'
-                : 'Chat'
-  const topSub =
-    mainView === 'electronDev'
-      ? 'Bridge, shortcuts, and IntelliJ plugin checklist.'
-      : mainView === 'wiki'
-        ? 'Browse sources built from files you ingest. Link snippets in chat.'
-        : mainView === 'knowledgeGraph'
-          ? 'Sources, chunks, wiki pages, and weak related links. Pan and zoom the canvas; use Layers for toggles and analysis.'
-          : mainView === 'ontology'
-            ? 'Runtime-generated entity relationships persisted across app runs, with provenance and confidence.'
-          : mainView === 'codebaseLandscape'
-            ? 'Implementation roots you track here, with tool-backed formal verification history per tree.'
-            : mainView === 'architectureRepository'
-              ? 'TOGAF-aligned catalogs, live architecture data, and workspace evidence (Software architect).'
-              : mainView === 'train'
-                ? 'Fine-tune from knowledge or JSONL; jobs write into finetunes for Run.'
-                : ''
-  const workspaceStatusState: 'Ready' | 'Running' | 'Blocked' | 'Needs input' = runtimeStarting
+  const viewCopyKey: AppMainView =
+    mainView === 'wiki' && wikiSubview === 'knowledgeGraph' ? 'knowledgeGraph' : mainView
+  const viewCopy = APP_MAIN_VIEW_COPY[viewCopyKey] ?? APP_MAIN_VIEW_COPY.chat
+  const topTitle = viewCopy.title
+  const topSub = viewCopy.subtitle
+  const workspaceStatusState: WorkspaceStatusLabel = runtimeStarting
     ? 'Running'
     : runtimeOn
       ? 'Ready'
@@ -5444,30 +5742,27 @@ export default function App(): React.ReactElement {
   const workspaceStatusHint = runtimeStarting
     ? runtimeLoadProgress?.message ?? 'Model is starting.'
     : runtimeOn
-      ? 'Model is running and ready.'
+      ? 'Model is ready. Open Knowledge to continue the presentation flow.'
       : modelPath.trim().length === 0
-        ? 'Choose a model to continue.'
-        : 'Start the model from Run or the play button.'
-  const nextBestActionLabel = runtimeOn ? 'Open task command' : 'Start runtime'
+        ? 'Choose a model to begin the presentation flow.'
+        : 'Start the model from Run or the play button, then open Knowledge.'
+  const nextBestActionLabel = runtimeOn ? 'Continue workflow' : 'Start runtime'
   const nextBestActionTitle = runtimeOn
-    ? 'Open settings to switch role, density, or tools.'
-    : 'Open Run panel and start your selected model.'
+    ? 'Open Knowledge and continue the presentation workflow.'
+    : 'Open Run and start your selected model.'
   const actionDockItems = useMemo(
     () => [
       { id: 'run', label: 'Run', icon: 'fa-play', onClick: () => setDrawer('runtime') },
-      { id: 'command', label: 'Command', icon: 'fa-terminal', onClick: () => openSettings('general') },
-      { id: 'adjust', label: 'Adjust', icon: 'fa-sliders', onClick: () => openSettings('appearance') },
       {
-        id: 'context',
-        label: 'Context',
+        id: 'knowledge',
+        label: 'Knowledge',
         icon: 'fa-book-open',
-        onClick: () => {
-          setMainView('wiki')
-          void loadWiki()
-        }
-      }
+        onClick: () => openKnowledgeLibrary()
+      },
+      { id: 'train', label: 'Train', icon: 'fa-flask', onClick: () => openTrainSurface() },
+      { id: 'readiness', label: 'Readiness', icon: 'fa-rocket', onClick: () => setMainView('releasePlanner') }
     ],
-    [openSettings, loadWiki]
+    [openTrainSurface, openKnowledgeLibrary]
   )
   const integrationPortLive = (() => {
     const n = parseInt(integrationPortDraft.trim(), 10)
@@ -5489,6 +5784,41 @@ export default function App(): React.ReactElement {
     if (!wikiHasSearch) return []
     return wikiSearchHits.filter((h) => !wikiTitleMatchIds.has(h.sourceId))
   }, [wikiHasSearch, wikiSearchHits, wikiTitleMatchIds])
+  const wikiSelectedPassageCount = useMemo(
+    () => Object.values(wikiSelectedPassageIds).filter(Boolean).length,
+    [wikiSelectedPassageIds]
+  )
+  const wikiSelectedPassages = useMemo(
+    () => wikiPassages.filter((p) => wikiSelectedPassageIds[p.chunkId] !== false),
+    [wikiPassages, wikiSelectedPassageIds]
+  )
+  const wikiPassageHeadingGroups = useMemo(() => {
+    const by = new Map<string, { label: string; chunkIds: string[] }>()
+    for (const p of wikiPassages) {
+      const label = (p.heading?.trim() || p.title || 'Unsectioned').trim()
+      if (!by.has(label)) by.set(label, { label, chunkIds: [] })
+      by.get(label)!.chunkIds.push(p.chunkId)
+    }
+    return [...by.values()].sort((a, b) => b.chunkIds.length - a.chunkIds.length || a.label.localeCompare(b.label))
+  }, [wikiPassages])
+  const wikiPassageFilter = wikiPassageFilterDraft.trim().toLowerCase()
+  const wikiFilteredPassages = useMemo(() => {
+    if (!wikiPassageFilter) return wikiPassages
+    return wikiPassages.filter((p) =>
+      `${p.title} ${p.heading ?? ''} ${p.snippet}`.toLowerCase().includes(wikiPassageFilter)
+    )
+  }, [wikiPassages, wikiPassageFilter])
+  const applyWikiPassageSelection = useCallback((chunkIds: readonly string[], selected: boolean) => {
+    setWikiSelectedPassageIds((prev) => {
+      const next = { ...prev }
+      for (const id of chunkIds) next[id] = selected
+      return next
+    })
+  }, [])
+  const wikiSelectedPassageWordCount = useMemo(
+    () => wikiSelectedPassages.reduce((acc, p) => acc + p.wordCount, 0),
+    [wikiSelectedPassages]
+  )
 
   const ragSuggestionRows = useMemo((): KbSearchHit[] => {
     const q = ragQuery.trim().toLowerCase()
@@ -5577,6 +5907,10 @@ export default function App(): React.ReactElement {
     []
   )
 
+  const validateTrainStart = useCallback(async (args: { baseModelPath: string }) => {
+    return await window.api.trainValidateStart({ baseModelPath: args.baseModelPath })
+  }, [])
+
   const createDomainProfileFromPromptDomain = useCallback(async (name: string, terms: string[]) => {
     const profile = await window.api.trainDomainProfileUpsert({
       name,
@@ -5620,6 +5954,7 @@ export default function App(): React.ReactElement {
       reviewQueue={trainReviewQueue}
       onReviewSetStatus={setTrainReviewStatus}
       onManifestPreview={previewTrainManifest}
+      onValidateStart={validateTrainStart}
       manifestPreviewMarkdown={trainManifestPreviewMarkdown}
       domainModelVersions={
         trainSelectedDomainId
@@ -5640,33 +5975,49 @@ export default function App(): React.ReactElement {
       return
     }
     if (!task.mainView) return
+    if (!advancedSurfacesVisible && isAdvancedMainView(task.mainView)) return
     if (task.mainView === 'train') {
       openTrainSurface()
       return
     }
+    if (task.mainView === 'knowledgeGraph') {
+      setDrawer(null)
+      setMainView('wiki')
+      setWikiSubview('knowledgeGraph')
+      void loadWiki()
+      void loadKnowledgeGraph()
+      return
+    }
     setDrawer(null)
     setMainView(task.mainView)
-    if (task.mainView === 'wiki') void loadWiki()
-    if (task.mainView === 'knowledgeGraph') void loadKnowledgeGraph()
+    if (task.mainView === 'wiki') {
+      setWikiSubview('article')
+      void loadWiki()
+    }
     if (task.mainView === 'ontology') void loadOntology()
-  }, [openSettings, openTrainSurface, loadKnowledgeGraph, loadOntology, loadWiki])
+  }, [openSettings, openTrainSurface, loadKnowledgeGraph, loadOntology, loadWiki, advancedSurfacesVisible])
 
   return (
     <>
       <ViewToastRegion />
       <div className={shellClassName}>
-      <ModelPresenceBackdrop
-        running={Boolean(runtimeStatus?.running)}
-        starting={runtimeStarting}
-        loadPercent={runtimeLoadProgress?.percent ?? null}
-        chatBusy={chatSending}
-        modelPath={runtimeStatus?.modelPath}
-        tokensPerSec={backdropSnap?.runtimeTokensPerSec}
-        cpuPercent={backdropSnap?.processCpuPercent}
-        ctxPercent={backdropCtxPercent}
-        personality={modelProfile.vibe}
-        wakeIntensity={wakeBackdropIntensity}
-      />
+      {animatedBackdropEnabled ? (
+        <ModelPresenceBackdrop
+          running={Boolean(runtimeStatus?.running)}
+          starting={runtimeStarting}
+          loadPercent={runtimeLoadProgress?.percent ?? null}
+          chatBusy={chatSending}
+          modelPath={runtimeStatus?.modelPath}
+          tokensPerSec={backdropSnap?.runtimeTokensPerSec}
+          cpuPercent={backdropSnap?.processCpuPercent}
+          resourceLoadPercent={backdropSnap?.systemLoadPercent}
+          bridgeStatusPositive={integrationListenEnabled}
+          runtimeStatusPositive={Boolean(runtimeStatus?.running)}
+          ctxPercent={backdropCtxPercent}
+          personality={modelProfile.vibe}
+          wakeIntensity={wakeBackdropIntensity}
+        />
+      ) : null}
       {presenceWakeOpen && (
         <PresenceWakeOverlay
           personality={modelProfile.vibe}
@@ -5686,7 +6037,7 @@ export default function App(): React.ReactElement {
         />
       )}
       <div className={shellChromeClass}>
-      <aside className="nav-rail" aria-label="Primary navigation">
+      <aside className="nav-rail nav-rail--icons-only" aria-label="Primary navigation">
         <div className="nav-brand" title="Local LLM Desktop — private chat on your computer">
           <img
             src={`${import.meta.env.BASE_URL}app-icon.png`}
@@ -5697,9 +6048,13 @@ export default function App(): React.ReactElement {
           />
         </div>
         <nav className="nav-main">
-          {roleLayoutResolved.taskNav.map((task) => {
+          {visibleRoleTasks.map((task) => {
             const active =
-              (task.mainView != null && mainView === task.mainView) ||
+              (task.mainView === 'knowledgeGraph'
+                ? (mainView === 'wiki' && wikiSubview === 'knowledgeGraph') || mainView === 'knowledgeGraph'
+                : task.mainView === 'wiki'
+                  ? mainView === 'wiki' && wikiSubview === 'article'
+                  : task.mainView != null && mainView === task.mainView) ||
               (task.drawer != null && drawer === task.drawer) ||
               (task.drawer === 'settings' && drawer === 'settings')
             return (
@@ -5709,32 +6064,41 @@ export default function App(): React.ReactElement {
                 className={`nav-btn ${active ? 'active' : ''}`}
                 onClick={() => openRoleTask(task)}
                 title={task.hint}
+                aria-label={`${task.label}: ${task.hint}`}
               >
                 <i className={`fa-solid ${task.icon}`} aria-hidden />
-                {task.label}
+                <span className="nav-btn-label">{task.label}</span>
               </button>
             )
           })}
-          {devShellChrome && !roleLayoutResolved.taskNav.some((task) => task.mainView === 'electronDev') ? (
+          {advancedSurfacesVisible && devShellChrome && !visibleRoleTasks.some((task) => task.mainView === 'electronDev') ? (
             <button
               type="button"
               className={`nav-btn ${mainView === 'electronDev' ? 'active' : ''}`}
               onClick={() => setMainView('electronDev')}
-              title="Developer hub — bridge, shortcuts, checklist"
+              title="Developer hub — bridge, shortcuts, setup tour"
+              aria-label="Develop: open Developer hub for bridge, shortcuts, and setup tour"
             >
               <i className="fa-solid fa-code" aria-hidden />
-              Develop
+              <span className="nav-btn-label">Develop</span>
             </button>
           ) : null}
         </nav>
         <div className="nav-spacer" />
         <nav className="nav-tools" aria-label="Tools">
-          {roleLayoutResolved.toolDrawers.map((id: ToolDrawerId) => {
+          {visibleToolDrawers.map((id: ToolDrawerId) => {
             if (id === 'hf') {
               return (
-                <button key={id} type="button" className="nav-btn" onClick={() => setDrawer('hf')} title="Browse and download models">
+                <button
+                  key={id}
+                  type="button"
+                  className="nav-btn"
+                  onClick={() => setDrawer('hf')}
+                  title="Browse and download models"
+                  aria-label="Models: browse and download models"
+                >
                   <IconBox />
-                  Models
+                  <span className="nav-btn-label">Models</span>
                 </button>
               )
             }
@@ -5746,30 +6110,51 @@ export default function App(): React.ReactElement {
                   className="nav-btn"
                   onClick={() => setDrawer('runtime')}
                   title="Run — turn your AI model on or off"
+                  aria-label="Run: turn your AI model on or off"
                 >
                   <IconCpu />
-                  Run
+                  <span className="nav-btn-label">Run</span>
                 </button>
               )
             }
             if (id === 'train') {
               return (
-                <button key={id} type="button" className="nav-btn" onClick={() => openTrainSurface()} title="Train">
+                <button
+                  key={id}
+                  type="button"
+                  className="nav-btn"
+                  onClick={() => openTrainSurface()}
+                  title="Train"
+                  aria-label="Train: open model tuning and training"
+                >
                   <IconFlask />
-                  Train
+                  <span className="nav-btn-label">Train</span>
                 </button>
               )
             }
             return (
-              <button key={id} type="button" className="nav-btn" onClick={() => setDrawer('metrics')} title="Metrics">
+              <button
+                key={id}
+                type="button"
+                className="nav-btn"
+                onClick={() => setDrawer('metrics')}
+                title="Metrics"
+                aria-label="Metrics: open runtime and system metrics"
+              >
                 <IconActivity />
-                Stats
+                <span className="nav-btn-label">Metrics</span>
               </button>
             )
           })}
-          <button type="button" className="nav-btn" onClick={() => openSettings('general')} title="Settings">
+          <button
+            type="button"
+            className="nav-btn"
+            onClick={() => openSettings('general')}
+            title="Settings"
+            aria-label="Settings: open workspace preferences"
+          >
             <IconGear />
-            Settings
+            <span className="nav-btn-label">Settings</span>
           </button>
         </nav>
       </aside>
@@ -6271,7 +6656,9 @@ export default function App(): React.ReactElement {
               label={nextBestActionLabel}
               title={nextBestActionTitle}
               onClick={() => {
-                if (runtimeOn) openSettings('general')
+                if (runtimeOn) {
+                  openKnowledgeLibrary()
+                }
                 else setDrawer('runtime')
               }}
             />
@@ -6285,6 +6672,7 @@ export default function App(): React.ReactElement {
           open={setupTourOpen}
           initialRole={parseUiRoleOrDefault(uiRole)}
           initialColorScheme={colorScheme}
+          initialShowOnStartup={setupTourOnStartup}
           runtime={{
             ollamaReachable: ollamaHost?.reachable ?? null,
             ollamaBaseUrl: ollamaHost?.baseUrl?.trim() || ollamaBaseUrlDraft.trim() || OLLAMA_BASE_DEFAULT,
@@ -6313,33 +6701,37 @@ export default function App(): React.ReactElement {
                 Welcome to Local LLM Desktop
               </h2>
               <p className="modal-text welcome-modal-lead">
-                Your chats stay on this device. This app helps you browse models, turn them on, and talk to them — no account
-                required.
+                This workspace is tuned for <strong>{UI_ROLE_LABELS[parseUiRoleOrDefault(uiRole)]}</strong>. Follow this short
+                checklist to get to your first role-specific outcome quickly.
               </p>
               <ol className="welcome-modal-steps">
                 <li>
-                  <strong>Keep Ollama</strong> in the top bar unless you already use downloaded model files.
+                  <strong>{roleLayoutResolved.tourChecklist.steps[0]}</strong>
                 </li>
                 <li>
-                  <strong>Open Run</strong> in the sidebar. If Ollama is missing, install it from there (or ollama.com).
+                  <strong>{roleLayoutResolved.tourChecklist.steps[1]}</strong>
                 </li>
                 <li>
-                  <strong>Pick a model</strong> in the top bar, press <strong>play</strong>, and wait until the green dot
-                  appears.
-                </li>
-                <li>
-                  <strong>New chat</strong>, type a message, and send.
+                  <strong>{roleLayoutResolved.tourChecklist.steps[2]}</strong>
                 </li>
               </ol>
               <p className="welcome-modal-foot">
-                Reopen these tips anytime: <strong>Settings</strong> → <strong>General</strong> → First-time tips.
+                {roleLayoutResolved.tourChecklist.footnote}
               </p>
               <div className="modal-actions welcome-modal-actions">
-                <button type="button" className="btn-primary" onClick={() => void onWelcomeOpenRunSetup()}>
-                  Open Run &amp; set up
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => void onWelcomeApplyAction(roleLayoutResolved.tourChecklist.primaryAction)}
+                >
+                  {roleLayoutResolved.tourChecklist.primaryAction.label}
                 </button>
-                <button type="button" className="btn-secondary" onClick={() => void onWelcomeOpenIntegrations()}>
-                  Integrations &amp; IntelliJ
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => void onWelcomeApplyAction(roleLayoutResolved.tourChecklist.secondaryAction)}
+                >
+                  {roleLayoutResolved.tourChecklist.secondaryAction.label}
                 </button>
                 <button type="button" className="btn-secondary" onClick={() => void markWelcomeGuideSeen()}>
                   I&apos;m ready
@@ -6578,15 +6970,15 @@ export default function App(): React.ReactElement {
                 <div className="messages-scroll">
                   {!convId && (
                     <div className="messages-empty">
-                      <h2>Welcome</h2>
+                      <h2>Start the presentation conversation</h2>
                       <p>
-                        Press <strong>New chat</strong>, then turn on your AI with the <strong>play button</strong> in the
-                        top bar. When the green dot appears, you can type and send.
+                        Press <strong>New chat</strong>, then start your model with the <strong>play button</strong> in the top
+                        bar. When the green dot appears, ask your first Knowledge-focused prompt.
                       </p>
                       {!runtimeOn ? (
                         <p className="messages-empty-hint">
                           <button type="button" className="btn-secondary messages-empty-cta" onClick={() => setDrawer('runtime')}>
-                            Open Run — start your AI
+                            Open Run - start your model
                           </button>
                         </p>
                       ) : null}
@@ -6594,18 +6986,18 @@ export default function App(): React.ReactElement {
                   )}
                   {convId && messages.length === 0 && (
                     <div className="messages-empty">
-                      <h2>Say hello</h2>
+                      <h2>Ready for your first prompt</h2>
                       {!runtimeOn ? (
                         <>
-                          <p>Start your model from the top bar (play button), then type a message below.</p>
+                          <p>Start your model from the top bar (play button), then ask for a Knowledge summary.</p>
                           <p className="messages-empty-hint">
                             <button type="button" className="btn-secondary messages-empty-cta" onClick={() => setDrawer('runtime')}>
-                              Need help? Open Run
+                              Open Run for setup help
                             </button>
                           </p>
                         </>
                       ) : (
-                        <p>Messages save automatically. Add knowledge from the panel on the right if you like.</p>
+                        <p>Messages save automatically. Next step: pull Knowledge snippets from the panel on the right.</p>
                       )}
                     </div>
                   )}
@@ -6651,7 +7043,7 @@ export default function App(): React.ReactElement {
                             wikiHighlightTerms={
                               m.role === 'assistant' ? wikiHighlightTerms : undefined
                             }
-                            onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
+                            onWikiKeywordNavigate={(id, phrase) => void handleWikiTermClick(id, phrase)}
                           />
                           {m.role === 'user' ? (
                             (userRcKey != null && userReceipt != null) || showUserRetry ? (
@@ -6824,7 +7216,7 @@ export default function App(): React.ReactElement {
                               )}
                               plainStreaming
                               wikiHighlightTerms={wikiHighlightTerms}
-                              onWikiKeywordNavigate={(id) => void navigateChatKeywordToWiki(id)}
+                              onWikiKeywordNavigate={(id, phrase) => void handleWikiTermClick(id, phrase)}
                             />
                           ) : (
                             <FloatingDots label="Generating reply" />
@@ -6955,7 +7347,19 @@ export default function App(): React.ReactElement {
                       <button type="button" className="btn-secondary" onClick={() => void runRag()} disabled={ragLoading}>
                         {ragLoading ? 'Searching…' : 'Pull into chat'}
                       </button>
-                      {ragSnippets.length > 0 && <span className="rag-badge">{ragSnippets.length} snippets active</span>}
+                      {ragSnippets.length > 0 && (
+                        <span className="rag-badge">
+                          {ragLayerEnabled ? `${ragSnippets.length} snippets active` : `${ragSnippets.length} snippets paused`}
+                        </span>
+                      )}
+                      <label className="rag-layer-toggle" title="Disable to prompt the model without retrieved wiki snippets">
+                        <input
+                          type="checkbox"
+                          checked={ragLayerEnabled}
+                          onChange={(e) => setRagLayerEnabled(e.target.checked)}
+                        />
+                        <span>{ragLayerEnabled ? 'RAG on' : 'Model-only'}</span>
+                      </label>
                     </div>
                     {convId && messages.length > 0 && (
                       <div className="save-chat-kb-row">
@@ -7110,14 +7514,14 @@ export default function App(): React.ReactElement {
                       </button>
                     )}
                   </div>
-                  <p>Pull matches from your wiki into the next message. Open Wiki to add documents.</p>
+                  <p>Pull wiki matches into your next message. This is step 2 in the presentation flow before training.</p>
                   <div className="kb-sidebar-graph-cta">
                     <button type="button" className="btn-secondary btn-sm" onClick={() => void openKnowledgeGraph()}>
                       <i className="fa-solid fa-diagram-project" aria-hidden style={{ marginRight: 6, opacity: 0.75 }} />
                       Knowledge graph
                     </button>
                     <p className="muted kb-sidebar-graph-cta-hint">
-                      Browse how sources, chunks, and wiki pages link — and run graph analysis — in the Graph view.
+                      Use Graph view to narrate evidence links before moving to Training.
                     </p>
                   </div>
                 </div>
@@ -7496,12 +7900,18 @@ export default function App(): React.ReactElement {
                     <p className="muted" style={{ marginTop: 8 }}>
                       {wikiUploadProgress.kind === 'selected'
                         ? `Selected: ${wikiUploadProgress.filePath}`
+                        : wikiUploadProgress.kind === 'stage'
+                          ? `${wikiUploadProgress.stageLabel}${typeof wikiUploadProgress.progress === 'number' ? ` (${Math.round(wikiUploadProgress.progress * 100)}%)` : ''}`
                         : wikiUploadProgress.kind === 'reading'
                           ? `Reading ${wikiUploadProgress.format.toUpperCase()} file…`
                           : wikiUploadProgress.kind === 'chunking'
-                            ? `Preparing ${wikiUploadProgress.chunkCount} chunk${wikiUploadProgress.chunkCount === 1 ? '' : 's'}…`
+                            ? wikiUploadFormat === 'pdf'
+                              ? `Preparing ${wikiUploadProgress.chunkCount} chunk${wikiUploadProgress.chunkCount === 1 ? '' : 's'} and generating passage titles…`
+                              : `Preparing ${wikiUploadProgress.chunkCount} chunk${wikiUploadProgress.chunkCount === 1 ? '' : 's'}…`
                             : wikiUploadProgress.kind === 'indexing'
                               ? `Indexing chunks: ${wikiUploadProgress.inserted}/${wikiUploadProgress.total}`
+                              : wikiUploadProgress.kind === 'analysis'
+                                ? `Context analysis complete: ${wikiUploadProgress.domainsDetected} domain${wikiUploadProgress.domainsDetected === 1 ? '' : 's'} detected.`
                               : wikiUploadProgress.kind === 'done'
                                 ? `Upload complete: ${wikiUploadProgress.title} (${wikiUploadProgress.chunkCount} chunks indexed).`
                                 : wikiUploadProgress.kind === 'cancelled'
@@ -7617,8 +8027,35 @@ export default function App(): React.ReactElement {
                   )}
                 </div>
               </nav>
-              <div className={`wiki-main${wikiTitle.trim() ? '' : ' wiki-main--landing'}`}>
-                {!wikiTitle.trim() ? (
+              <div
+                className={`wiki-main${wikiSubview === 'article' && !wikiTitle.trim() ? ' wiki-main--landing' : ''}`}
+              >
+                <div className="wiki-subview-switcher" role="tablist" aria-label="Wiki subviews">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={wikiSubview === 'article'}
+                    className={`wiki-subview-tab ${wikiSubview === 'article' ? 'wiki-subview-tab--active' : ''}`}
+                    onClick={() => setWikiSubview('article')}
+                  >
+                    <i className="fa-solid fa-book-open" aria-hidden style={{ marginRight: 6, opacity: 0.8 }} />
+                    Articles
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={wikiSubview === 'knowledgeGraph'}
+                    className={`wiki-subview-tab ${wikiSubview === 'knowledgeGraph' ? 'wiki-subview-tab--active' : ''}`}
+                    onClick={() => {
+                      setWikiSubview('knowledgeGraph')
+                      void loadKnowledgeGraph()
+                    }}
+                  >
+                    <i className="fa-solid fa-diagram-project" aria-hidden style={{ marginRight: 6, opacity: 0.8 }} />
+                    Knowledge graph
+                  </button>
+                </div>
+                {wikiSubview === 'article' && !wikiTitle.trim() ? (
                   <div className="wiki-main-search-region">
                     <div className="wiki-main-search-bar">
                       <label htmlFor="wiki-main-search" className="wiki-main-search-label visually-hidden">
@@ -7639,6 +8076,7 @@ export default function App(): React.ReactElement {
                     </div>
                   </div>
                 ) : null}
+              {wikiSubview === 'article' ? (
               <article className={`wiki-article${wikiTitle.trim() ? '' : ' wiki-article--no-selection'}`}>
                 {wikiTitle ? (
                   <>
@@ -7647,6 +8085,18 @@ export default function App(): React.ReactElement {
                         <div className="wiki-article-title-row">
                           <h1 className="wiki-article-title">{wikiTitle}</h1>
                           <div className="wiki-article-title-actions">
+                            {wikiImportConfidence ? (
+                              <span
+                                className="wiki-source-kind-pill wiki-source-kind-pill--article"
+                                title={
+                                  wikiImportConfidence.reasons.length > 0
+                                    ? `Import confidence reasons: ${wikiImportConfidence.reasons.join(', ')}`
+                                    : 'Import confidence based on parser and cleanup heuristics.'
+                                }
+                              >
+                                Import confidence {Math.round(wikiImportConfidence.score * 100)}%
+                              </span>
+                            ) : null}
                             {wikiSelectedKindLabel ? (
                               <span className="wiki-source-kind-pill wiki-source-kind-pill--article">
                                 {wikiSelectedKindLabel}
@@ -7669,9 +8119,164 @@ export default function App(): React.ReactElement {
                         <ChatRichContent
                           content={wikiBody}
                           className="wiki-rich-body"
+                          wikiHighlightTerms={wikiHighlightTerms}
+                          onWikiKeywordNavigate={(id, phrase) => void handleWikiTermClick(id, phrase)}
                           onRichDomReady={onWikiRichDomReady}
                         />
                       </div>
+
+                      {wikiSelectedId ? (
+                        <section className="wiki-postprocess-panel wiki-article-end-section" aria-label="Manual post process">
+                          <h2 className="wiki-section-heading">Manual post-process</h2>
+                          <p className="wiki-related-lead">
+                            Select passages, choose a keyword, and extract a focused article.
+                          </p>
+                          <div className="wiki-postprocess-keyword-row">
+                            <input
+                              className="input"
+                              type="text"
+                              value={wikiExtractKeywordDraft}
+                              onChange={(e) => setWikiExtractKeywordDraft(e.target.value)}
+                              placeholder="Keyword"
+                              maxLength={120}
+                            />
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              onClick={() => void runWikiManualExtraction()}
+                              disabled={wikiExtractBusy || wikiSelectedPassageCount === 0}
+                            >
+                              {wikiExtractBusy ? 'Extracting…' : 'Extract article'}
+                            </button>
+                          </div>
+                          {wikiKeywordCandidates.length > 0 ? (
+                            <div className="wiki-postprocess-keywords">
+                              {wikiKeywordCandidates.slice(0, 10).map((k) => (
+                                <button
+                                  key={k.keyword}
+                                  type="button"
+                                  className="wiki-postprocess-keyword-chip"
+                                  onClick={() => setWikiExtractKeywordDraft(k.keyword)}
+                                >
+                                  <span>{k.keyword}</span>
+                                  <span className="wiki-postprocess-keyword-score">
+                                    {Math.max(0, Math.round(k.score * 10) / 10)}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+                          {wikiExtractStatus ? <p className="muted wiki-postprocess-status">{wikiExtractStatus}</p> : null}
+                          <div className="wiki-postprocess-toolbar">
+                            <span className="muted">
+                              {wikiSelectedPassageCount}/{wikiPassages.length} selected · {wikiSelectedPassageWordCount} words
+                            </span>
+                            <div className="wiki-postprocess-toolbar-actions">
+                              <button
+                                type="button"
+                                className="btn-secondary btn-sm"
+                                onClick={() => applyWikiPassageSelection(wikiPassages.map((p) => p.chunkId), true)}
+                              >
+                                Select all
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-secondary btn-sm"
+                                onClick={() => applyWikiPassageSelection(wikiPassages.map((p) => p.chunkId), false)}
+                              >
+                                Clear
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-secondary btn-sm"
+                                disabled={wikiFilteredPassages.length === 0}
+                                onClick={() =>
+                                  applyWikiPassageSelection(
+                                    wikiFilteredPassages.map((p) => p.chunkId),
+                                    true
+                                  )
+                                }
+                              >
+                                Select filtered
+                              </button>
+                            </div>
+                          </div>
+                          <div className="wiki-postprocess-filter-row">
+                            <input
+                              className="input"
+                              type="search"
+                              value={wikiPassageFilterDraft}
+                              onChange={(e) => setWikiPassageFilterDraft(e.target.value)}
+                              placeholder="Filter passages by keyword, heading, or snippet"
+                              autoComplete="off"
+                              spellCheck={false}
+                            />
+                            <span className="muted">{wikiFilteredPassages.length} shown</span>
+                          </div>
+                          {wikiPassageHeadingGroups.length > 0 ? (
+                            <div className="wiki-postprocess-sections">
+                              {wikiPassageHeadingGroups.slice(0, 12).map((g) => {
+                                const selectedInGroup = g.chunkIds.filter((id) => wikiSelectedPassageIds[id] !== false).length
+                                return (
+                                  <div key={g.label} className="wiki-postprocess-section-chip">
+                                    <span className="wiki-postprocess-section-label">
+                                      {g.label} ({selectedInGroup}/{g.chunkIds.length})
+                                    </span>
+                                    <button
+                                      type="button"
+                                      className="btn-secondary btn-sm"
+                                      onClick={() => applyWikiPassageSelection(g.chunkIds, true)}
+                                    >
+                                      Select
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn-secondary btn-sm"
+                                      onClick={() => applyWikiPassageSelection(g.chunkIds, false)}
+                                    >
+                                      Clear
+                                    </button>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          ) : null}
+                          {wikiSelectedPassages.length > 0 ? (
+                            <div className="wiki-postprocess-preview">
+                              <div className="wiki-postprocess-preview-title">Extraction preview</div>
+                              {wikiSelectedPassages.slice(0, 3).map((p) => (
+                                <div key={`preview-${p.chunkId}`} className="wiki-postprocess-preview-row">
+                                  <strong>{p.title}</strong>
+                                  <span>{p.snippet}</span>
+                                </div>
+                              ))}
+                              {wikiSelectedPassages.length > 3 ? (
+                                <div className="muted wiki-postprocess-preview-more">
+                                  +{wikiSelectedPassages.length - 3} more selected passages
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                          <div className="wiki-postprocess-passages">
+                            {wikiFilteredPassages.map((p) => (
+                              <label key={p.chunkId} className="wiki-postprocess-passage">
+                                <input
+                                  type="checkbox"
+                                  checked={wikiSelectedPassageIds[p.chunkId] !== false}
+                                  onChange={(e) =>
+                                    setWikiSelectedPassageIds((prev) => ({ ...prev, [p.chunkId]: e.target.checked }))
+                                  }
+                                />
+                                <span className="wiki-postprocess-passage-title">{p.title}</span>
+                                <span className="wiki-postprocess-passage-snippet">{p.snippet}</span>
+                              </label>
+                            ))}
+                            {wikiFilteredPassages.length === 0 ? (
+                              <p className="muted wiki-postprocess-empty">No passages match this filter.</p>
+                            ) : null}
+                          </div>
+                        </section>
+                      ) : null}
 
                       {wikiGlossary.length > 0 ? (
                         <section
@@ -7721,32 +8326,33 @@ export default function App(): React.ReactElement {
                   </>
                 ) : null}
               </article>
+              ) : (
+                <div className="main-knowledge-graph-shell wiki-knowledge-graph-subview">
+                  <KnowledgeGraphView
+                    hideToolbarTitle
+                    data={kgPayload}
+                    loading={kgLoading}
+                    onRefresh={() => void loadKnowledgeGraph()}
+                    graphAnalysis={{
+                      busy: kgAnalysisBusy,
+                      error: kgAnalysisError,
+                      summary: kgAnalysisSummary,
+                      markdown: kgAnalysisMarkdown,
+                      ingestedId: kgAnalysisIngestedId,
+                      result: kgAnalysisResult
+                    }}
+                    onRunGraphAnalysis={(o) => void runKnowledgeGraphAnalysis(o)}
+                    onPickDestination={(d) => {
+                      setMainView('wiki')
+                      setWikiSubview('article')
+                      void openWikiPage(d.sourceId, { sectionOrd: d.sectionOrd ?? null })
+                    }}
+                  />
+                </div>
+              )}
               </div>
             </div>
           )}
-
-          {mainView === 'knowledgeGraph' ? (
-            <div className="main-knowledge-graph-shell">
-              <KnowledgeGraphView
-                hideToolbarTitle
-                data={kgPayload}
-                loading={kgLoading}
-                onRefresh={() => void loadKnowledgeGraph()}
-                graphAnalysis={{
-                  busy: kgAnalysisBusy,
-                  error: kgAnalysisError,
-                  summary: kgAnalysisSummary,
-                  markdown: kgAnalysisMarkdown,
-                  ingestedId: kgAnalysisIngestedId,
-                  result: kgAnalysisResult
-                }}
-                onRunGraphAnalysis={(o) => void runKnowledgeGraphAnalysis(o)}
-                onPickSource={(id) => {
-                  void navigateChatKeywordToWiki(id)
-                }}
-              />
-            </div>
-          ) : null}
 
           {mainView === 'ontology' ? (
             <div className="main-knowledge-graph-shell">
@@ -7824,6 +8430,7 @@ export default function App(): React.ReactElement {
               ideJourneyAutoChecklist={ideJourneyAutoChecklist}
               onIdeJourneyAutoChecklistChange={(v) => void setIdeJourneyAutoChecklistPersist(v)}
               pluginReports={integrationPluginReports}
+              idePromptMonitor={idePromptMonitor}
               runtimeRunning={runtimeOn}
               runtimeKind={runtimeStatus?.kind ?? 'none'}
               bridgeEnabled={integrationListenEnabled}
@@ -7841,6 +8448,30 @@ export default function App(): React.ReactElement {
               }}
               onRefreshRuntime={refreshRuntimeStatus}
             />
+          ) : null}
+
+          {mainView === 'releasePlanner' ? (
+            <div className="main-release-readiness-shell">
+              <ReleaseReadinessView
+                snapshot={{
+                  runtimeRunning: runtimeOn,
+                  modelConfigured: modelPath.trim().length > 0,
+                  bridgeEnabled: integrationListenEnabled,
+                  integrationTokenConfigured: integrationTokenDraft.trim().length > 0,
+                  pluginReportCount: integrationPluginReports.length,
+                  wikiTopicCount: wikiTopics.length,
+                  knowledgeGraphNodeCount: kgPayload?.nodes.length ?? 0,
+                  ontologyEntityCount: ontologyStats?.entityCount ?? 0,
+                  codebaseAnalysisCount: codebaseAnalysisSnapshots.length,
+                  trainJobCount: trainJobs.length,
+                  metricsSampleCount: metricsBundle?.history.length ?? 0,
+                  downloadsCompleteCount: localDownloads.filter((d) => d.status === 'complete').length,
+                  updatesSupported: paths?.updatesSupported === true
+                }}
+                featureSet={releaseFeatureSet}
+                onFeatureSetChange={saveReleaseFeatureSet}
+              />
+            </div>
           ) : null}
         </div>
         {inferredModelRuntimeKind === 'llamacpp' && (runtimeStarting || runtimeLoadLog.length > 0) ? (
@@ -8547,7 +9178,7 @@ export default function App(): React.ReactElement {
                         <div className="drawer-section">
                           <h3 className="settings-section-title" id="settings-workspace-role-heading">
                             <i className="fa-solid fa-user-tag" aria-hidden />
-                            Workspace role
+                            Workspace profile
                           </h3>
                           <p className="muted" style={{ marginTop: 0 }}>
                             Simplifies the sidebar to match how you work. Builder/Admin exposes all views and settings;
@@ -8589,14 +9220,65 @@ export default function App(): React.ReactElement {
                         </div>
                         <div className="drawer-section">
                           <h3 className="settings-section-title">
-                            <i className="fa-solid fa-hand-sparkles" aria-hidden />
-                            First-time tips
+                            <i className="fa-solid fa-person-chalkboard" aria-hidden />
+                            Presentation focus
                           </h3>
                           <p className="muted" style={{ marginTop: 0 }}>
-                            Show the welcome checklist again (models, Run, and chat).
+                            Keep the app centered on setup, knowledge, training, and release-readiness during presentations.
                           </p>
+                          <label className="metrics-widget-check">
+                            <input
+                              type="checkbox"
+                              checked={presentationModeEnabled}
+                              onChange={(e) => {
+                                const checked = e.target.checked
+                                setPresentationModeEnabled(checked)
+                                void window.api.setConfig({ presentationModeEnabled: checked }).then((r) => {
+                                  if (!r.ok) setErr(r.error ?? 'Could not save presentation mode')
+                                })
+                              }}
+                            />
+                            <span>Enable presentation mode (focused navigation)</span>
+                          </label>
+                          <label className="metrics-widget-check" style={{ marginTop: 8 }}>
+                            <input
+                              type="checkbox"
+                              checked={showAdvancedSurfaces}
+                              onChange={(e) => {
+                                const checked = e.target.checked
+                                setShowAdvancedSurfaces(checked)
+                                void window.api.setConfig({ showAdvancedSurfaces: checked }).then((r) => {
+                                  if (!r.ok) setErr(r.error ?? 'Could not save advanced surface visibility')
+                                })
+                              }}
+                            />
+                            <span>Show advanced surfaces (Developer, Architecture, Ontology internals)</span>
+                          </label>
+                        </div>
+                        <div className="drawer-section">
+                          <h3 className="settings-section-title">
+                            <i className="fa-solid fa-hand-sparkles" aria-hidden />
+                            Presentation checklist and first-time tips
+                          </h3>
+                          <p className="muted" style={{ marginTop: 0 }}>
+                            Setup guidance is role-specific and can be opened whenever needed.
+                          </p>
+                          <label className="setup-tour-startup-toggle settings-startup-tour-toggle">
+                            <input
+                              type="checkbox"
+                              checked={setupTourOnStartup}
+                              onChange={(e) => {
+                                const checked = e.target.checked
+                                setSetupTourOnStartup(checked)
+                                void window.api.setConfig({ setupTourOnStartup: checked }).then((r) => {
+                                  if (!r.ok) setErr(r.error ?? 'Could not save startup tour preference')
+                                })
+                              }}
+                            />
+                            <span>Show setup tour on startup when onboarding updates are available</span>
+                          </label>
                           <button type="button" className="btn-secondary" onClick={() => void showWelcomeGuideAgain()}>
-                            Show welcome tips…
+                            Show first-run checklist…
                           </button>
                           <button type="button" className="btn-secondary" style={{ marginLeft: 8 }} onClick={() => void rerunSetupTour()}>
                             Run setup tour again…
@@ -8741,7 +9423,7 @@ export default function App(): React.ReactElement {
                         </div>
                         <div className="drawer-section">
                           <button type="button" className="btn-secondary" onClick={() => setDrawer('runtime')}>
-                            Open Run (AI setup)…
+                            Open Run (runtime setup)…
                           </button>
                           <p className="muted" style={{ marginTop: 10, marginBottom: 0 }}>
                             Start or stop your model, install Ollama, and see downloads.
@@ -8785,6 +9467,20 @@ export default function App(): React.ReactElement {
                                 </option>
                               ))}
                             </select>
+                          </label>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 }}>
+                            <input
+                              type="checkbox"
+                              checked={animatedBackdropEnabled}
+                              onChange={(e) => {
+                                const checked = e.target.checked
+                                setAnimatedBackdropEnabled(checked)
+                                void window.api.setConfig({ animatedBackdropEnabled: checked }).then((r) => {
+                                  if (!r.ok) setErr(r.error ?? 'Could not save animated background preference')
+                                })
+                              }}
+                            />
+                            <span>Enable animated background sphere</span>
                           </label>
                         </div>
                         <div className="drawer-section">

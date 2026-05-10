@@ -16,7 +16,9 @@ import type {
   DeepLearnRunProgress,
   DeepLearnRunResult,
   EvidenceCard,
+  IntegrationModelActivityEvent,
   KbSearchHit,
+  KbIngestJobSummary,
   PluginIntegrationReport,
   OntologyEntityDetails,
   OntologyQueryRequest,
@@ -25,10 +27,15 @@ import type {
   RuntimeChatProgress,
   RuntimeLoadProgress,
   SaveIntellijPluginZipResult,
+  TrainStartValidationResult,
   TrainingManifest,
   KbIngestFileProgress,
   WikiChatHighlightTerm,
+  WikiExtractArticleResult,
+  WikiKeywordCandidate,
+  WikiPassageSummary,
   WikiExportZipResult,
+  WikiTermResolutionResult,
   WikiPagePayload,
   WikiReanalyzeProgress,
   WikiReanalyzeResult,
@@ -121,6 +128,12 @@ contextBridge.exposeInMainWorld('api', {
   onIntegrationPluginReport: (callback: (payload: PluginIntegrationReport) => void) => {
     const channel = IPC.INTEGRATION_PLUGIN_REPORT
     const listener = (_e: IpcRendererEvent, payload: PluginIntegrationReport) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
+  onIntegrationModelActivity: (callback: (payload: IntegrationModelActivityEvent) => void) => {
+    const channel = IPC.INTEGRATION_MODEL_ACTIVITY
+    const listener = (_e: IpcRendererEvent, payload: IntegrationModelActivityEvent) => callback(payload)
     ipcRenderer.on(channel, listener)
     return () => ipcRenderer.removeListener(channel, listener)
   },
@@ -229,6 +242,7 @@ contextBridge.exposeInMainWorld('api', {
   kbIngestText: (title: string, uri: string, body: string) => invoke(IPC.KB_INGEST_TEXT, title, uri, body),
   kbIngestConversation: (conversationId: string) => invoke(IPC.KB_INGEST_CONVERSATION, conversationId),
   kbIngestFile: () => invoke(IPC.KB_INGEST_FILE),
+  kbIngestJobs: (limit?: number) => invoke<KbIngestJobSummary[]>(IPC.KB_INGEST_JOBS, limit),
   onKbIngestFileProgress: (callback: (payload: KbIngestFileProgress) => void) => {
     const channel = IPC.KB_INGEST_FILE_PROGRESS
     const listener = (_e: IpcRendererEvent, payload: KbIngestFileProgress) => callback(payload)
@@ -237,10 +251,19 @@ contextBridge.exposeInMainWorld('api', {
   },
   kbSources: () => invoke(IPC.KB_SOURCES),
   kbSearch: (query: string, limit?: number) => invoke(IPC.KB_SEARCH, query, limit),
+  kbSearchRetrieval: (p: { query: string; limit?: number; domainIds?: string[] }) =>
+    invoke<KbSearchHit[]>(IPC.KB_SEARCH_RETRIEVAL, p),
   kbSearchHits: (query: string, limit?: number) => invoke<KbSearchHit[]>(IPC.KB_SEARCH_HITS, query, limit),
   kbChunks: (sourceId: string) => invoke(IPC.KB_CHUNKS, sourceId),
   kbWikiTopics: () => invoke<WikiTopic[]>(IPC.KB_WIKI_TOPICS),
   kbWikiPage: (sourceId: string) => invoke<WikiPagePayload>(IPC.KB_WIKI_PAGE, sourceId),
+  kbWikiPassages: (sourceId: string) => invoke<WikiPassageSummary[]>(IPC.KB_WIKI_PASSAGES, sourceId),
+  kbWikiKeywords: (p: { sourceId: string; chunkIds?: string[]; limit?: number }) =>
+    invoke<WikiKeywordCandidate[]>(IPC.KB_WIKI_KEYWORDS, p),
+  kbWikiExtractArticle: (p: { sourceId: string; keyword: string; chunkIds: string[]; title?: string }) =>
+    invoke<WikiExtractArticleResult>(IPC.KB_WIKI_EXTRACT_ARTICLE, p),
+  kbWikiResolveTerm: (p: { term: string; contextSourceId?: string; contextSnippet?: string }) =>
+    invoke<WikiTermResolutionResult>(IPC.KB_WIKI_RESOLVE_TERM, p),
   kbWikiHighlightTerms: () => invoke<WikiChatHighlightTerm[]>(IPC.KB_WIKI_HIGHLIGHT_TERMS),
   kbDeleteSource: (sourceId: string) => invoke<{ ok: true }>(IPC.KB_DELETE_SOURCE, sourceId),
   kbResetWikiAndKeywords: () =>
@@ -337,8 +360,9 @@ contextBridge.exposeInMainWorld('api', {
     kbSourceIds?: string[]
     displayName?: string
     domainId?: string
-    pythonPath?: string
   }) => invoke(IPC.TRAIN_START, p),
+  trainValidateStart: (p: { baseModelPath: string }) =>
+    invoke<TrainStartValidationResult>(IPC.TRAIN_VALIDATE_START, p),
   trainStatus: (id: string) => invoke(IPC.TRAIN_STATUS, id),
   trainListJobs: () => invoke(IPC.TRAIN_LIST_JOBS),
   trainRescanArtifact: (jobId: string) => invoke(IPC.TRAIN_RESCAN_ARTIFACT, jobId),

@@ -16,8 +16,10 @@ import type {
   DownloadRow,
   EvidenceCard,
   HardwareSummary,
+  KbIngestJobSummary,
   KbIngestFileProgress,
   KbSearchHit,
+  IntegrationModelActivityEvent,
   KnowledgeGraphPayload,
   OntologyEntityDetails,
   OntologyQueryRequest,
@@ -28,11 +30,16 @@ import type {
   RuntimeChatProgress,
   RuntimeLoadProgress,
   RuntimeStatus,
+  TrainStartValidationResult,
   TrainingManifest,
   WikiChatHighlightTerm,
+  WikiExtractArticleResult,
   SaveIntellijPluginZipResult,
   WikiExportZipResult,
+  WikiKeywordCandidate,
+  WikiTermResolutionResult,
   WikiPagePayload,
+  WikiPassageSummary,
   WikiReanalyzeProgress,
   WikiReanalyzeResult,
   WikiTopic,
@@ -72,7 +79,10 @@ type Api = {
       showElectronDevMainView?: boolean
       uiRole?: string
       workspaceDensity?: string
+      releaseFeatureSet?: Record<string, boolean>
+      navRailShowLabels?: boolean
       setupTourVersion?: number
+      setupTourOnStartup?: boolean
       typographyComfort?: string
       typographyFontFamily?: string
       typographyLineHeightFactor?: number
@@ -154,6 +164,7 @@ type Api = {
   integrationPluginReportsList: () => Promise<PluginIntegrationReport[]>
   integrationBridgeSelfTest: (opts?: { smokeChat?: boolean }) => Promise<IntegrationBridgeSelfTestResult>
   onIntegrationPluginReport: (callback: (payload: PluginIntegrationReport) => void) => () => void
+  onIntegrationModelActivity: (callback: (payload: IntegrationModelActivityEvent) => void) => () => void
   codebaseFormalGet: () => Promise<CodebaseFormalBundle>
   codebaseFormalPickRoot: () => Promise<string | null>
   codebaseFormalAdd: (p: {
@@ -251,13 +262,32 @@ type Api = {
   kbIngestText: (title: string, uri: string, body: string) => Promise<unknown>
   kbIngestConversation: (conversationId: string) => Promise<unknown>
   kbIngestFile: () => Promise<unknown>
+  kbIngestJobs: (limit?: number) => Promise<KbIngestJobSummary[]>
   onKbIngestFileProgress: (callback: (payload: KbIngestFileProgress) => void) => () => void
   kbSources: () => Promise<unknown[]>
   kbSearch: (query: string, limit?: number) => Promise<string[]>
+  kbSearchRetrieval: (p: { query: string; limit?: number; domainIds?: string[] }) => Promise<KbSearchHit[]>
   kbSearchHits: (query: string, limit?: number) => Promise<KbSearchHit[]>
   kbChunks: (sourceId: string) => Promise<unknown[]>
   kbWikiTopics: () => Promise<WikiTopic[]>
   kbWikiPage: (sourceId: string) => Promise<WikiPagePayload>
+  kbWikiPassages: (sourceId: string) => Promise<WikiPassageSummary[]>
+  kbWikiKeywords: (p: {
+    sourceId: string
+    chunkIds?: string[]
+    limit?: number
+  }) => Promise<WikiKeywordCandidate[]>
+  kbWikiExtractArticle: (p: {
+    sourceId: string
+    keyword: string
+    chunkIds: string[]
+    title?: string
+  }) => Promise<WikiExtractArticleResult>
+  kbWikiResolveTerm: (p: {
+    term: string
+    contextSourceId?: string
+    contextSnippet?: string
+  }) => Promise<WikiTermResolutionResult>
   kbWikiHighlightTerms: () => Promise<WikiChatHighlightTerm[]>
   kbDeleteSource: (sourceId: string) => Promise<{ ok: true }>
   kbResetWikiAndKeywords: () => Promise<{ sourcesRemoved: number; promptDomainsRemoved: number }>
@@ -336,8 +366,8 @@ type Api = {
     kbSourceIds?: string[]
     displayName?: string
     domainId?: string
-    pythonPath?: string
   }) => Promise<unknown>
+  trainValidateStart: (p: { baseModelPath: string }) => Promise<TrainStartValidationResult>
   trainStatus: (id: string) => Promise<unknown>
   trainListJobs: () => Promise<unknown[]>
   trainRescanArtifact: (jobId: string) => Promise<unknown>

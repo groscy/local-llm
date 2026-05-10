@@ -30,6 +30,7 @@ import {
   type ForceSnapshot
 } from './knowledgeGraph/forceSimulationLayout'
 import { useKnowledgeGraphViewport } from './knowledgeGraph/useKnowledgeGraphViewport'
+import { KnowledgeGraphWebGLCanvas, type WebGLRenderEdge, type WebGLRenderNode } from './knowledgeGraph/KnowledgeGraphWebGLCanvas'
 
 const CLUSTER_STROKE: string[] = [
   'hsl(200 55% 52%)',
@@ -45,6 +46,70 @@ const CLUSTER_STROKE: string[] = [
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s
   return `${s.slice(0, max - 1)}...`
+}
+
+type LodTier = 'overview' | 'mid' | 'detail'
+
+const LABEL_FONT_BY_KIND: Record<KnowledgeGraphNode['kind'], { size: number; weight: number }> = {
+  source: { size: 10, weight: 600 },
+  wiki: { size: 9, weight: 500 },
+  chunk: { size: 8.5, weight: 500 }
+}
+
+function measureLabelWidth(
+  cache: Map<string, number>,
+  ctx: CanvasRenderingContext2D | null,
+  text: string,
+  font: { size: number; weight: number }
+): number {
+  if (!text) return 0
+  const key = `${font.weight}-${font.size}:${text}`
+  const cached = cache.get(key)
+  if (cached != null) return cached
+  if (!ctx) {
+    const fallback = text.length * font.size * 0.58
+    cache.set(key, fallback)
+    return fallback
+  }
+  ctx.font = `${font.weight} ${font.size}px Inter, system-ui, sans-serif`
+  const width = ctx.measureText(text).width
+  cache.set(key, width)
+  return width
+}
+
+function truncateToPixelWidth(
+  truncateCache: Map<string, string>,
+  widthCache: Map<string, number>,
+  ctx: CanvasRenderingContext2D | null,
+  text: string,
+  maxWidth: number,
+  font: { size: number; weight: number }
+): string {
+  if (maxWidth <= 0 || !text) return ''
+  const key = `${font.weight}-${font.size}-${Math.round(maxWidth)}:${text}`
+  const cached = truncateCache.get(key)
+  if (cached != null) return cached
+  if (measureLabelWidth(widthCache, ctx, text, font) <= maxWidth) {
+    truncateCache.set(key, text)
+    return text
+  }
+  const ellipsis = '...'
+  let lo = 0
+  let hi = text.length
+  let best = ellipsis
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2)
+    const attempt = `${text.slice(0, Math.max(0, mid)).trimEnd()}${ellipsis}`
+    const width = measureLabelWidth(widthCache, ctx, attempt, font)
+    if (width <= maxWidth) {
+      best = attempt
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+  truncateCache.set(key, best)
+  return best
 }
 
 function hubSourceSet(analysis: KnowledgeGraphAnalysisResult | null | undefined): Set<string> {
@@ -83,11 +148,13 @@ export function KnowledgeGraphView(props: {
   loading: boolean
   onRefresh: () => void
   onPickSource?: (sourceId: string) => void
+  onPickDestination?: (destination: { sourceId: string; sectionOrd?: number | null; sectionAnchor?: string | null }) => void
   hideToolbarTitle?: boolean
+  onInspectNode?: (payload: { node: KnowledgeGraphNode; anchorClient: { x: number; y: number } }) => void
   graphAnalysis?: KnowledgeGraphAnalysisPanelProps
   onRunGraphAnalysis?: (opts: { ingestReport: boolean }) => void
 }): ReactNode {
-  const { data, loading, onRefresh, onPickSource, hideToolbarTitle, graphAnalysis, onRunGraphAnalysis } = props
+  const { data, loading, onRefresh, onPickSource, onPickDestination, hideToolbarTitle, onInspectNode, graphAnalysis, onRunGraphAnalysis } = props
   const graphInitialLoad = loading && data == null
   const analysisBusy = graphAnalysis?.busy ?? false
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -107,8 +174,17 @@ export function KnowledgeGraphView(props: {
   const [analysisOpen, setAnalysisOpen] = useState(true)
   const [minimapOpen, setMinimapOpen] = useState(true)
   const [minimalTextMode, setMinimalTextMode] = useState(true)
-  const [clusterMode, setClusterMode] = useState<KnowledgeGraphClusterMode>('related')
+  const [rendererPreference, setRendererPreference] = useState<'auto' | 'svg' | 'webgl'>(() => {
+    try {
+      const raw = globalThis.localStorage?.getItem('kgRendererPreference')
+      return raw === 'svg' || raw === 'webgl' ? raw : 'auto'
+    } catch {
+      return 'auto'
+    }
+  })
+  const [clusterMode, setClusterMode] = useState<KnowledgeGraphClusterMode>('domain')
   const [kbdFocusId, setKbdFocusId] = useState<string | null>(null)
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [semanticGravity, setSemanticGravity] = useState(() => readStoredGravity())
   const [minSurfaceGap, setMinSurfaceGap] = useState(() => readStoredMinSurfaceGap())
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null)
@@ -132,6 +208,24 @@ export function KnowledgeGraphView(props: {
       /* ignore */
     }
   }, [minSurfaceGap])
+
+  useLayoutEffect(() => {
+    try {
+      if (rendererPreference === 'auto') globalThis.localStorage?.removeItem('kgRendererPreference')
+      else globalThis.localStorage?.setItem('kgRendererPreference', rendererPreference)
+    } catch {
+      /* ignore */
+    }
+  }, [rendererPreference])
+
+  useLayoutEffect(() => {
+    const canvas = globalThis.document?.createElement('canvas')
+    if (!canvas) {
+      labelMeasureCtxRef.current = null
+      return
+    }
+    labelMeasureCtxRef.current = canvas.getContext('2d')
+  }, [])
 
   useLayoutEffect(() => {
     const el = wrapRef.current
@@ -167,7 +261,18 @@ export function KnowledgeGraphView(props: {
   useEffect(() => {
     pinnedNodePositionsRef.current = {}
     setPinnedNodePositions({})
+    setSelectedNodeId(null)
   }, [topologyKey])
+
+  useEffect(
+    () => () => {
+      if (centerAnimRef.current != null) {
+        globalThis.cancelAnimationFrame(centerAnimRef.current)
+        centerAnimRef.current = null
+      }
+    },
+    []
+  )
 
   const simRef = useRef<ReturnType<typeof createKnowledgeGraphSimulation> | null>(null)
   useEffect(() => {
@@ -183,10 +288,26 @@ export function KnowledgeGraphView(props: {
       clusterMode,
       visibleEdges: edgeShow,
       pinnedNodePositions: pinned,
-      onTick: (snapshot) => setForceLayout(snapshot)
+      onTick: (snapshot) => {
+        pendingSnapshotRef.current = snapshot
+        if (tickRafRef.current != null) return
+        tickRafRef.current = globalThis.requestAnimationFrame(() => {
+          tickRafRef.current = null
+          const next = pendingSnapshotRef.current
+          pendingSnapshotRef.current = null
+          if (next) setForceLayout(next)
+        })
+      }
     })
     simRef.current = sim
-    return () => sim.destroy()
+    return () => {
+      sim.destroy()
+      if (tickRafRef.current != null) {
+        globalThis.cancelAnimationFrame(tickRafRef.current)
+        tickRafRef.current = null
+      }
+      pendingSnapshotRef.current = null
+    }
   }, [data, seedLayout, semanticGravity, minSurfaceGap, clusterMode, edgeShow])
 
   const displayLayout = forceLayout ?? seedLayout
@@ -209,6 +330,13 @@ export function KnowledgeGraphView(props: {
     moved: boolean
   } | null>(null)
   const suppressNodeClickRef = useRef(false)
+  const centerAnimRef = useRef<number | null>(null)
+  const tickRafRef = useRef<number | null>(null)
+  const pendingSnapshotRef = useRef<ForceSnapshot | null>(null)
+  const perfRef = useRef<{ samples: number; totalMs: number; lastReportTs: number }>({ samples: 0, totalMs: 0, lastReportTs: 0 })
+  const labelMeasureCtxRef = useRef<CanvasRenderingContext2D | null>(null)
+  const labelWidthCacheRef = useRef<Map<string, number>>(new Map())
+  const labelTruncateCacheRef = useRef<Map<string, string>>(new Map())
 
   const onWrapPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     const d = nodeDragActiveRef.current
@@ -222,6 +350,15 @@ export function KnowledgeGraphView(props: {
       pinnedNodePositionsRef.current = { ...pinnedNodePositionsRef.current, [d.id]: { x: worldX, y: worldY } }
     }
     vpApiRef.current.onPointerMove(e)
+  }, [])
+
+  const onWrapPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement
+    if (!target.closest('.kg-node') && !target.closest('.kg-map-interactive') && !target.closest('.kg-webgl-canvas')) {
+      setSelectedNodeId(null)
+      setKbdFocusId(null)
+    }
+    vpApiRef.current.onPointerDown(e)
   }, [])
 
   const onWrapPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -333,21 +470,67 @@ export function KnowledgeGraphView(props: {
 
   const edgeHighlight = useCallback(
     (from: string, to: string): boolean => {
-      const focus = hoverId ?? kbdFocusId
+      const focus = hoverId ?? kbdFocusId ?? selectedNodeId
       if (!focus) return false
       return from === focus || to === focus
     },
-    [hoverId, kbdFocusId]
+    [hoverId, kbdFocusId, selectedNodeId]
   )
 
   const relatedEdgeVisible = useCallback(
     (from: string, to: string): boolean => {
       if (edgeShow.related) return true
-      const focus = hoverId ?? kbdFocusId
+      const focus = hoverId ?? kbdFocusId ?? selectedNodeId
       if (!focus) return false
       return from === focus || to === focus
     },
-    [edgeShow.related, hoverId, kbdFocusId]
+    [edgeShow.related, hoverId, kbdFocusId, selectedNodeId]
+  )
+
+  const centerNodeInViewport = useCallback((nodeId: string) => {
+    const lay = displayLayoutRef.current
+    const wrap = wrapRef.current
+    if (!lay || !wrap) return
+    const p = lay.positions.get(nodeId)
+    if (!p) return
+    const start = vpApiRef.current.viewport
+    const targetTx = wrap.clientWidth / 2 - p.x * start.scale
+    const targetTy = wrap.clientHeight / 2 - p.y * start.scale
+    const delta = Math.hypot(targetTx - start.tx, targetTy - start.ty)
+    if (delta < 16) return
+    const durationMs = 180
+    const startedAt = globalThis.performance.now()
+    if (centerAnimRef.current != null) globalThis.cancelAnimationFrame(centerAnimRef.current)
+    const tick = (): void => {
+      const t = Math.min(1, (globalThis.performance.now() - startedAt) / durationMs)
+      const eased = 1 - Math.pow(1 - t, 3)
+      vpApiRef.current.setViewport((prev) => ({
+        ...prev,
+        tx: start.tx + (targetTx - start.tx) * eased,
+        ty: start.ty + (targetTy - start.ty) * eased
+      }))
+      if (t < 1) centerAnimRef.current = globalThis.requestAnimationFrame(tick)
+      else centerAnimRef.current = null
+    }
+    centerAnimRef.current = globalThis.requestAnimationFrame(tick)
+  }, [])
+
+  const resolveNodeDestination = useCallback(
+    (node: KnowledgeGraphNode): { sourceId: string; sectionOrd?: number | null; sectionAnchor?: string | null } | null => {
+      const sourceId =
+        node.kind === 'source'
+          ? node.id
+          : node.kind === 'chunk'
+            ? node.sourceId || node.targetSourceId
+            : node.targetSourceId || (node.id.startsWith('src:') ? node.id.slice(4) : '')
+      if (!sourceId) return null
+      return {
+        sourceId,
+        sectionOrd: node.kind === 'chunk' ? node.sectionOrd ?? null : null,
+        sectionAnchor: node.kind === 'chunk' ? node.sectionAnchor ?? null : null
+      }
+    },
+    []
   )
 
   const onNodeClick = useCallback(
@@ -372,11 +555,32 @@ export function KnowledgeGraphView(props: {
         toggleSourceCollapse(node.id)
         return
       }
-      if (node.kind === 'source') onPickSource?.(node.id)
-      else if (node.kind === 'chunk' && node.sourceId) onPickSource?.(node.sourceId)
-      else if (node.kind === 'wiki' && node.id.startsWith('src:')) onPickSource?.(node.id.slice(4))
+      setSelectedNodeId(node.id)
+      setKbdFocusId(node.id)
+      centerNodeInViewport(node.id)
+      if (onInspectNode) {
+        const lay = displayLayoutRef.current
+        const p = lay?.positions.get(node.id)
+        const wrapRect = wrapRef.current?.getBoundingClientRect()
+        if (e) {
+          onInspectNode({ node, anchorClient: { x: e.clientX, y: e.clientY } })
+        } else if (p && wrapRect) {
+          onInspectNode({
+            node,
+            anchorClient: {
+              x: wrapRect.left + vpApiRef.current.viewport.tx + p.x * vpApiRef.current.viewport.scale,
+              y: wrapRect.top + vpApiRef.current.viewport.ty + p.y * vpApiRef.current.viewport.scale
+            }
+          })
+        }
+      }
+      const destination = resolveNodeDestination(node)
+      if (destination) {
+        if (onPickDestination) onPickDestination(destination)
+        else onPickSource?.(destination.sourceId)
+      }
     },
-    [onPickSource, toggleSourceCollapse]
+    [centerNodeInViewport, onInspectNode, onPickDestination, onPickSource, resolveNodeDestination, toggleSourceCollapse]
   )
 
   const activateKbdFocus = useCallback(() => {
@@ -410,6 +614,7 @@ export function KnowledgeGraphView(props: {
       } else if (e.key === 'Escape') {
         e.preventDefault()
         setKbdFocusId(null)
+        setSelectedNodeId(null)
       }
     },
     [kbdOrderIds, activateKbdFocus]
@@ -520,10 +725,15 @@ export function KnowledgeGraphView(props: {
   const { positions, boxes } = displayLayout
   const hulls = forceLayout?.hulls ?? []
   const { tx, ty, scale: zs } = vpApi.viewport
-  const hideChunkLabels = zs < 0.5
-  const hideWikiLabels = zs < 0.36
+  const autoWebgl =
+    data.nodes.length > 1300 &&
+    (data.nodes.every((n) => n.kind === 'source') || data.nodes.filter((n) => n.kind === 'source').length > data.nodes.length * 0.8)
+  const activeRenderer = rendererPreference === 'auto' ? (autoWebgl ? 'webgl' : 'svg') : rendererPreference
+  const hideChunkLabels = zs < 0.38
+  const hideWikiLabels = zs < 0.24
+  const lodTier: LodTier = zs < 0.3 ? 'overview' : zs < 0.78 ? 'mid' : 'detail'
   const matrix = `translate(${tx},${ty}) scale(${zs})`
-  const hoverOrFocusId = hoverId ?? kbdFocusId
+  const hoverOrFocusId = hoverId ?? kbdFocusId ?? selectedNodeId
   const worldVp = {
     x0: -tx / zs,
     y0: -ty / zs,
@@ -532,59 +742,119 @@ export function KnowledgeGraphView(props: {
   }
   const intersectsWorldViewport = (x0: number, y0: number, x1: number, y1: number, pad = 0): boolean =>
     x1 >= worldVp.x0 - pad && x0 <= worldVp.x1 + pad && y1 >= worldVp.y0 - pad && y0 <= worldVp.y1 + pad
-
-  const visibleNodeIds = new Set<string>()
-  for (const n of data.nodes) {
-    const b = boxes.get(n.id)
-    if (!b) continue
-    if (
-      n.id === hoverOrFocusId ||
-      n.id === draggingNodeId ||
-      n.id in pinnedNodePositions ||
-      intersectsWorldViewport(b.x, b.y, b.x + b.w, b.y + b.h, 210)
-    ) {
-      visibleNodeIds.add(n.id)
+  const nodeById = new Map(data.nodes.map((n) => [n.id, n] as const))
+  const graphPerfEnabled = (() => {
+    try {
+      return globalThis.localStorage?.getItem('kgPerfDebug') === '1'
+    } catch {
+      return false
     }
-  }
-
-  const edgeRenderList = data.edges
-    .map((edge, i) => {
-      const p1 = positions.get(edge.from)
-      const p2 = positions.get(edge.to)
-      const b1 = boxes.get(edge.from)
-      const b2 = boxes.get(edge.to)
-      if (!p1 || !p2 || !b1 || !b2) return null
-      const hi = edgeHighlight(edge.from, edge.to)
-      if (!hi && !visibleNodeIds.has(edge.from) && !visibleNodeIds.has(edge.to)) return null
-      const ex0 = Math.min(p1.x, p2.x)
-      const ey0 = Math.min(p1.y, p2.y)
-      const ex1 = Math.max(p1.x, p2.x)
-      const ey1 = Math.max(p1.y, p2.y)
-      if (!hi && !intersectsWorldViewport(ex0, ey0, ex1, ey1, 180)) return null
-      const visible =
-        edge.kind === 'related'
-          ? edgeShow.related || relatedEdgeVisible(edge.from, edge.to)
-          : edgeShow[edge.kind]
-      if (!visible) return null
-      const salience = edgeSalience(edge)
-      if (!hi) {
-        if (zs < 0.55 && salience < 0.48) return null
-        if (salience < 0.2) return null
+  })()
+  const graphDerived = (() => {
+    const startedAt = globalThis.performance.now()
+    if (labelWidthCacheRef.current.size > 12000) labelWidthCacheRef.current.clear()
+    if (labelTruncateCacheRef.current.size > 12000) labelTruncateCacheRef.current.clear()
+    const cullOnlyExtreme = zs < 0.19 && data.nodes.length > 900
+    const viewportPad = cullOnlyExtreme ? 220 : lodTier === 'overview' ? 380 : 450
+    const visibleNodeIds = new Set<string>()
+    for (const n of data.nodes) {
+      const b = boxes.get(n.id)
+      if (!b) continue
+      if (
+        n.id === hoverOrFocusId ||
+        n.id === selectedNodeId ||
+        n.id === draggingNodeId ||
+        n.id in pinnedNodePositions ||
+        intersectsWorldViewport(b.x, b.y, b.x + b.w, b.y + b.h, viewportPad)
+      ) {
+        visibleNodeIds.add(n.id)
       }
-      return { edge, p1, p2, b1, b2, hi, salience, key: `${edge.from}-${edge.to}-${edge.kind}-${i}` }
-    })
-    .filter((x): x is NonNullable<typeof x> => x != null)
-    .sort((a, b) => Number(b.hi) - Number(a.hi) || b.salience - a.salience)
+    }
 
-  const maxAmbientEdges = data.edges.length > 700 ? 380 : data.edges.length > 400 ? 520 : 700
-  const highlighted = edgeRenderList.filter((e) => e.hi)
-  const ambient = edgeRenderList.filter((e) => !e.hi).slice(0, maxAmbientEdges)
-  const boundedEdges = [...highlighted, ...ambient]
+    const degree = new Map<string, number>()
+    for (const edge of data.edges) {
+      degree.set(edge.from, (degree.get(edge.from) ?? 0) + 1)
+      degree.set(edge.to, (degree.get(edge.to) ?? 0) + 1)
+    }
+    const maxDegree = Math.max(1, ...degree.values())
+    const importance = new Map<string, number>()
+    for (const n of data.nodes) {
+      const deg = (degree.get(n.id) ?? 0) / maxDegree
+      const confidence = typeof n.confidence === 'number' ? Math.max(0, Math.min(1, n.confidence)) : 0.56
+      const novelty = typeof n.novelty === 'number' ? Math.max(0, Math.min(1, n.novelty)) : 0.4
+      importance.set(n.id, Math.max(0.04, Math.min(1, deg * 0.5 + confidence * 0.32 + novelty * 0.18)))
+    }
+    const focusNeighbors = new Set<string>()
+    if (hoverOrFocusId) {
+      focusNeighbors.add(hoverOrFocusId)
+      for (const edge of data.edges) {
+        if (edge.from === hoverOrFocusId) focusNeighbors.add(edge.to)
+        if (edge.to === hoverOrFocusId) focusNeighbors.add(edge.from)
+      }
+    }
+    if (selectedNodeId) {
+      focusNeighbors.add(selectedNodeId)
+      for (const edge of data.edges) {
+        if (edge.from === selectedNodeId) focusNeighbors.add(edge.to)
+        if (edge.to === selectedNodeId) focusNeighbors.add(edge.from)
+      }
+    }
+    const nodeIsDimmed = (id: string): boolean => {
+      if (hoverOrFocusId || selectedNodeId) return !focusNeighbors.has(id)
+      if (lodTier === 'overview') return (importance.get(id) ?? 0) < 0.2
+      if (lodTier === 'mid') return (importance.get(id) ?? 0) < 0.11
+      return false
+    }
 
-  const visibleLabelIds = (() => {
-    const taken: Array<{ x0: number; y0: number; x1: number; y1: number }> = []
-    const ids = new Set<string>()
-    const priority = (n: KnowledgeGraphNode): number => (n.kind === 'source' ? 3 : n.kind === 'wiki' ? 2 : 1)
+    const edgeRenderList = data.edges
+      .map((edge, i) => {
+        const p1 = positions.get(edge.from)
+        const p2 = positions.get(edge.to)
+        const b1 = boxes.get(edge.from)
+        const b2 = boxes.get(edge.to)
+        if (!p1 || !p2 || !b1 || !b2) return null
+        const hi = edgeHighlight(edge.from, edge.to)
+        if (!hi && !visibleNodeIds.has(edge.from) && !visibleNodeIds.has(edge.to)) return null
+        const ex0 = Math.min(p1.x, p2.x)
+        const ey0 = Math.min(p1.y, p2.y)
+        const ex1 = Math.max(p1.x, p2.x)
+        const ey1 = Math.max(p1.y, p2.y)
+        if (!hi && !intersectsWorldViewport(ex0, ey0, ex1, ey1, 220)) return null
+        const visible =
+          edge.kind === 'related'
+            ? edgeShow.related || relatedEdgeVisible(edge.from, edge.to)
+            : edgeShow[edge.kind]
+        if (!visible) return null
+        const salience = edgeSalience(edge)
+        if (!hi) {
+          if (zs < 0.42 && salience < 0.42) return null
+          if (salience < 0.14) return null
+        }
+        return { edge, p1, p2, b1, b2, hi, salience, key: `${edge.from}-${edge.to}-${edge.kind}-${i}` }
+      })
+      .filter((x): x is NonNullable<typeof x> => x != null)
+      .sort((a, b) => Number(b.hi) - Number(a.hi) || b.salience - a.salience)
+
+    const maxAmbientEdges =
+      lodTier === 'overview'
+        ? Math.min(320, Math.max(170, Math.floor(data.edges.length * 0.22)))
+        : lodTier === 'mid'
+          ? data.edges.length > 700
+            ? 440
+            : 620
+          : data.edges.length > 700
+            ? 560
+            : data.edges.length > 400
+              ? 760
+              : 980
+    const highlighted = edgeRenderList.filter((e) => e.hi)
+    const ambient = edgeRenderList.filter((e) => !e.hi).slice(0, maxAmbientEdges)
+    const boundedEdges = [...highlighted, ...ambient]
+
+    const maxLabels = lodTier === 'overview' ? 60 : lodTier === 'mid' ? 160 : 320
+    const labelTextById = new Map<string, string>()
+    const visibleLabelIds = new Set<string>()
+    const labelBoxes: Array<{ x0: number; y0: number; x1: number; y1: number }> = []
     const candidates = data.nodes
       .map((n) => {
         if (!visibleNodeIds.has(n.id)) return null
@@ -592,29 +862,117 @@ export function KnowledgeGraphView(props: {
         if (n.kind === 'wiki' && hideWikiLabels) return null
         const p = positions.get(n.id)
         if (!p) return null
+        const isOverflow = n.kind === 'chunk' && n.id.startsWith('kg-overflow:')
+        const baseLabel = minimalTextMode && n.shortLabel ? n.shortLabel.trim() || n.label : n.label
+        const font = LABEL_FONT_BY_KIND[n.kind]
+        const baseWidth = n.kind === 'source' ? (lodTier === 'detail' ? 190 : 155) : n.kind === 'wiki' ? 150 : isOverflow ? 84 : 118
+        const isPrimary = n.id === selectedNodeId || n.id === hoverId || n.id === kbdFocusId
+        const isNeighbor = focusNeighbors.has(n.id)
+        const isHub = n.kind === 'source' && hubIds.has(n.id)
+        const maxWidth = Math.round(baseWidth * (isPrimary ? 1.5 : isNeighbor ? 1.24 : 1))
+        const label = truncateToPixelWidth(
+          labelTruncateCacheRef.current,
+          labelWidthCacheRef.current,
+          labelMeasureCtxRef.current,
+          baseLabel,
+          maxWidth,
+          font
+        )
+        labelTextById.set(n.id, label)
+        const textWidth = Math.max(16, measureLabelWidth(labelWidthCacheRef.current, labelMeasureCtxRef.current, label, font))
+        const labelHeight = n.kind === 'source' ? 11.5 : 9.5
+        const interactionBoost = isPrimary ? 100 : isNeighbor ? 60 : 0
+        const kindBoost = n.kind === 'source' ? 20 : n.kind === 'wiki' ? 12 : 6
+        const hubBoost = isHub ? 18 : 0
+        const prio = interactionBoost + kindBoost + hubBoost + (importance.get(n.id) ?? 0) * 30
         const r = nodeRadius(n)
-        const label = truncate(minimalTextMode && n.shortLabel ? n.shortLabel : n.label, n.kind === 'chunk' ? 14 : 22)
-        const w = Math.max(18, label.length * (n.kind === 'chunk' ? 4.8 : 5.4))
-        const h = n.kind === 'source' ? 11 : 9
         return {
           id: n.id,
-          prio: priority(n),
-          x0: p.x - w / 2,
-          y0: p.y + r + 2,
-          x1: p.x + w / 2,
-          y1: p.y + r + h + 3
+          prio,
+          x0: p.x - textWidth / 2 - 3,
+          y0: p.y + r + 1,
+          x1: p.x + textWidth / 2 + 3,
+          y1: p.y + r + labelHeight + 4
         }
       })
-      .filter((c): c is NonNullable<typeof c> => c != null)
+      .filter((x): x is NonNullable<typeof x> => x != null)
       .sort((a, b) => b.prio - a.prio)
     for (const c of candidates) {
-      const overlaps = taken.some((b) => c.x0 < b.x1 && c.x1 > b.x0 && c.y0 < b.y1 && c.y1 > b.y0)
+      if (visibleLabelIds.size >= maxLabels) break
+      const overlaps = labelBoxes.some((b) => c.x0 < b.x1 && c.x1 > b.x0 && c.y0 < b.y1 && c.y1 > b.y0)
       if (overlaps) continue
-      ids.add(c.id)
-      taken.push({ x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1 })
+      visibleLabelIds.add(c.id)
+      labelBoxes.push({ x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1 })
     }
-    return ids
+
+    const webglNodes: WebGLRenderNode[] = data.nodes
+      .map((n) => {
+        if (!visibleNodeIds.has(n.id)) return null
+        const p = positions.get(n.id)
+        if (!p) return null
+        return {
+          id: n.id,
+          kind: n.kind,
+          x: p.x,
+          y: p.y,
+          r: nodeRadius(n),
+          label: labelTextById.get(n.id) ?? truncate(n.label, n.kind === 'chunk' ? 14 : 22),
+          highlighted: hoverId === n.id || kbdFocusId === n.id || selectedNodeId === n.id,
+          dimmed: nodeIsDimmed(n.id),
+          showLabel: visibleLabelIds.has(n.id)
+        } satisfies WebGLRenderNode
+      })
+      .filter((n): n is WebGLRenderNode => n != null)
+
+    const webglEdges: WebGLRenderEdge[] = boundedEdges.map((e) => ({
+      key: e.key,
+      kind: e.edge.kind,
+      x1: e.p1.x,
+      y1: e.p1.y,
+      x2: e.p2.x,
+      y2: e.p2.y,
+      salience: e.salience,
+      highlighted: e.hi,
+      dimmed: nodeIsDimmed(e.edge.from) && nodeIsDimmed(e.edge.to)
+    }))
+    const elapsed = globalThis.performance.now() - startedAt
+    if (graphPerfEnabled) {
+      perfRef.current.samples += 1
+      perfRef.current.totalMs += elapsed
+      if (globalThis.performance.now() - perfRef.current.lastReportTs > 1500) {
+        const avg = perfRef.current.totalMs / Math.max(1, perfRef.current.samples)
+        globalThis.console.debug('[kg-perf] derive(ms)', {
+          avg: Number(avg.toFixed(2)),
+          latest: Number(elapsed.toFixed(2)),
+          nodes: data.nodes.length,
+          edges: data.edges.length,
+          lodTier
+        })
+        perfRef.current.samples = 0
+        perfRef.current.totalMs = 0
+        perfRef.current.lastReportTs = globalThis.performance.now()
+      }
+    }
+    return {
+      visibleNodeIds,
+      focusNeighbors,
+      importance,
+      boundedEdges,
+      visibleLabelIds,
+      labelTextById,
+      webglNodes,
+      webglEdges,
+      maxLabels
+    }
   })()
+  const { visibleNodeIds, focusNeighbors, importance, boundedEdges, visibleLabelIds, labelTextById, webglNodes, webglEdges, maxLabels } =
+    graphDerived
+  const nodeIsDimmed = (id: string): boolean => {
+    if (hoverOrFocusId || selectedNodeId) return !focusNeighbors.has(id)
+    if (lodTier === 'overview') return (importance.get(id) ?? 0) < 0.2
+    if (lodTier === 'mid') return (importance.get(id) ?? 0) < 0.11
+    return false
+  }
 
   return (
     <div className="kg-panel">
@@ -622,7 +980,7 @@ export function KnowledgeGraphView(props: {
         ref={wrapRef}
         className={['kg-svg-wrap kg-svg-wrap--viewport', draggingNodeId ? 'kg-svg-wrap--node-drag' : ''].filter(Boolean).join(' ')}
         onWheel={vpApi.onWheel}
-        onPointerDown={vpApi.onPointerDown}
+        onPointerDown={onWrapPointerDown}
         onPointerMove={onWrapPointerMove}
         onPointerUp={onWrapPointerUp}
         onPointerLeave={onWrapPointerUp}
@@ -635,12 +993,43 @@ export function KnowledgeGraphView(props: {
           onKeyDown={onStageKeyDown}
           aria-label="Knowledge graph canvas. Drag nodes to pin positions. Alt+click a node to unpin."
         >
+          {activeRenderer === 'webgl' ? (
+            <KnowledgeGraphWebGLCanvas
+              width={wrapSize.w}
+              height={wrapSize.h}
+              tx={tx}
+              ty={ty}
+              scale={zs}
+              nodes={webglNodes}
+              edges={webglEdges}
+              lodTier={lodTier}
+              onNodeHover={(id) => setHoverId(id)}
+              onNodeClick={(id, clientX, clientY) => {
+                const node = nodeById.get(id)
+                if (!node) return
+                setSelectedNodeId(node.id)
+                setKbdFocusId(node.id)
+                centerNodeInViewport(node.id)
+                if (onInspectNode) onInspectNode({ node, anchorClient: { x: clientX, y: clientY } })
+                const destination = resolveNodeDestination(node)
+                if (destination) {
+                  if (onPickDestination) onPickDestination(destination)
+                  else onPickSource?.(destination.sourceId)
+                }
+              }}
+            />
+          ) : null}
           <svg
-            className="kg-graph-svg kg-graph-svg--fill kg-graph-svg--obsidian"
+            className={[
+              'kg-graph-svg kg-graph-svg--fill kg-graph-svg--obsidian',
+              activeRenderer === 'webgl' ? 'kg-graph-svg--interaction' : ''
+            ]
+              .filter(Boolean)
+              .join(' ')}
             width="100%"
             height="100%"
             role="img"
-            aria-activedescendant={kbdFocusId ? `kg-node-${kbdFocusId}` : undefined}
+            aria-activedescendant={kbdFocusId ?? selectedNodeId ? `kg-node-${kbdFocusId ?? selectedNodeId}` : undefined}
             aria-label="Knowledge base structure: sources, indexed chunks, and wiki pages"
           >
             <defs>
@@ -654,40 +1043,44 @@ export function KnowledgeGraphView(props: {
                 <rect x={0} y={0} width={displayLayout.width} height={displayLayout.height} className="kg-world-bg" />
               </g>
               <g className="kg-group-hulls">
-                {hulls
-                  .filter((hull) => intersectsWorldViewport(hull.cx - hull.rx, hull.cy - hull.ry, hull.cx + hull.rx, hull.cy + hull.ry, 130))
-                  .map((hull) => (
-                  <g key={hull.id}>
-                    <ellipse
-                      cx={hull.cx}
-                      cy={hull.cy}
-                      rx={hull.rx}
-                      ry={hull.ry}
-                      className={`kg-group-hull kg-group-hull--${hull.mode === 'wiki' ? 'wiki' : 'source'}`}
-                    />
-                    {hull.mode === 'domain' ? (
-                      <text
-                        x={hull.cx}
-                        y={hull.cy - hull.ry + 14}
-                        textAnchor="middle"
-                        className="kg-group-hull-label"
-                      >
-                        {truncate(hull.label || 'Unscoped', 26)}
-                      </text>
-                    ) : null}
-                  </g>
-                ))}
+                {activeRenderer === 'svg'
+                  ? hulls
+                      .filter((hull) => intersectsWorldViewport(hull.cx - hull.rx, hull.cy - hull.ry, hull.cx + hull.rx, hull.cy + hull.ry, 130))
+                      .map((hull) => (
+                        <g key={hull.id}>
+                          <ellipse
+                            cx={hull.cx}
+                            cy={hull.cy}
+                            rx={hull.rx}
+                            ry={hull.ry}
+                            className={`kg-group-hull kg-group-hull--${hull.mode === 'wiki' ? 'wiki' : 'source'}`}
+                          />
+                          {hull.mode === 'domain' ? (
+                            <text
+                              x={hull.cx}
+                              y={hull.cy - hull.ry + 14}
+                              textAnchor="middle"
+                              className="kg-group-hull-label"
+                            >
+                              {truncate(hull.label || 'Unscoped', 26)}
+                            </text>
+                          ) : null}
+                        </g>
+                      ))
+                  : null}
               </g>
               <g className="kg-edges">
-                {boundedEdges.map((e) => (
-                  <path
-                    key={e.key}
-                    d={kgEdgePath(e.p1, e.p2, e.edge.kind, e.b1, e.b2)}
-                    className={`kg-edge kg-edge--${e.edge.kind}${e.hi ? ' kg-edge--hi' : ''} ${e.salience > 0.72 ? 'kg-edge--tier-strong' : e.salience > 0.45 ? 'kg-edge--tier-mid' : 'kg-edge--tier-faint'}`}
-                    fill="none"
-                  />
-                ))}
-                {showSuggestions && graphAnalysis?.result?.suggestedLinks
+                {activeRenderer === 'svg'
+                  ? boundedEdges.map((e) => (
+                      <path
+                        key={e.key}
+                        d={kgEdgePath(e.p1, e.p2, e.edge.kind, e.b1, e.b2)}
+                        className={`kg-edge kg-edge--${e.edge.kind}${e.hi ? ' kg-edge--hi' : ''}${nodeIsDimmed(e.edge.from) && nodeIsDimmed(e.edge.to) ? ' kg-edge--dim' : ''} ${e.salience > 0.72 ? 'kg-edge--tier-strong' : e.salience > 0.45 ? 'kg-edge--tier-mid' : 'kg-edge--tier-faint'}`}
+                        fill="none"
+                      />
+                    ))
+                  : null}
+                {activeRenderer === 'svg' && showSuggestions && graphAnalysis?.result?.suggestedLinks
                   ? graphAnalysis.result.suggestedLinks.map((s, i) => {
                       const p1 = positions.get(s.fromSourceId)
                       const p2 = positions.get(s.toSourceId)
@@ -711,22 +1104,19 @@ export function KnowledgeGraphView(props: {
                   : null}
               </g>
               <g className="kg-nodes">
-                {data.nodes.map((n) => {
+                {activeRenderer === 'svg'
+                  ? data.nodes.map((n) => {
                   if (!visibleNodeIds.has(n.id)) return null
                   const p = positions.get(n.id)
                   const b = boxes.get(n.id)
                   if (!p || !b) return null
                   const r = nodeRadius(n)
-                  const hi = hoverId === n.id || kbdFocusId === n.id
+                  const hi = hoverId === n.id || kbdFocusId === n.id || selectedNodeId === n.id
                   const isPinned = n.id in pinnedNodePositions
                   const isOverflow = n.kind === 'chunk' && n.id.startsWith('kg-overflow:')
                   const clusterStroke = n.kind === 'source' ? clusterStrokeBySource.get(n.id) : undefined
                   const isHub = n.kind === 'source' && hubIds.has(n.id)
-                  const compactLabel = n.shortLabel?.trim() || n.label
-                  const labelText =
-                    n.kind === 'source'
-                      ? truncate(n.label, 24)
-                      : truncate(minimalTextMode ? compactLabel : n.label, n.kind === 'chunk' ? (isOverflow ? 12 : 14) : 20)
+                  const labelText = labelTextById.get(n.id) ?? (n.kind === 'source' ? truncate(n.label, 24) : truncate(n.label, isOverflow ? 12 : 20))
                   const showLabel = visibleLabelIds.has(n.id)
                   const hasConfidenceRing = typeof n.confidence === 'number'
                   const confidencePct = Math.min(1, Math.max(0, n.confidence ?? 0))
@@ -738,7 +1128,7 @@ export function KnowledgeGraphView(props: {
                       <g
                         key={n.id}
                         id={`kg-node-${n.id}`}
-                        className={`kg-node kg-node--wiki kg-node--draggable${hi ? ' kg-node--hi' : ''}${isPinned ? ' kg-node--pinned' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}${draggingNodeId === n.id ? ' kg-node--dragging' : ''}`}
+                        className={`kg-node kg-node--wiki kg-node--draggable${hi ? ' kg-node--hi' : ''}${nodeIsDimmed(n.id) ? ' kg-node--dim' : ''}${isPinned ? ' kg-node--pinned' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}${draggingNodeId === n.id ? ' kg-node--dragging' : ''}`}
                         style={{ cursor: 'grab' }}
                         onPointerDown={(e) => beginNodeDrag(e, n)}
                         onMouseEnter={() => setHoverId(n.id)}
@@ -768,7 +1158,7 @@ export function KnowledgeGraphView(props: {
                       <g
                         key={n.id}
                         id={`kg-node-${n.id}`}
-                        className={`kg-node kg-node--source kg-node--draggable${hi ? ' kg-node--hi' : ''}${isHub ? ' kg-node--hub' : ''}${isPinned ? ' kg-node--pinned' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}${draggingNodeId === n.id ? ' kg-node--dragging' : ''}`}
+                        className={`kg-node kg-node--source kg-node--draggable${hi ? ' kg-node--hi' : ''}${nodeIsDimmed(n.id) ? ' kg-node--dim' : ''}${isHub ? ' kg-node--hub' : ''}${isPinned ? ' kg-node--pinned' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}${draggingNodeId === n.id ? ' kg-node--dragging' : ''}`}
                         style={{ cursor: 'grab' }}
                         onPointerDown={(e) => beginNodeDrag(e, n)}
                         onMouseEnter={() => setHoverId(n.id)}
@@ -818,7 +1208,7 @@ export function KnowledgeGraphView(props: {
                     <g
                       key={n.id}
                       id={`kg-node-${n.id}`}
-                      className={`kg-node kg-node--chunk kg-node--draggable${isOverflow ? ' kg-node--overflow' : ''}${hi ? ' kg-node--hi' : ''}${isPinned ? ' kg-node--pinned' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}${draggingNodeId === n.id ? ' kg-node--dragging' : ''}`}
+                      className={`kg-node kg-node--chunk kg-node--draggable${isOverflow ? ' kg-node--overflow' : ''}${hi ? ' kg-node--hi' : ''}${nodeIsDimmed(n.id) ? ' kg-node--dim' : ''}${isPinned ? ' kg-node--pinned' : ''}${kbdFocusId === n.id ? ' kg-node--kbd' : ''}${draggingNodeId === n.id ? ' kg-node--dragging' : ''}`}
                       style={{ cursor: 'grab' }}
                       onPointerDown={(e) => beginNodeDrag(e, n)}
                       onMouseEnter={() => setHoverId(n.id)}
@@ -840,10 +1230,30 @@ export function KnowledgeGraphView(props: {
                       <title>{n.sublabel ? `${n.label} - ${n.sublabel}` : n.label}</title>
                     </g>
                   )
-                })}
+                    })
+                  : null}
               </g>
             </g>
           </svg>
+          {activeRenderer === 'webgl' ? (
+            <div className="kg-webgl-label-layer" aria-hidden>
+              {webglNodes
+                .filter((n) => n.showLabel)
+                .slice(0, maxLabels)
+                .map((n) => (
+                  <span
+                    key={`wgl-lbl-${n.id}`}
+                    className={`kg-webgl-label${n.dimmed ? ' kg-webgl-label--dim' : ''}`}
+                    title={nodeById.get(n.id)?.label ?? n.label}
+                    style={{
+                      transform: `translate(${tx + n.x * zs}px, ${ty + n.y * zs}px) translate(-50%, -50%)`
+                    }}
+                  >
+                    {n.label}
+                  </span>
+                ))}
+            </div>
+          ) : null}
           {renderMinimap()}
         </div>
 
@@ -909,10 +1319,19 @@ export function KnowledgeGraphView(props: {
                 Minimal text
               </label>
               <div className="kg-map-layers-section">
+                <span className="kg-map-layers-section-title">Renderer</span>
+                <select className="input" value={rendererPreference} onChange={(e) => setRendererPreference(e.target.value as 'auto' | 'svg' | 'webgl')}>
+                  <option value="auto">Auto</option>
+                  <option value="webgl">WebGL (high-scale)</option>
+                  <option value="svg">SVG (detailed)</option>
+                </select>
+                <p className="kg-map-layers-hint muted">Active: {activeRenderer.toUpperCase()} - LOD: {lodTier}</p>
+              </div>
+              <div className="kg-map-layers-section">
                 <span className="kg-map-layers-section-title">Organization</span>
                 <select className="input" value={clusterMode} onChange={(e) => setClusterMode(e.target.value === 'domain' ? 'domain' : 'related')}>
-                  <option value="related">Related-title clusters</option>
                   <option value="domain">Domain clusters</option>
+                  <option value="related">Lexical related clusters</option>
                 </select>
               </div>
               <div className="kg-map-layers-section">
@@ -1005,7 +1424,7 @@ export function KnowledgeGraphView(props: {
             <span className="kg-legend-line kg-edge--compiled_from" /> compiled from source
           </li>
           <li className="kg-legend-edges">
-            <span className="kg-legend-line kg-edge--related" /> related title
+            <span className="kg-legend-line kg-edge--related" /> lexical/entity relation
           </li>
           <li className="kg-legend-edges">
             <span className="kg-legend-line kg-edge--suggested" /> suggested (analysis)
