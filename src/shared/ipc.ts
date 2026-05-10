@@ -89,14 +89,20 @@ export const IPC = {
   KB_INGEST_TEXT: 'kb:ingestText',
   KB_INGEST_FILE: 'kb:ingestFile',
   KB_INGEST_FILE_PROGRESS: 'kb:ingestFileProgress',
+  KB_INGEST_JOBS: 'kb:ingestJobs',
   KB_INGEST_CONVERSATION: 'kb:ingestConversation',
   KB_SOURCES: 'kb:sources',
   KB_SEARCH: 'kb:search',
+  KB_SEARCH_RETRIEVAL: 'kb:searchRetrieval',
   /** Full-text search with source id/title and snippet (deduped per source). */
   KB_SEARCH_HITS: 'kb:searchHits',
   KB_CHUNKS: 'kb:chunks',
   KB_WIKI_TOPICS: 'kb:wikiTopics',
   KB_WIKI_PAGE: 'kb:wikiPage',
+  KB_WIKI_PASSAGES: 'kb:wikiPassages',
+  KB_WIKI_KEYWORDS: 'kb:wikiKeywords',
+  KB_WIKI_EXTRACT_ARTICLE: 'kb:wikiExtractArticle',
+  KB_WIKI_RESOLVE_TERM: 'kb:wikiResolveTerm',
   /** Phrases from wiki titles, chunk headings, and glossary blocks for in-chat highlighting. */
   KB_WIKI_HIGHLIGHT_TERMS: 'kb:wikiHighlightTerms',
   /** Remove one KB source (chunks, FTS, compiled wiki page, links). */
@@ -141,6 +147,7 @@ export const IPC = {
   METRICS_HISTORY: 'metrics:history',
 
   // Training
+  TRAIN_VALIDATE_START: 'train:validateStart',
   TRAIN_START: 'train:start',
   TRAIN_STATUS: 'train:status',
   TRAIN_LIST_JOBS: 'train:listJobs',
@@ -162,6 +169,8 @@ export const IPC = {
 
   /** Main → renderer: IDE plugin posted activity to the HTTP bridge. */
   INTEGRATION_PLUGIN_REPORT: 'integration:pluginReport',
+  /** Main → renderer: live model activity for IDE `/v1/chat` requests. */
+  INTEGRATION_MODEL_ACTIVITY: 'integration:modelActivity',
   /** Renderer → main: last N reports (for initial load). */
   INTEGRATION_PLUGIN_REPORTS_LIST: 'integration:pluginReportsList',
   /** Renderer → main: GET http://127.0.0.1:{port}/health from the main process (loopback self-test). */

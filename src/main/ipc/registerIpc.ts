@@ -74,6 +74,7 @@ import type {
   CodebaseWikiAnalysisProgress,
   KbIngestFileProgress,
   RuntimeLoadProgress,
+  WikiExtractArticleRequest,
   WikiReanalyzeProgress
 } from '@shared/types'
 import { is } from '@electron-toolkit/utils'
@@ -90,7 +91,6 @@ import {
   clampLlamaContextTokens,
   LLAMA_CONTEXT_TOKENS_DEFAULT
 } from '@shared/llamaContext'
-import { llamaSamplingFromStore } from '../services/llamaChatOptions'
 import { manualCheckForUpdates } from '../updateController'
 import { hfSearch, hfModelDetail, hfRecommended } from '../services/hfService'
 import {
@@ -121,7 +121,6 @@ import {
   listPromptDomains,
   updatePromptDomainSystemSuffix
 } from '../services/promptDomainService'
-import { recordChatRoundtripMs } from '../services/chatLatencyStats'
 import * as kbService from '../services/kbService'
 import {
   analyzeKnowledgeGraph,
@@ -147,8 +146,9 @@ import { collectHardwareSummary } from '../services/hardwareSummary'
 import { clearAllAppCaches, deleteAllChildrenInDirectory } from '../services/dataMaintenance'
 import { migrateChatProfileSettings, migrateRoleSetupIfNeeded, resetElectronStoreToFactory } from '../storeDefaults'
 import { configureIntegrationServer } from '../services/integrationServer'
-import { buildOntologyContext } from '../services/ontologyContextBuilder'
 import { createOntologyService } from '../services/ontologyService'
+import { ensureDemoSeeded } from '../services/demoSeed'
+import { runIntegrationChatPipeline } from '../services/integrationChatPipeline'
 import { getPluginReportHistory } from '../services/pluginIntegrationHub'
 import { listGgufModelsInDir } from '../services/localModelsScan'
 import { hfDownloadAbsolutePath } from '../services/hfDownloadNaming'
@@ -214,6 +214,7 @@ const configSchema = z.object({
   /** Python executable for conversion (optional; default python / python3). */
   llamaPythonPath: z.string().max(4096).optional(),
   runtimeKind: z.enum(['llamacpp', 'ollama']).optional(),
+  trainBackend: z.enum(['axolotl']).optional(),
   /** Last model that was running (Ollama tag or local weight path). */
   lastRuntimeModelPath: z.string().max(8192).optional(),
   lastRuntimeModelKind: z.enum(['llamacpp', 'ollama']).optional(),
@@ -288,6 +289,16 @@ const configSchema = z.object({
   workspaceDensity: z.enum(['focused', 'standard', 'expanded']).optional(),
   /** First-run role tour; see `@shared/uiRole` SETUP_TOUR_LATEST. */
   setupTourVersion: z.number().int().min(0).max(99).optional(),
+  /** If false, startup will not auto-open setup tour even when content version changes. */
+  setupTourOnStartup: z.boolean().optional(),
+  /** Focus UI on the presentation workflow and remove advanced navigation noise. */
+  presentationModeEnabled: z.boolean().optional(),
+  /** Reveal advanced/non-core surfaces even when presentation mode is on. */
+  showAdvancedSurfaces: z.boolean().optional(),
+  /** Seed bundle version for first-run demo content hydration. */
+  demoSeedBundleVersion: z.number().int().min(0).max(999).optional(),
+  /** Ambient animated sphere backdrop behind shell chrome. */
+  animatedBackdropEnabled: z.boolean().optional(),
   /** Chat: planner spawns parallel Ollama workers (Ollama runtime only). */
   agenticWorkersEnabled: z.boolean().optional(),
   /** Optional second Ollama base URL for agent workers (remote GPU / larger models). */
@@ -322,11 +333,6 @@ const configSchema = z.object({
   formalVerificationInterpretWithLlm: z.boolean().optional(),
   formalVerificationInterpretIncludeKb: z.boolean().optional()
 })
-
-function trainingScriptPath(): string {
-  if (is.dev) return join(process.cwd(), 'training', 'train_lora.py')
-  return join(process.resourcesPath, 'training', 'train_lora.py')
-}
 
 export interface IpcContext {
   db: Database.Database
@@ -392,6 +398,7 @@ export function registerIpc(ctx: IpcContext): void {
     }
   }
   const ontology = createOntologyService(db)
+  void ensureDemoSeeded({ db, store, ontology })
 
   ipcMain.handle(IPC.GET_PATHS, () => ({
     userData,
@@ -1321,46 +1328,6 @@ export function registerIpc(ctx: IpcContext): void {
         ollamaBaseUrl = u
       }
       const requestId = typeof payload.requestId === 'string' ? payload.requestId : ''
-      const ontologyEnabled = store.get('ontologyEnabled') !== false
-      const ontologyMaxTriples =
-        typeof store.get('ontologyMaxTriples') === 'number' ? Number(store.get('ontologyMaxTriples')) : undefined
-      const ontologyContextTokens =
-        typeof store.get('ontologyContextTokens') === 'number' ? Number(store.get('ontologyContextTokens')) : undefined
-      const runtimeMessages =
-        ontologyEnabled
-          ? (() => {
-              const built = buildOntologyContext(ontology, {
-                messages: payload.messages,
-                maxTriples: ontologyMaxTriples,
-                maxTokens: ontologyContextTokens
-              })
-              if (!built.context) return payload.messages
-              const next = [...payload.messages]
-              const firstSystemIdx = next.findIndex((m) => m.role === 'system')
-              if (firstSystemIdx >= 0) {
-                const row = next[firstSystemIdx]
-                if (row) row.content = `${row.content}\n\n${built.context}`
-                return next
-              }
-              return [{ role: 'system' as const, content: built.context }, ...next]
-            })()
-          : payload.messages
-      const lastUser = [...payload.messages]
-        .reverse()
-        .find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.trim().length > 0)
-      if (lastUser) {
-        try {
-          ontology.ingestText({
-            text: lastUser.content,
-            sourceType: 'runtime_chat_user',
-            sourceRef: `runtime-chat:${requestId || Date.now()}:user`,
-            confidence: 0.72,
-            entityType: 'user_input'
-          })
-        } catch {
-          /* ontology is best-effort */
-        }
-      }
       const emit = (
         data:
           | { kind: 'started' }
@@ -1371,51 +1338,32 @@ export function registerIpc(ctx: IpcContext): void {
         if (!requestId) return
         event.sender.send(IPC.RUNTIME_CHAT_PROGRESS, { requestId, ...data })
       }
-      const chatStarted = Date.now()
       try {
         if (requestId) emit({ kind: 'started' })
-        const samplingOpts =
-          st.kind === 'llamacpp'
-            ? (() => {
-                const s = llamaSamplingFromStore(store)
-                return {
-                  temperature: s.temperature,
-                  topP: s.topP,
-                  frequencyPenalty: s.frequencyPenalty,
-                  presencePenalty: s.presencePenalty
-                }
-              })()
-            : {}
-        const reply = await rt.chat(runtimeMessages, {
-          maxTokens: chatMaxTokens,
-          ...(ollamaModel ? { ollamaModel } : {}),
-          ...(ollamaBaseUrl ? { ollamaBaseUrl } : {}),
-          ...samplingOpts,
-          ...(requestId
-            ? {
-                onStreamChunk: (text: string) => emit({ kind: 'token', text }),
-                onStreamUsage: (u) =>
-                  emit({
-                    kind: 'usage',
-                    promptTokens: u.promptTokens,
-                    completionTokens: u.completionTokens
-                  })
-              }
-            : {})
+        const result = await runIntegrationChatPipeline({
+          store,
+          db,
+          runtime: rt,
+          ontology,
+          messages: payload.messages,
+          maxTokensOverride: chatMaxTokens,
+          ollamaModel,
+          ollamaBaseUrl,
+          ontologySourcePrefix: `runtime-chat:${requestId || Date.now()}`,
+          progress: {
+            onToken: (text: string) => {
+              if (requestId) emit({ kind: 'token', text })
+            }
+          }
         })
-        recordChatRoundtripMs(Date.now() - chatStarted)
-        try {
-          ontology.ingestText({
-            text: reply,
-            sourceType: 'runtime_chat_assistant',
-            sourceRef: `runtime-chat:${requestId || Date.now()}:assistant`,
-            confidence: 0.62,
-            entityType: 'assistant_output'
+        if (requestId) {
+          emit({
+            kind: 'usage',
+            promptTokens: result.usage.promptTokens,
+            completionTokens: result.usage.completionTokens
           })
-        } catch {
-          /* ontology is best-effort */
         }
-        return reply
+        return result.reply
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         emit({ kind: 'error', message })
@@ -1567,7 +1515,18 @@ export function registerIpc(ctx: IpcContext): void {
         maxHops: z.number().int().min(1).max(3).optional(),
         typeFilters: z.array(z.string().max(120)).max(40).optional(),
         predicateFilters: z.array(z.string().max(120)).max(40).optional(),
-        recentOnlyMs: z.number().int().min(1).max(31 * 24 * 60 * 60 * 1000).optional()
+        recentOnlyMs: z.number().int().min(1).max(31 * 24 * 60 * 60 * 1000).optional(),
+        lodTier: z.enum(['overview', 'mid', 'detail']).optional(),
+        focusNodeId: z.string().min(3).max(512).optional(),
+        viewportHint: z
+          .object({
+            x0: z.number(),
+            y0: z.number(),
+            x1: z.number(),
+            y1: z.number()
+          })
+          .optional(),
+        maxEdgeDensity: z.number().min(0.05).max(1).optional()
       })
       .optional()
       .safeParse(raw)
@@ -1635,11 +1594,25 @@ export function registerIpc(ctx: IpcContext): void {
       throw e
     }
   })
+  ipcMain.handle(IPC.KB_INGEST_JOBS, (_e, limit?: number) => kbService.listIngestJobs(db, Number(limit) || 40))
 
   ipcMain.handle(IPC.KB_SOURCES, () => kbService.listSources(db))
   ipcMain.handle(IPC.KB_SEARCH, (_e, query: string, limit?: number) =>
     kbService.searchChunks(db, query, limit ?? 8).map((c) => c.text)
   )
+  ipcMain.handle(IPC.KB_SEARCH_RETRIEVAL, (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        query: z.string().min(1),
+        limit: z.number().int().min(1).max(64).optional(),
+        domainIds: z.array(z.string().min(1)).max(20).optional()
+      })
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid retrieval request payload')
+    return kbService.searchKbHits(db, parsed.data.query, parsed.data.limit ?? 16).filter((hit) =>
+      parsed.data.domainIds?.length ? parsed.data.domainIds.includes(hit.domainId ?? '') : true
+    )
+  })
   ipcMain.handle(IPC.KB_SEARCH_HITS, (_e, query: string, limit?: number) =>
     kbService.searchKbHits(db, query, limit ?? 16)
   )
@@ -1648,6 +1621,43 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(IPC.KB_WIKI_PAGE, (_e, sourceId: string) =>
     kbService.buildWikiPagePayload(db, sourceId)
   )
+  ipcMain.handle(IPC.KB_WIKI_PASSAGES, (_e, sourceId: string) =>
+    kbService.listWikiPassages(db, String(sourceId ?? '').trim())
+  )
+  ipcMain.handle(IPC.KB_WIKI_KEYWORDS, (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        sourceId: z.string().min(1),
+        chunkIds: z.array(z.string().min(1)).optional(),
+        limit: z.number().int().min(1).max(100).optional()
+      })
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid wiki keyword request payload')
+    return kbService.suggestWikiKeywords(db, parsed.data.sourceId, parsed.data.chunkIds, parsed.data.limit ?? 24)
+  })
+  ipcMain.handle(IPC.KB_WIKI_EXTRACT_ARTICLE, (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        sourceId: z.string().min(1),
+        keyword: z.string().min(1),
+        chunkIds: z.array(z.string().min(1)).min(1),
+        title: z.string().max(200).optional()
+      })
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid wiki extract request payload')
+    return kbService.extractWikiArticlesFromSource(db, parsed.data as WikiExtractArticleRequest)
+  })
+  ipcMain.handle(IPC.KB_WIKI_RESOLVE_TERM, (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        term: z.string().min(1).max(200),
+        contextSourceId: z.string().min(1).optional(),
+        contextSnippet: z.string().max(600).optional()
+      })
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid wiki term resolve payload')
+    return kbService.resolveWikiTerm(db, parsed.data)
+  })
   ipcMain.handle(IPC.KB_WIKI_HIGHLIGHT_TERMS, () => kbService.listWikiChatHighlightTerms(db))
   ipcMain.handle(IPC.KB_DELETE_SOURCE, (_e, sourceId: string) => {
     const id = typeof sourceId === 'string' ? sourceId.trim() : ''
@@ -1939,7 +1949,6 @@ export function registerIpc(ctx: IpcContext): void {
       datasetPath?: string
       kbSourceIds?: string[]
       displayName?: string
-      pythonPath?: string
       domainId?: string
     }
     const base = typeof p.baseModelPath === 'string' ? p.baseModelPath.trim() : ''
@@ -1947,15 +1956,24 @@ export function registerIpc(ctx: IpcContext): void {
     const kbSourceIds = Array.isArray(p.kbSourceIds)
       ? p.kbSourceIds.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
       : undefined
-    return trainOrchestrator.startTrainJob(db, userData, trainingScriptPath(), {
+    return trainOrchestrator.startTrainJob(db, userData, {
       baseModelPath: base,
       datasetPath: typeof p.datasetPath === 'string' && p.datasetPath.trim() ? p.datasetPath.trim() : undefined,
       kbSourceIds,
       displayName: typeof p.displayName === 'string' ? p.displayName : undefined,
       domainId: typeof p.domainId === 'string' && p.domainId.trim() ? p.domainId.trim() : undefined,
-      pythonPath: typeof p.pythonPath === 'string' && p.pythonPath.trim() ? p.pythonPath.trim() : undefined,
       modelsDir: modelsDir()
     })
+  })
+
+  ipcMain.handle(IPC.TRAIN_VALIDATE_START, (_e, raw: unknown) => {
+    const p = z
+      .object({
+        baseModelPath: z.string().min(1)
+      })
+      .safeParse(raw)
+    if (!p.success) throw new Error('Base model path is required.')
+    return trainOrchestrator.validateTrainStart(p.data.baseModelPath)
   })
 
   ipcMain.handle(IPC.TRAIN_STATUS, (_e, id: string) => trainOrchestrator.getTrainJob(db, id))

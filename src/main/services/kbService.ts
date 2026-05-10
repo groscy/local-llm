@@ -1,24 +1,36 @@
 import { randomUUID } from 'crypto'
 import { createWriteStream, readFileSync } from 'fs'
-import { extractPdfPlainText, isPdfFilePath } from './pdfIngest'
+import { extractPdfTextWithDiagnostics, isPdfFilePath } from './pdfIngest'
 import { finished } from 'stream/promises'
 import archiver from 'archiver'
 import type Database from 'better-sqlite3'
+import { composeWikiReadModel } from './wikiComposer'
+import { analyzeSourceDomains } from './domainAnalysisService'
+import { retrieveChunks, retrieveKbHits } from './retrievalService'
 import { extractWikiGlossary, stripWikiControlMarkers, WIKI_REFERENCE_SECTION_MARKDOWN } from '@shared/wikiArticleExtras'
 import { wikiKindFromUri } from '@shared/wikiSourceGroups'
 import type {
   CodebaseAnalysisItem,
   KbChunk,
+  KbDocumentRecord,
+  KbImportDiagnostic,
+  KbImportConfidence,
   KbIngestFileProgress,
+  KbIngestJobSummary,
   KbSearchHit,
   KbSource,
   KnowledgeGraphEdge,
   KnowledgeGraphNode,
   KnowledgeGraphPayload,
   WikiChatHighlightTerm,
+  WikiExtractArticleRequest,
+  WikiExtractArticleResult,
+  WikiKeywordCandidate,
+  WikiPassageSummary,
   WikiPagePayload,
   WikiReanalyzeResult,
   WikiRelatedSource,
+  WikiTermResolutionResult,
   WikiSourceKind,
   WikiTopic
 } from '@shared/types'
@@ -66,6 +78,57 @@ function hasWikiEntryTables(db: Database.Database): boolean {
     tableExists(db, 'wiki_entry_sources') &&
     tableExists(db, 'wiki_keyword_relations')
   )
+}
+
+function upsertIngestJob(
+  db: Database.Database,
+  args: {
+    jobId: string
+    filePath: string
+    title: string
+    stage: 'selected' | 'extracting' | 'normalizing' | 'enriching' | 'indexing' | 'done' | 'failed'
+    status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
+    sourceId?: string | null
+    errorMessage?: string | null
+  }
+): void {
+  if (!tableExists(db, 'kb_ingest_jobs')) return
+  const now = Date.now()
+  db.prepare(
+    `INSERT INTO kb_ingest_jobs
+      (id, source_id, file_path, title, stage, status, error_message, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       source_id = COALESCE(excluded.source_id, kb_ingest_jobs.source_id),
+       title = excluded.title,
+       stage = excluded.stage,
+       status = excluded.status,
+       error_message = excluded.error_message,
+       updated_at = excluded.updated_at`
+  ).run(
+    args.jobId,
+    args.sourceId ?? null,
+    args.filePath,
+    args.title,
+    args.stage,
+    args.status,
+    args.errorMessage ?? null,
+    now,
+    now
+  )
+}
+
+export function listIngestJobs(db: Database.Database, limit = 40): KbIngestJobSummary[] {
+  if (!tableExists(db, 'kb_ingest_jobs')) return []
+  return db
+    .prepare(
+      `SELECT id, source_id as sourceId, file_path as filePath, title, stage, status, error_message as errorMessage,
+              created_at as createdAt, updated_at as updatedAt
+       FROM kb_ingest_jobs
+       ORDER BY updated_at DESC
+       LIMIT ?`
+    )
+    .all(Math.max(1, Math.min(limit, 400))) as KbIngestJobSummary[]
 }
 
 export function normalizeWikiKeyword(raw: string): string {
@@ -148,20 +211,315 @@ function resolveActiveWikiEntryForSource(
     .get(sourceId) as WikiEntryActiveRevisionRow | undefined
 }
 
-function chunkText(text: string, heading?: string): { text: string; heading?: string }[] {
+type ChunkDraft = { text: string; heading?: string; anchor: string; passageTitle: string }
+type IngestDocumentInput = {
+  title: string
+  uri: string
+  rawText: string
+  source: 'pdf' | 'text'
+  diagnostics?: Partial<KbImportDiagnostic>
+  heading?: string
+  conversationId?: string | null
+  onProgress?: (payload: KbIngestFileProgress) => void
+}
+
+function splitMarkdownSections(text: string): Array<{ heading?: string; body: string }> {
   const normalized = text.replace(/\r\n/g, '\n').trim()
   if (!normalized) return []
-  const parts: { text: string; heading?: string }[] = []
-  let i = 0
-  while (i < normalized.length) {
-    const end = Math.min(i + CHUNK_SIZE, normalized.length)
-    const slice = normalized.slice(i, end)
-    parts.push({ text: slice, heading })
-    if (end >= normalized.length) break
-    i = end - CHUNK_OVERLAP
-    if (i < 0) i = 0
+  const lines = normalized.split('\n')
+  const out: Array<{ heading?: string; body: string }> = []
+  let curHeading: string | undefined
+  let buf: string[] = []
+  const flush = (): void => {
+    const body = buf.join('\n').trim()
+    if (!body) return
+    out.push({ heading: curHeading, body })
+    buf = []
+  }
+  for (const line of lines) {
+    const h = line.match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/)
+    if (h) {
+      flush()
+      curHeading = h[1]?.trim() || undefined
+      continue
+    }
+    buf.push(line)
+  }
+  flush()
+  return out.length > 0 ? out : [{ body: normalized }]
+}
+
+function slugifyAnchor(raw: string): string {
+  const s = raw
+    .toLowerCase()
+    .replace(/[`"'“”‘’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+  return s || 'passage'
+}
+
+function summarizePassageTitle(raw: string, fallback?: string): string {
+  const base = (fallback?.trim() || raw.replace(/\s+/g, ' ').trim()).trim()
+  const words = base.split(/\s+/).filter(Boolean)
+  if (words.length === 0) return 'Untitled passage'
+  return words.slice(0, 30).join(' ')
+}
+
+function chunkText(text: string, heading?: string): ChunkDraft[] {
+  const normalized = text.replace(/\r\n/g, '\n').trim()
+  if (!normalized) return []
+  const sections = heading ? [{ heading, body: normalized }] : splitMarkdownSections(normalized)
+  const parts: ChunkDraft[] = []
+  let sectionIdx = 0
+  for (const section of sections) {
+    let i = 0
+    let chunkInSection = 0
+    const sectionTitle = summarizePassageTitle(section.body, section.heading)
+    while (i < section.body.length) {
+      const end = Math.min(i + CHUNK_SIZE, section.body.length)
+      const slice = section.body.slice(i, end)
+      const hasHeading = Boolean(section.heading?.trim())
+      const headingTitle = hasHeading
+        ? summarizePassageTitle(
+            chunkInSection > 0 ? `${section.heading} part ${chunkInSection + 1}` : String(section.heading)
+          )
+        : ''
+      const passageTitle = hasHeading ? headingTitle : summarizePassageTitle(slice)
+      parts.push({
+        text: slice,
+        heading: section.heading,
+        anchor: `${slugifyAnchor(section.heading || sectionTitle || `section-${sectionIdx + 1}`)}-${chunkInSection + 1}`,
+        passageTitle
+      })
+      if (end >= section.body.length) break
+      i = end - CHUNK_OVERLAP
+      if (i < 0) i = 0
+      chunkInSection++
+    }
+    sectionIdx++
   }
   return parts
+}
+
+function normalizeImportedRawText(body: string): string {
+  return body.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function distillDocumentToWikiBody(title: string, rawText: string): string {
+  const normalized = normalizeImportedRawText(rawText)
+  if (!normalized) return ''
+  const keyword = title.replace(/\*/g, "'").trim() || 'Untitled'
+  const compact = normalized.replace(/\s+/g, ' ').trim()
+  const definition = compact.length > 280 ? `${compact.slice(0, 279)}…` : compact
+  const paragraphs = normalized
+    .split(/\n{2,}/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+  const practice = paragraphs.slice(0, 4).join('\n\n') || normalized
+  const notes = paragraphs.slice(4).join('\n\n') || 'No additional notes were extracted.'
+  return [
+    '::: glossary',
+    `**${keyword}** — ${definition || 'No definition extracted.'}`,
+    ':::',
+    '',
+    '## Practice / Context',
+    '',
+    practice,
+    '',
+    '## Related Concepts',
+    '',
+    '- Derived from imported document text.',
+    '',
+    '## Notes',
+    '',
+    notes,
+    ''
+  ].join('\n')
+}
+
+function scoreImportConfidence(rawText: string, distilledBody: string, diagnostics: KbImportDiagnostic): KbImportConfidence {
+  let score = 0.92
+  const reasons: string[] = []
+  if (!rawText.trim()) {
+    return { score: 0.05, reasons: ['empty_raw_text'] }
+  }
+  if (!distilledBody.trim()) {
+    score -= 0.35
+    reasons.push('empty_distilled_body')
+  }
+  if (diagnostics.truncated) {
+    score -= 0.2
+    reasons.push('pdf_truncated')
+  }
+  if (diagnostics.parserWarnings.length > 0) {
+    score -= Math.min(0.22, diagnostics.parserWarnings.length * 0.06)
+    reasons.push('parser_warnings')
+  }
+  if (diagnostics.cleanupEdits > 0) {
+    score -= Math.min(0.2, diagnostics.cleanupEdits * 0.01)
+    reasons.push('cleanup_repairs_applied')
+  }
+  const controlChars = (rawText.match(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g) ?? []).length
+  if (controlChars > 0) {
+    score -= Math.min(0.18, controlChars / Math.max(1, rawText.length))
+    reasons.push('control_character_noise')
+  }
+  const brokenTokens = (rawText.match(/[A-Za-z]{1,2}\s+[A-Za-z]{1,2}\s+[A-Za-z]{1,2}/g) ?? []).length
+  if (brokenTokens > 0) {
+    score -= Math.min(0.16, brokenTokens * 0.01)
+    reasons.push('broken_token_sequences')
+  }
+  return { score: Number(Math.min(1, Math.max(0.05, score)).toFixed(3)), reasons }
+}
+
+function saveDocumentRecord(
+  db: Database.Database,
+  sourceId: string,
+  rawText: string,
+  distilledBody: string,
+  confidence: KbImportConfidence,
+  diagnostics: KbImportDiagnostic
+): void {
+  if (!tableExists(db, 'kb_documents')) return
+  const now = Date.now()
+  db.prepare(
+    `INSERT OR REPLACE INTO kb_documents
+       (source_id, raw_text, distilled_body, confidence_score, confidence_reasons_json, diagnostics_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM kb_documents WHERE source_id = ?), ?), ?)`
+  ).run(
+    sourceId,
+    rawText,
+    distilledBody,
+    confidence.score,
+    JSON.stringify(confidence.reasons),
+    JSON.stringify(diagnostics),
+    sourceId,
+    now,
+    now
+  )
+}
+
+function persistDocumentSections(db: Database.Database, sourceId: string, text: string): void {
+  if (!tableExists(db, 'kb_document_sections')) return
+  const sections = splitMarkdownSections(text)
+  const ins = db.prepare(
+    `INSERT INTO kb_document_sections
+      (id, source_id, ord, heading, body, page_start, page_end, anchor, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+  const now = Date.now()
+  for (const [idx, section] of sections.entries()) {
+    const anchor = `${slugifyAnchor(section.heading || `section-${idx + 1}`)}-${idx + 1}`
+    ins.run(randomUUID(), sourceId, idx, section.heading ?? null, section.body, null, null, anchor, now)
+  }
+}
+
+function persistEntityMentions(db: Database.Database, sourceId: string, chunks: ChunkDraft[]): void {
+  if (!tableExists(db, 'kb_entity_mentions')) return
+  const ins = db.prepare(
+    `INSERT INTO kb_entity_mentions (id, source_id, chunk_id, entity, entity_kind, confidence, created_at)
+     VALUES (?, ?, NULL, ?, ?, ?, ?)`
+  )
+  const now = Date.now()
+  const entities = new Map<string, number>()
+  for (const chunk of chunks) {
+    const tokens = chunk.text.match(/[A-Za-z][A-Za-z0-9_-]{4,}/g) ?? []
+    for (const token of tokens) entities.set(token, (entities.get(token) ?? 0) + 1)
+  }
+  for (const [entity, count] of [...entities.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40)) {
+    ins.run(randomUUID(), sourceId, entity, 'keyword', Math.min(0.95, 0.4 + count * 0.05), now)
+  }
+}
+
+function rebuildDocRelations(db: Database.Database, sourceId: string): void {
+  if (!tableExists(db, 'kb_doc_relations')) return
+  const source = db.prepare('SELECT id, title FROM kb_sources WHERE id = ?').get(sourceId) as
+    | { id: string; title: string }
+    | undefined
+  if (!source) return
+  const tokenize = (text: string): Set<string> => new Set(text.toLowerCase().match(/[a-z0-9]{4,}/g) ?? [])
+  const selfTokens = tokenize(source.title)
+  const rows = db
+    .prepare('SELECT id, title FROM kb_sources WHERE id != ? ORDER BY created_at DESC LIMIT 160')
+    .all(sourceId) as Array<{ id: string; title: string }>
+  const now = Date.now()
+  const upsert = db.prepare(
+    `INSERT INTO kb_doc_relations (id, from_source_id, to_source_id, relation_kind, confidence, evidence_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(from_source_id, to_source_id, relation_kind) DO UPDATE SET
+       confidence = excluded.confidence,
+       evidence_json = excluded.evidence_json,
+       updated_at = excluded.updated_at`
+  )
+  for (const row of rows) {
+    const other = tokenize(row.title)
+    const shared = [...other].filter((t) => selfTokens.has(t))
+    if (shared.length === 0) continue
+    const confidence = Math.min(0.92, 0.35 + shared.length * 0.09)
+    upsert.run(
+      randomUUID(),
+      sourceId,
+      row.id,
+      'lexical_overlap',
+      confidence,
+      JSON.stringify({ sharedTerms: shared.slice(0, 10) }),
+      now,
+      now
+    )
+    upsert.run(
+      randomUUID(),
+      row.id,
+      sourceId,
+      'lexical_overlap',
+      confidence,
+      JSON.stringify({ sharedTerms: shared.slice(0, 10) }),
+      now,
+      now
+    )
+  }
+}
+
+function ingestDocument(db: Database.Database, input: IngestDocumentInput): KbSource {
+  const sourceId = randomUUID()
+  const t = Date.now()
+  const rawText = normalizeImportedRawText(input.rawText)
+  const distilledBody = distillDocumentToWikiBody(input.title, rawText)
+  const diagnostics: KbImportDiagnostic = {
+    source: input.source,
+    parserWarnings: input.diagnostics?.parserWarnings ?? [],
+    truncated: input.diagnostics?.truncated === true,
+    cleanupEdits: Math.max(0, Number(input.diagnostics?.cleanupEdits ?? 0))
+  }
+  const confidence = scoreImportConfidence(rawText, distilledBody, diagnostics)
+  db.prepare(
+    'INSERT INTO kb_sources (id, title, uri, created_at, conversation_id) VALUES (?, ?, ?, ?, ?)'
+  ).run(sourceId, input.title, input.uri, t, input.conversationId ?? null)
+  input.onProgress?.({ kind: 'stage', stage: 'normalizing', stageLabel: 'Normalizing document', jobId: sourceId, progress: 0.3 })
+  const chunks = chunkText(rawText, input.heading)
+  input.onProgress?.({ kind: 'chunking', chunkCount: chunks.length })
+  let ord = 0
+  const ins = db.prepare(
+    `INSERT INTO kb_chunks (id, source_id, ord, heading, text, anchor, passage_title) VALUES (?, ?, ?, ?, ?, ?, ?)`
+  )
+  const progressEvery = chunks.length <= 40 ? 1 : 8
+  for (const [i, c] of chunks.entries()) {
+    const cid = randomUUID()
+    ins.run(cid, sourceId, ord++, c.heading ?? null, c.text, c.anchor, c.passageTitle)
+    const inserted = i + 1
+    if (inserted === chunks.length || inserted % progressEvery === 0) {
+      input.onProgress?.({ kind: 'indexing', inserted, total: chunks.length })
+    }
+  }
+  persistDocumentSections(db, sourceId, rawText)
+  persistEntityMentions(db, sourceId, chunks)
+  rebuildDocRelations(db, sourceId)
+  const detectedDomains = analyzeSourceDomains(db, sourceId)
+  const wikiBody = composeWikiReadModel(db, sourceId)
+  saveDocumentRecord(db, sourceId, rawText, wikiBody || distilledBody, confidence, diagnostics)
+  input.onProgress?.({ kind: 'analysis', sourceId, domainsDetected: detectedDomains.length })
+  input.onProgress?.({ kind: 'done', sourceId, title: input.title, chunkCount: chunks.length })
+  return { id: sourceId, title: input.title, uri: input.uri, createdAt: t, conversationId: input.conversationId ?? null }
 }
 
 export function ingestText(
@@ -173,28 +531,15 @@ export function ingestText(
   conversationId?: string | null,
   onProgress?: (payload: KbIngestFileProgress) => void
 ): KbSource {
-  const sourceId = randomUUID()
-  const t = Date.now()
-  db.prepare(
-    'INSERT INTO kb_sources (id, title, uri, created_at, conversation_id) VALUES (?, ?, ?, ?, ?)'
-  ).run(sourceId, title, uri, t, conversationId ?? null)
-  const chunks = chunkText(body, heading)
-  onProgress?.({ kind: 'chunking', chunkCount: chunks.length })
-  let ord = 0
-  const ins = db.prepare(
-    `INSERT INTO kb_chunks (id, source_id, ord, heading, text) VALUES (?, ?, ?, ?, ?)`
-  )
-  const progressEvery = chunks.length <= 40 ? 1 : 8
-  for (const [i, c] of chunks.entries()) {
-    const cid = randomUUID()
-    ins.run(cid, sourceId, ord++, c.heading ?? null, c.text)
-    const inserted = i + 1
-    if (inserted === chunks.length || inserted % progressEvery === 0) {
-      onProgress?.({ kind: 'indexing', inserted, total: chunks.length })
-    }
-  }
-  onProgress?.({ kind: 'done', sourceId, title, chunkCount: chunks.length })
-  return { id: sourceId, title, uri, createdAt: t }
+  return ingestDocument(db, {
+    title,
+    uri,
+    rawText: body,
+    source: 'text',
+    heading,
+    conversationId,
+    onProgress
+  })
 }
 
 export async function ingestFile(
@@ -204,19 +549,74 @@ export async function ingestFile(
   onProgress?: (payload: KbIngestFileProgress) => void
 ): Promise<KbSource> {
   const name = title ?? filePath.split(/[/\\]/).pop() ?? filePath
+  const jobId = randomUUID()
+  upsertIngestJob(db, {
+    jobId,
+    filePath,
+    title: name,
+    stage: 'selected',
+    status: 'queued'
+  })
+  onProgress?.({ kind: 'stage', stage: 'selected', stageLabel: 'File selected', jobId, progress: 0.05 })
   let body: string
+  let diagnostics: Partial<KbImportDiagnostic> = {
+    source: 'text',
+    parserWarnings: [],
+    truncated: false,
+    cleanupEdits: 0
+  }
   if (isPdfFilePath(filePath)) {
+    upsertIngestJob(db, { jobId, filePath, title: name, stage: 'extracting', status: 'running' })
+    onProgress?.({ kind: 'stage', stage: 'extracting', stageLabel: 'Extracting PDF text', jobId, progress: 0.2 })
     onProgress?.({ kind: 'reading', filePath, format: 'pdf' })
     const buf = readFileSync(filePath)
-    body = await extractPdfPlainText(buf)
+    const result = await extractPdfTextWithDiagnostics(buf)
+    body = result.text
+    diagnostics = {
+      source: 'pdf',
+      parserWarnings: result.diagnostics.parserWarnings,
+      truncated: result.diagnostics.truncated,
+      cleanupEdits: result.diagnostics.cleanupEdits
+    }
     if (!body.trim()) {
       throw new Error('No extractable text in this PDF (it may be image-only, encrypted, or empty).')
     }
   } else {
+    upsertIngestJob(db, { jobId, filePath, title: name, stage: 'extracting', status: 'running' })
+    onProgress?.({ kind: 'stage', stage: 'extracting', stageLabel: 'Reading document', jobId, progress: 0.2 })
     onProgress?.({ kind: 'reading', filePath, format: 'text' })
     body = readFileSync(filePath, 'utf8')
   }
-  return ingestText(db, name, `file://${filePath}`, body, undefined, null, onProgress)
+  try {
+    onProgress?.({ kind: 'stage', stage: 'enriching', stageLabel: 'Extracting context and entities', jobId, progress: 0.55 })
+    const out = ingestDocument(db, {
+      title: name,
+      uri: `file://${filePath}`,
+      rawText: body,
+      source: isPdfFilePath(filePath) ? 'pdf' : 'text',
+      diagnostics,
+      onProgress
+    })
+    upsertIngestJob(db, {
+      jobId,
+      filePath,
+      title: name,
+      stage: 'done',
+      status: 'done',
+      sourceId: out.id
+    })
+    return out
+  } catch (error) {
+    upsertIngestJob(db, {
+      jobId,
+      filePath,
+      title: name,
+      stage: 'failed',
+      status: 'failed',
+      errorMessage: error instanceof Error ? error.message : String(error)
+    })
+    throw error
+  }
 }
 
 /** Chunk and index the full message thread of a conversation into the knowledge base (linked for later bulk delete). */
@@ -308,55 +708,16 @@ export function resetEntireWikiAndKeywords(db: Database.Database): ResetWikiAndK
   return tx()
 }
 
-function ftsEscape(q: string): string {
-  const parts = q
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((t) => `"${t.replace(/"/g, '')}"`)
-  return parts.join(' AND ')
-}
-
 export function searchChunks(db: Database.Database, query: string, limit: number): KbChunk[] {
-  const fts = ftsEscape(query)
-  if (!fts) return []
-  try {
-    const rows = db
-      .prepare(
-        `SELECT c.id, c.source_id as sourceId, c.text, c.heading, c.ord
-         FROM kb_chunks_fts f
-         JOIN kb_chunks c ON c.id = f.chunk_id
-         WHERE f MATCH ?
-         ORDER BY bm25(f) LIMIT ?`
-      )
-      .all(fts, limit) as KbChunk[]
-    return rows
-  } catch {
-    return db
-      .prepare(
-        `SELECT id, source_id as sourceId, text, heading, ord FROM kb_chunks
-         WHERE text LIKE ? ORDER BY ord LIMIT ?`
-      )
-      .all(`%${query.replace(/%/g, '')}%`, limit) as KbChunk[]
-  }
-}
-
-const KB_HIT_SNIPPET_MAX = 220
-
-function kbHitSnippet(text: string): string {
-  const s = text.replace(/\s+/g, ' ').trim()
-  if (s.length <= KB_HIT_SNIPPET_MAX) return s
-  return `${s.slice(0, KB_HIT_SNIPPET_MAX - 1)}…`
-}
-
-type KbSearchRow = {
-  id: string
-  sourceId: string
-  sourceTitle: string
-  uri: string
-  text: string
-  heading: string | null
-  ord: number
+  return retrieveChunks(db, { query, limit }).map((row) => ({
+    id: row.chunkId,
+    sourceId: row.sourceId,
+    text: row.text,
+    heading: row.heading ?? undefined,
+    anchor: row.anchor ?? undefined,
+    passageTitle: row.passageTitle ?? undefined,
+    ord: row.ord
+  }))
 }
 
 /**
@@ -364,50 +725,7 @@ type KbSearchRow = {
  * with source title and a short snippet for the wiki library UI.
  */
 export function searchKbHits(db: Database.Database, query: string, limit: number): KbSearchHit[] {
-  const fts = ftsEscape(query)
-  if (!fts) return []
-  const rawCap = Math.min(200, Math.max(limit * 6, limit))
-  let rows: KbSearchRow[] = []
-  try {
-    rows = db
-      .prepare(
-        `SELECT c.id, c.source_id as sourceId, s.title as sourceTitle, s.uri as uri, c.text, c.heading as heading, c.ord
-         FROM kb_chunks_fts f
-         JOIN kb_chunks c ON c.id = f.chunk_id
-         JOIN kb_sources s ON s.id = c.source_id
-         WHERE f MATCH ?
-         ORDER BY bm25(f) LIMIT ?`
-      )
-      .all(fts, rawCap) as KbSearchRow[]
-  } catch {
-    const safe = query.replace(/%/g, '').replace(/_/g, '')
-    const like = `%${safe}%`
-    rows = db
-      .prepare(
-        `SELECT c.id, c.source_id as sourceId, s.title as sourceTitle, s.uri as uri, c.text, c.heading as heading, c.ord
-         FROM kb_chunks c
-         JOIN kb_sources s ON s.id = c.source_id
-         WHERE c.text LIKE ? OR s.title LIKE ?
-         ORDER BY c.ord LIMIT ?`
-      )
-      .all(like, like, rawCap) as KbSearchRow[]
-  }
-  const seen = new Set<string>()
-  const out: KbSearchHit[] = []
-  for (const r of rows) {
-    if (seen.has(r.sourceId)) continue
-    seen.add(r.sourceId)
-    out.push({
-      sourceId: r.sourceId,
-      sourceTitle: r.sourceTitle,
-      chunkId: r.id,
-      heading: r.heading,
-      snippet: kbHitSnippet(r.text),
-      kind: wikiKindFromUri(r.uri)
-    })
-    if (out.length >= limit) break
-  }
-  return out
+  return retrieveKbHits(db, { query, limit })
 }
 
 export function listSources(db: Database.Database): KbSource[] {
@@ -422,9 +740,225 @@ export function listSources(db: Database.Database): KbSource[] {
 export function listChunksForSource(db: Database.Database, sourceId: string): KbChunk[] {
   return db
     .prepare(
-      'SELECT id, source_id as sourceId, text, heading, ord FROM kb_chunks WHERE source_id = ? ORDER BY ord'
+      'SELECT id, source_id as sourceId, text, heading, anchor, passage_title as passageTitle, ord FROM kb_chunks WHERE source_id = ? ORDER BY ord'
     )
     .all(sourceId) as KbChunk[]
+}
+
+export function getDocumentRecord(db: Database.Database, sourceId: string): KbDocumentRecord | null {
+  if (!tableExists(db, 'kb_documents')) return null
+  const row = db
+    .prepare(
+      `SELECT source_id as sourceId,
+              raw_text as rawText,
+              distilled_body as distilledBody,
+              confidence_score as confidenceScore,
+              confidence_reasons_json as confidenceReasonsJson,
+              diagnostics_json as diagnosticsJson,
+              created_at as createdAt,
+              updated_at as updatedAt
+       FROM kb_documents
+       WHERE source_id = ?
+       LIMIT 1`
+    )
+    .get(sourceId) as
+    | {
+        sourceId: string
+        rawText: string
+        distilledBody: string
+        confidenceScore: number
+        confidenceReasonsJson: string
+        diagnosticsJson: string
+        createdAt: number
+        updatedAt: number
+      }
+    | undefined
+  if (!row) return null
+  let confidenceReasons: string[] = []
+  let diagnostics: KbImportDiagnostic = { source: 'text', parserWarnings: [], truncated: false, cleanupEdits: 0 }
+  try {
+    const parsed = JSON.parse(row.confidenceReasonsJson)
+    if (Array.isArray(parsed)) confidenceReasons = parsed.filter((x): x is string => typeof x === 'string')
+  } catch {
+    confidenceReasons = []
+  }
+  try {
+    const parsed = JSON.parse(row.diagnosticsJson) as Partial<KbImportDiagnostic>
+    diagnostics = {
+      source: parsed.source === 'pdf' ? 'pdf' : 'text',
+      parserWarnings: Array.isArray(parsed.parserWarnings)
+        ? parsed.parserWarnings.filter((x): x is string => typeof x === 'string')
+        : [],
+      truncated: parsed.truncated === true,
+      cleanupEdits: Math.max(0, Number(parsed.cleanupEdits ?? 0))
+    }
+  } catch {
+    /* ignore */
+  }
+  return {
+    sourceId: row.sourceId,
+    rawText: row.rawText,
+    distilledBody: row.distilledBody,
+    confidenceScore: Number(row.confidenceScore) || 0.5,
+    confidenceReasons,
+    diagnostics,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  }
+}
+
+function sentenceSnippet(text: string, maxLen = 180): string {
+  const s = text.replace(/\s+/g, ' ').trim()
+  if (!s) return ''
+  if (s.length <= maxLen) return s
+  return `${s.slice(0, maxLen - 1)}…`
+}
+
+export function listWikiPassages(db: Database.Database, sourceId: string): WikiPassageSummary[] {
+  const chunks = listChunksForSource(db, sourceId)
+  return chunks.map((c, idx) => {
+    const title = summarizePassageTitle(c.passageTitle || c.heading || c.text || `Passage ${idx + 1}`)
+    return {
+      chunkId: c.id,
+      ord: c.ord,
+      heading: c.heading ?? null,
+      title,
+      anchor: c.anchor?.trim() || `passage-${idx + 1}`,
+      snippet: sentenceSnippet(c.text),
+      wordCount: c.text.trim().split(/\s+/).filter(Boolean).length
+    }
+  })
+}
+
+export function suggestWikiKeywords(
+  db: Database.Database,
+  sourceId: string,
+  chunkIds?: readonly string[],
+  limit = 18
+): WikiKeywordCandidate[] {
+  const passages = listWikiPassages(db, sourceId)
+  const allowed = chunkIds?.length ? new Set(chunkIds) : null
+  const byChunk = new Map(passages.map((p) => [p.chunkId, p]))
+  const tokenTo = new Map<string, { score: number; chunkIds: Set<string> }>()
+  const stop = new Set([
+    'with',
+    'this',
+    'that',
+    'from',
+    'into',
+    'about',
+    'where',
+    'when',
+    'which',
+    'while',
+    'have',
+    'has',
+    'were',
+    'been',
+    'also',
+    'than',
+    'them',
+    'they',
+    'your',
+    'their',
+    'using',
+    'used'
+  ])
+  for (const p of passages) {
+    if (allowed && !allowed.has(p.chunkId)) continue
+    const src = `${p.title} ${p.snippet}`.toLowerCase()
+    const tokens = src.match(/[a-z0-9]{4,}/g) ?? []
+    const uniq = new Set(tokens.filter((t) => !stop.has(t)))
+    for (const t of uniq) {
+      if (!tokenTo.has(t)) tokenTo.set(t, { score: 0, chunkIds: new Set() })
+      const cur = tokenTo.get(t)!
+      cur.score += 1 + Math.min(2, (byChunk.get(p.chunkId)?.wordCount ?? 0) / 220)
+      cur.chunkIds.add(p.chunkId)
+    }
+  }
+  return [...tokenTo.entries()]
+    .filter(([, v]) => v.chunkIds.size > 0)
+    .sort((a, b) => b[1].score - a[1].score || b[1].chunkIds.size - a[1].chunkIds.size)
+    .slice(0, Math.max(1, limit))
+    .map(([keyword, v]) => ({
+      keyword,
+      score: Number(v.score.toFixed(2)),
+      chunkIds: [...v.chunkIds]
+    }))
+}
+
+function keywordToArticleTitle(keyword: string): string {
+  return summarizePassageTitle(
+    keyword
+      .split(/\s+/)
+      .map((w) => w[0]?.toUpperCase() + w.slice(1))
+      .join(' ')
+  )
+}
+
+export function extractWikiArticlesFromSource(
+  db: Database.Database,
+  input: WikiExtractArticleRequest
+): WikiExtractArticleResult {
+  const sourceId = input.sourceId.trim()
+  if (!sourceId) throw new Error('sourceId is required')
+  const keyword = normalizeWikiKeyword(input.keyword)
+  if (!keyword) throw new Error('keyword is required')
+  const selected = new Set(input.chunkIds.map((id) => id.trim()).filter(Boolean))
+  if (selected.size === 0) throw new Error('Select at least one passage to extract')
+  const chunks = listChunksForSource(db, sourceId).filter((c) => selected.has(c.id))
+  if (chunks.length === 0) throw new Error('No selected passages were found')
+  const articleTitle = summarizePassageTitle(input.title?.trim() || keywordToArticleTitle(keyword))
+  const articleBody = chunks
+    .map((c, idx) => {
+      const heading = summarizePassageTitle(c.passageTitle || c.heading || `Passage ${idx + 1}`)
+      const anchor = c.anchor?.trim() || `passage-${idx + 1}`
+      return `### ${heading}\n<a id="${anchor}"></a>\n\n${c.text.trim()}`
+    })
+    .join('\n\n---\n\n')
+  const src = ingestText(db, articleTitle, `wiki-extract-manual:${sourceId}:${Date.now()}`, articleBody)
+  return {
+    sourceId: src.id,
+    title: articleTitle,
+    keyword,
+    chunkCount: chunks.length
+  }
+}
+
+export function resolveWikiTerm(
+  db: Database.Database,
+  input: { term: string; contextSourceId?: string; contextSnippet?: string }
+): WikiTermResolutionResult {
+  const keyword = normalizeWikiKeyword(input.term)
+  if (!keyword) {
+    return { matched: false, keyword: '', contextSnippet: input.contextSnippet?.trim() || undefined }
+  }
+  const sources = db
+    .prepare('SELECT id, title FROM kb_sources ORDER BY created_at DESC LIMIT 1200')
+    .all() as { id: string; title: string }[]
+
+  const exact = sources.find((s) => normalizeWikiKeyword(s.title) === keyword)
+  if (exact) {
+    return { matched: true, sourceId: exact.id, title: exact.title, keyword, contextSnippet: input.contextSnippet?.trim() || undefined }
+  }
+  const contains = sources.find((s) => normalizeWikiKeyword(s.title).includes(keyword) || keyword.includes(normalizeWikiKeyword(s.title)))
+  if (contains) {
+    return {
+      matched: true,
+      sourceId: contains.id,
+      title: contains.title,
+      keyword,
+      contextSnippet: input.contextSnippet?.trim() || undefined
+    }
+  }
+  if (input.contextSourceId) {
+    return {
+      matched: false,
+      keyword,
+      contextSnippet: input.contextSnippet?.trim() || undefined
+    }
+  }
+  return { matched: false, keyword, contextSnippet: input.contextSnippet?.trim() || undefined }
 }
 
 function defaultWikiBodyForSource(db: Database.Database, sourceId: string): string {
@@ -685,9 +1219,10 @@ function wikiDefinitionSnippet(text: string, maxLen: number): string {
 }
 
 function wikiChunkBlock(c: KbChunk, i: number): string {
-  const h = c.heading?.trim()
-  const head = h || `Passage ${i + 1}`
-  return `### ${head}\n\n${c.text.trim()}`
+  const h = c.passageTitle?.trim() || c.heading?.trim()
+  const head = summarizePassageTitle(h || `Passage ${i + 1}`)
+  const anchor = c.anchor?.trim() || `passage-${i + 1}`
+  return `### ${head}\n<a id="${anchor}"></a>\n\n${c.text.trim()}`
 }
 
 function wikiMarkdownRelatedList(db: Database.Database, sourceId: string): string {
@@ -709,6 +1244,12 @@ function wikiMarkdownRelatedList(db: Database.Database, sourceId: string): strin
  * and notes from remaining indexed chunks.
  */
 export function getWikiPageBody(db: Database.Database, sourceId: string): string {
+  try {
+    const composed = composeWikiReadModel(db, sourceId)
+    if (composed.trim()) return composed
+  } catch {
+    /* fallback to legacy body composition below */
+  }
   const row = db.prepare('SELECT title FROM kb_sources WHERE id = ?').get(sourceId) as { title: string } | undefined
   const keyword = row?.title?.trim() || 'Untitled'
   const chunks = listChunksForSource(db, sourceId)
@@ -885,6 +1426,26 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
   const sources = db
     .prepare(`SELECT id, title, uri, created_at as createdAt FROM kb_sources ORDER BY created_at ASC`)
     .all() as { id: string; title: string; uri: string; createdAt: number }[]
+  const sourceDomains = new Map<string, string>()
+  if (tableExists(db, 'kb_domain_membership')) {
+    const rows = db
+      .prepare(
+        `SELECT source_id as sourceId, domain_id as domainId
+         FROM kb_domain_membership
+         ORDER BY confidence DESC`
+      )
+      .all() as Array<{ sourceId: string; domainId: string }>
+    for (const row of rows) {
+      if (!sourceDomains.has(row.sourceId)) sourceDomains.set(row.sourceId, row.domainId)
+    }
+  }
+  const docBySource = new Map<string, KbDocumentRecord>()
+  if (tableExists(db, 'kb_documents')) {
+    for (const s of sources) {
+      const row = getDocumentRecord(db, s.id)
+      if (row) docBySource.set(s.id, row)
+    }
+  }
 
   const nodes: KnowledgeGraphNode[] = []
   const edges: KnowledgeGraphEdge[] = []
@@ -897,15 +1458,16 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
       kind: 'source',
       label: s.title,
       shortLabel: semanticToken(s.title),
-      domainId: domainIdFromUri(s.uri),
-      confidence: 0.72,
+      targetSourceId: s.id,
+      domainId: sourceDomains.get(s.id) ?? domainIdFromUri(s.uri),
+      confidence: docBySource.get(s.id)?.confidenceScore ?? 0.72,
       novelty: 0.36,
       provenance: 'knowledge-base'
     })
   }
 
   const chunkStmt = db.prepare(
-    `SELECT id, source_id as sourceId, ord, heading FROM kb_chunks WHERE source_id = ? ORDER BY ord ASC`
+    `SELECT id, source_id as sourceId, ord, heading, anchor, passage_title as passageTitle FROM kb_chunks WHERE source_id = ? ORDER BY ord ASC`
   )
 
   for (const s of sources) {
@@ -913,7 +1475,14 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
       truncated = true
       break
     }
-    const rows = chunkStmt.all(s.id) as { id: string; sourceId: string; ord: number; heading: string | null }[]
+    const rows = chunkStmt.all(s.id) as {
+      id: string
+      sourceId: string
+      ord: number
+      heading: string | null
+      anchor: string | null
+      passageTitle: string | null
+    }[]
     const room = GRAPH_MAX_TOTAL_CHUNK_SLOTS - chunkSlotsUsed
     if (room <= 0) {
       truncated = true
@@ -925,8 +1494,9 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
     for (const r of slice) {
       const ordLabel = `#${r.ord + 1}`
       const sub =
-        r.heading && r.heading.trim()
-          ? r.heading.trim().slice(0, 42) + (r.heading.trim().length > 42 ? '…' : '')
+        (r.passageTitle && r.passageTitle.trim()) || (r.heading && r.heading.trim())
+          ? (r.passageTitle || r.heading || '').trim().slice(0, 42) +
+            ((r.passageTitle || r.heading || '').trim().length > 42 ? '…' : '')
           : undefined
       nodes.push({
         id: r.id,
@@ -935,8 +1505,11 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
         shortLabel: `c${r.ord + 1}`,
         sublabel: sub,
         sourceId: s.id,
-        domainId: domainIdFromUri(s.uri),
-        confidence: 0.58,
+        targetSourceId: s.id,
+        sectionOrd: r.ord,
+        sectionAnchor: r.anchor ?? undefined,
+        domainId: sourceDomains.get(s.id) ?? domainIdFromUri(s.uri),
+        confidence: Math.max(0.3, (docBySource.get(s.id)?.confidenceScore ?? 0.72) - 0.08),
         novelty: r.heading ? 0.62 : 0.44,
         provenance: 'knowledge-base'
       })
@@ -953,7 +1526,7 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
         shortLabel: `+${omitted}`,
         sublabel: 'chunks not drawn',
         sourceId: s.id,
-        domainId: domainIdFromUri(s.uri),
+        domainId: sourceDomains.get(s.id) ?? domainIdFromUri(s.uri),
         confidence: 0.4,
         novelty: 0.2,
         provenance: 'knowledge-base'
@@ -991,6 +1564,7 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
       kind: 'wiki',
       label: entry.title,
       shortLabel: semanticToken(entry.title),
+      targetSourceId: src?.id,
       domainId: src ? domainIdFromUri(src.uri) : undefined,
       confidence: 0.82,
       novelty: 0.56,
@@ -1004,6 +1578,27 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
         if (!chunkIds.has(chunkId)) continue
         edges.push({ from: wikiNodeId, to: chunkId, kind: 'indexes', confidence: 0.76, recency: 0.58 })
       }
+    }
+  }
+
+  if (tableExists(db, 'kb_doc_relations')) {
+    const relationRows = db
+      .prepare(
+        `SELECT from_source_id as fromSourceId, to_source_id as toSourceId, confidence, relation_kind as relationKind
+         FROM kb_doc_relations
+         ORDER BY confidence DESC
+         LIMIT 1200`
+      )
+      .all() as Array<{ fromSourceId: string; toSourceId: string; confidence: number; relationKind: string }>
+    for (const row of relationRows) {
+      if (!sourceIdSet.has(row.fromSourceId) || !sourceIdSet.has(row.toSourceId)) continue
+      edges.push({
+        from: row.fromSourceId,
+        to: row.toSourceId,
+        kind: row.relationKind === 'semantic_similarity' ? 'semantic_related' : 'related',
+        confidence: Math.min(1, Math.max(0.2, Number(row.confidence) || 0.5)),
+        recency: 0.58
+      })
     }
   }
 
@@ -1033,12 +1628,14 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
           toNode = syntheticByKeyword.get(k)
         } else {
           const id = `wiki-keyword:${k}`
+          const fromTarget = nodes.find((n) => n.id === fromNode)?.targetSourceId
           if (!existingNodeIds.has(id)) {
             nodes.push({
               id,
               kind: 'wiki',
               label: titleCaseKeyword(k),
               shortLabel: semanticToken(k),
+              targetSourceId: fromTarget,
               confidence: 0.48,
               novelty: 0.34,
               provenance: 'knowledge-base'
@@ -1310,6 +1907,20 @@ export function listRelatedWikiSources(
 /** Sync wiki page row, then return payload for the renderer (glossary stripped from body). */
 export function buildWikiPagePayload(db: Database.Database, sourceId: string): WikiPagePayload {
   ensureWikiVersioningBackfill(db)
+  const doc = getDocumentRecord(db, sourceId)
+  const confidence = doc
+    ? ({
+        score: doc.confidenceScore,
+        reasons: doc.confidenceReasons
+      } satisfies KbImportConfidence)
+    : undefined
+  const passages = listWikiPassages(db, sourceId)
+  const suggestedKeywords = suggestWikiKeywords(
+    db,
+    sourceId,
+    passages.slice(0, 24).map((p) => p.chunkId),
+    12
+  )
   const activeEntry = resolveActiveWikiEntryForSource(db, sourceId)
   if (activeEntry) {
     const { body, glossary } = extractWikiGlossary(stripWikiControlMarkers(activeEntry.body))
@@ -1317,8 +1928,11 @@ export function buildWikiPagePayload(db: Database.Database, sourceId: string): W
       id: `src:${sourceId}`,
       title: activeEntry.title,
       body,
+      confidence,
       glossary,
-      relatedSources: listRelatedWikiSources(db, sourceId, 12)
+      relatedSources: listRelatedWikiSources(db, sourceId, 12),
+      passages,
+      suggestedKeywords
     }
   }
   const page = ensureWikiPageForSource(db, sourceId)
@@ -1327,8 +1941,11 @@ export function buildWikiPagePayload(db: Database.Database, sourceId: string): W
     id: page.id,
     title: page.title,
     body,
+    confidence,
     glossary,
-    relatedSources: listRelatedWikiSources(db, sourceId, 12)
+    relatedSources: listRelatedWikiSources(db, sourceId, 12),
+    passages,
+    suggestedKeywords
   }
 }
 

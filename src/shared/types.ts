@@ -153,12 +153,51 @@ export interface KbSource {
   conversationId?: string | null
 }
 
+export interface KbImportDiagnostic {
+  source: 'pdf' | 'text'
+  parserWarnings: string[]
+  truncated: boolean
+  cleanupEdits: number
+}
+
+export interface KbImportConfidence {
+  score: number
+  reasons: string[]
+}
+
+export type KbIngestJobStage = 'selected' | 'extracting' | 'normalizing' | 'enriching' | 'indexing' | 'done' | 'failed'
+
+export interface KbIngestJobSummary {
+  id: string
+  sourceId?: string | null
+  filePath: string
+  title: string
+  stage: KbIngestJobStage
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
+  errorMessage?: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface KbDocumentRecord {
+  sourceId: string
+  rawText: string
+  distilledBody: string
+  confidenceScore: number
+  confidenceReasons: string[]
+  diagnostics: KbImportDiagnostic
+  createdAt: number
+  updatedAt: number
+}
+
 /** Main→renderer progress updates while importing one file into the wiki knowledge base. */
 export type KbIngestFileProgress =
   | { kind: 'selected'; filePath: string }
   | { kind: 'reading'; filePath: string; format: 'pdf' | 'text' }
+  | { kind: 'stage'; stage: KbIngestJobStage; stageLabel: string; jobId: string; progress?: number }
   | { kind: 'chunking'; chunkCount: number }
   | { kind: 'indexing'; inserted: number; total: number }
+  | { kind: 'analysis'; sourceId: string; domainsDetected: number }
   | { kind: 'done'; sourceId: string; title: string; chunkCount: number }
   | { kind: 'cancelled' }
   | { kind: 'error'; message: string }
@@ -168,6 +207,10 @@ export interface KbChunk {
   sourceId: string
   text: string
   heading?: string
+  /** Stable anchor key for passage deep-links. */
+  anchor?: string
+  /** Generated or imported concise title for this passage. */
+  passageTitle?: string
   ord: number
 }
 
@@ -189,6 +232,35 @@ export interface KbSearchHit {
   heading: string | null
   snippet: string
   kind: WikiSourceKind
+  domainId?: string
+  score?: number
+  citation?: {
+    passageTitle?: string | null
+    anchor?: string | null
+    ord?: number
+  }
+}
+
+export interface RetrievalQueryOptions {
+  query: string
+  limit: number
+  domainIds?: string[]
+}
+
+export interface RetrievalHit {
+  sourceId: string
+  sourceTitle: string
+  chunkId: string
+  text: string
+  snippet: string
+  heading?: string | null
+  passageTitle?: string | null
+  anchor?: string | null
+  ord: number
+  domainId?: string
+  lexicalScore: number
+  semanticScore: number
+  finalScore: number
 }
 
 /** A defined term extracted from a `::: glossary` block in wiki Markdown. */
@@ -222,8 +294,51 @@ export interface WikiPagePayload {
   id: string
   title: string
   body: string
+  confidence?: KbImportConfidence
   glossary: WikiGlossaryEntry[]
   relatedSources: WikiRelatedSource[]
+  passages: WikiPassageSummary[]
+  suggestedKeywords: WikiKeywordCandidate[]
+}
+
+/** One passage in a rendered wiki article (maps to one KB chunk). */
+export interface WikiPassageSummary {
+  chunkId: string
+  ord: number
+  heading: string | null
+  title: string
+  anchor: string
+  snippet: string
+  wordCount: number
+}
+
+/** Suggestion for manual article extraction from selected passages. */
+export interface WikiKeywordCandidate {
+  keyword: string
+  score: number
+  chunkIds: string[]
+}
+
+export interface WikiExtractArticleRequest {
+  sourceId: string
+  keyword: string
+  chunkIds: string[]
+  title?: string
+}
+
+export interface WikiExtractArticleResult {
+  sourceId: string
+  title: string
+  keyword: string
+  chunkCount: number
+}
+
+export interface WikiTermResolutionResult {
+  matched: boolean
+  sourceId?: string
+  title?: string
+  keyword: string
+  contextSnippet?: string
 }
 
 export interface WikiReanalyzeResult {
@@ -350,6 +465,12 @@ export interface KnowledgeGraphNode {
   sublabel?: string
   /** Parent KB source id when `kind === 'chunk'`. */
   sourceId?: string
+  /** Canonical destination source for navigation (e.g. wiki-entry node). */
+  targetSourceId?: string
+  /** Chunk order for section deep-linking when available. */
+  sectionOrd?: number
+  /** Optional section anchor label for deep-linking. */
+  sectionAnchor?: string
   /** Optional domain bucket used by domain clustering presets. */
   domainId?: string
   /** 0..1 confidence score for evidence-backed nodes. */
@@ -431,6 +552,14 @@ export interface OntologyQueryRequest {
   typeFilters?: string[]
   predicateFilters?: string[]
   recentOnlyMs?: number
+  /** Renderer-guided level of detail request tier. */
+  lodTier?: 'overview' | 'mid' | 'detail'
+  /** Optional focus node hint so queries can prioritize a selected neighborhood. */
+  focusNodeId?: string
+  /** Optional viewport hint in world coordinates (for progressive fetch). */
+  viewportHint?: { x0: number; y0: number; x1: number; y1: number }
+  /** 0..1 desired edge density clamp for high-scale graph views. */
+  maxEdgeDensity?: number
 }
 
 export interface OntologyEntityDetails {
@@ -494,6 +623,12 @@ export interface MetricsSnapshot {
   runtimeTokensPerSec?: number
   runtimeCtxUsed?: number
   processCpuPercent?: number
+  /** Host machine CPU usage (all cores), 0..100. */
+  systemCpuPercent?: number
+  /** Host memory pressure (used / total RAM), 0..100. */
+  systemMemoryPressurePercent?: number
+  /** Weighted local resource load blend (CPU + memory pressure), 0..100. */
+  systemLoadPercent?: number
   processRssMb?: number
   gpuMemUsedMb?: number
   gpuMemTotalMb?: number
@@ -530,6 +665,14 @@ export interface TrainJob {
   regressionRisk?: 'low' | 'medium' | 'high'
   /** Associated approved-data manifest id when generated. */
   manifestId?: string
+}
+
+export interface TrainStartValidationResult {
+  supported: boolean
+  reason: string
+  details?: string
+  backend: 'axolotl'
+  runtimeVersion?: string
 }
 
 export type LearningEventSource = 'electron' | 'intellij-plugin'
@@ -649,6 +792,7 @@ export interface RuntimeChatProgress {
 
 /** Event kinds POSTed by IDE plugins to `/v1/plugin/report`. */
 export type PluginIntegrationReportKind =
+  | 'chat_job_queued'
   | 'chat_completed'
   | 'chat_failed'
   | 'apply_completed'
@@ -668,6 +812,18 @@ export interface PluginIntegrationReport {
   message?: string
   /** Small structured fields (token counts, file counts, project name, etc.). */
   meta?: Record<string, string | number | boolean | null>
+}
+
+/** Main → renderer live telemetry for IDE bridge `/v1/chat` requests. */
+export interface IntegrationModelActivityEvent {
+  requestId: string
+  source: string
+  kind: 'started' | 'token' | 'completed' | 'error'
+  receivedAt: number
+  promptPreview?: string
+  tokenText?: string
+  responseText?: string
+  error?: string
 }
 
 export type CodebaseAnalysisFacet = 'domain_model' | 'design_pattern' | 'architecture_pattern'

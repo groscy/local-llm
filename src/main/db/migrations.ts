@@ -473,6 +473,140 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       );
       CREATE INDEX IF NOT EXISTS idx_ontology_snapshots_created ON ontology_snapshots(created_at DESC);
     `
+  },
+  {
+    version: 18,
+    sql: `
+      ALTER TABLE kb_chunks ADD COLUMN anchor TEXT;
+      ALTER TABLE kb_chunks ADD COLUMN passage_title TEXT;
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_source_ord ON kb_chunks(source_id, ord);
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_anchor ON kb_chunks(anchor);
+    `
+  },
+  {
+    version: 19,
+    sql: `
+      CREATE TABLE IF NOT EXISTS kb_documents (
+        source_id TEXT PRIMARY KEY,
+        raw_text TEXT NOT NULL,
+        distilled_body TEXT NOT NULL,
+        confidence_score REAL NOT NULL DEFAULT 0.5,
+        confidence_reasons_json TEXT NOT NULL DEFAULT '[]',
+        diagnostics_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (source_id) REFERENCES kb_sources(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_documents_confidence ON kb_documents(confidence_score);
+    `
+  },
+  {
+    version: 20,
+    sql: `
+      CREATE TABLE IF NOT EXISTS kb_ingest_jobs (
+        id TEXT PRIMARY KEY,
+        source_id TEXT,
+        file_path TEXT NOT NULL,
+        title TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_ingest_jobs_updated ON kb_ingest_jobs(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_kb_ingest_jobs_status ON kb_ingest_jobs(status, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS kb_document_sections (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        ord INTEGER NOT NULL,
+        heading TEXT,
+        body TEXT NOT NULL,
+        page_start INTEGER,
+        page_end INTEGER,
+        anchor TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (source_id) REFERENCES kb_sources(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_document_sections_source_ord ON kb_document_sections(source_id, ord);
+
+      CREATE TABLE IF NOT EXISTS kb_chunk_embeddings (
+        chunk_id TEXT PRIMARY KEY,
+        vector_json TEXT NOT NULL,
+        model TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (chunk_id) REFERENCES kb_chunks(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS kb_entity_mentions (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        chunk_id TEXT,
+        entity TEXT NOT NULL,
+        entity_kind TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (source_id) REFERENCES kb_sources(id) ON DELETE CASCADE,
+        FOREIGN KEY (chunk_id) REFERENCES kb_chunks(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_entity_mentions_source ON kb_entity_mentions(source_id);
+      CREATE INDEX IF NOT EXISTS idx_kb_entity_mentions_entity ON kb_entity_mentions(entity);
+
+      CREATE TABLE IF NOT EXISTS kb_doc_relations (
+        id TEXT PRIMARY KEY,
+        from_source_id TEXT NOT NULL,
+        to_source_id TEXT NOT NULL,
+        relation_kind TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (from_source_id) REFERENCES kb_sources(id) ON DELETE CASCADE,
+        FOREIGN KEY (to_source_id) REFERENCES kb_sources(id) ON DELETE CASCADE
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_doc_rel_unique ON kb_doc_relations(from_source_id, to_source_id, relation_kind);
+      CREATE INDEX IF NOT EXISTS idx_kb_doc_rel_conf ON kb_doc_relations(confidence DESC);
+
+      CREATE TABLE IF NOT EXISTS kb_domains (
+        id TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        confidence REAL NOT NULL DEFAULT 0.5,
+        centroid_terms_json TEXT NOT NULL DEFAULT '[]',
+        source_count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_domains_updated ON kb_domains(updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS kb_domain_membership (
+        source_id TEXT NOT NULL,
+        domain_id TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        rationale TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (source_id, domain_id),
+        FOREIGN KEY (source_id) REFERENCES kb_sources(id) ON DELETE CASCADE,
+        FOREIGN KEY (domain_id) REFERENCES kb_domains(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_domain_membership_domain ON kb_domain_membership(domain_id, confidence DESC);
+
+      CREATE TABLE IF NOT EXISTS kb_domain_retrieval_units (
+        id TEXT PRIMARY KEY,
+        domain_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        source_ids_json TEXT NOT NULL DEFAULT '[]',
+        chunk_ids_json TEXT NOT NULL DEFAULT '[]',
+        updated_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (domain_id) REFERENCES kb_domains(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_domain_retrieval_units_domain ON kb_domain_retrieval_units(domain_id, updated_at DESC);
+    `
   }
 ]
 
