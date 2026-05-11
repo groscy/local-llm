@@ -1,0 +1,176 @@
+name: Build releases on main
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-releases-main-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install packaging tools (deb / rpm / AppImage helpers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fakeroot rpm libarchive-tools
+
+      - name: Setup JDK 17 (IntelliJ Gradle plugin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build app (electron-vite)
+        run: npm run build
+
+      - name: Build IntelliJ plugin (Gradle)
+        run: npm run build:intellij-plugin
+
+      - name: Package Linux release artifacts (electron-builder)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never --linux deb AppImage zip pacman
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-llm-desktop-linux-x64
+          path: |
+            release/*.deb
+            release/*.AppImage
+            release/*.zip
+            release/*.pkg.tar.*
+          if-no-files-found: error
+
+      - name: Package Linux CPU flavor (electron-builder)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never --config electron-builder.linux-cpu.yml --linux deb AppImage zip pacman
+
+      - name: Upload Linux CPU artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-llm-desktop-linux-cpu-x64
+          path: |
+            release/*-linux-cpu-*.deb
+            release/*-linux-cpu-*.AppImage
+            release/*-linux-cpu-*.zip
+            release/*-linux-cpu-*.pkg.tar.*
+          if-no-files-found: error
+
+      - name: Upload IntelliJ plugin ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-llm-intellij-plugin
+          path: integrations/intellij-plugin/build/distributions/local-llm-intellij-*.zip
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup JDK 17 (IntelliJ Gradle plugin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build app (electron-vite)
+        run: npm run build
+
+      - name: Build IntelliJ plugin (Gradle)
+        run: npm run build:intellij-plugin
+
+      - name: Package Windows release artifacts (electron-builder)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never --win nsis zip
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-llm-desktop-win-x64
+          path: |
+            release/*.exe
+            release/*.zip
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup JDK 17 (IntelliJ Gradle plugin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build app (electron-vite)
+        run: npm run build
+
+      - name: Build IntelliJ plugin (Gradle)
+        run: npm run build:intellij-plugin
+
+      - name: Package macOS release artifacts (electron-builder)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never --mac dmg zip
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-llm-desktop-macos
+          path: |
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: error
