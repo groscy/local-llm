@@ -4,14 +4,16 @@ import { dismissViewToast, runViewToastAction, useViewToastsForDisplay } from '.
 function variantIcon(variant: string): string {
   if (variant === 'success') return 'fa-circle-check'
   if (variant === 'warning') return 'fa-triangle-exclamation'
+  if (variant === 'error') return 'fa-circle-xmark'
   return 'fa-circle-info'
 }
 
 export function ViewToastRegion(): ReactElement {
   const items = useViewToastsForDisplay()
+  const hasErrorToast = items.some((t) => t.variant === 'error')
 
   return (
-    <div className="view-toast-stack" aria-live="polite" aria-relevant="additions text">
+    <div className="view-toast-stack" aria-live={hasErrorToast ? 'assertive' : 'polite'} aria-relevant="additions text">
       {items.map((t) => (
         <div key={t.id} className={`view-toast view-toast--${t.variant}`}>
           <div className="view-toast-main">

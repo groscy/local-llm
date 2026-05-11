@@ -8,13 +8,28 @@ import {
   UI_ROLE_LABELS,
   roleLayout,
   layoutDefaultMainArea,
-  type AppMainView
+  type AppMainView,
+  type ToolDrawerId
 } from '@shared/uiRole'
 import { applyColorSchemeToDocument } from './colorSchemeDom'
 
 const LLAMA_CPP_RELEASES_URL = 'https://github.com/ggerganov/llama.cpp/releases'
 const LLAMA_CPP_SERVER_DOC_URL =
   'https://github.com/ggerganov/llama.cpp/blob/master/tools/server/README.md'
+
+const THEME_PREVIEW_SWATCHES: Record<
+  ColorSchemeId,
+  { bg: string; surface: string; accent: string; text: string }
+> = {
+  violet: { bg: '#101524', surface: '#2b3550', accent: '#8a7dff', text: '#e6ebff' },
+  'dark-charcoal-teal': { bg: '#111720', surface: '#23303b', accent: '#2ec4b6', text: '#e5f4f2' },
+  'black-oled-blue': { bg: '#06080c', surface: '#131b2c', accent: '#7fd4ff', text: '#e9f6ff' },
+  'light-warm-slate': { bg: '#fffaf2', surface: '#e7e0d2', accent: '#4e6f96', text: '#2d3950' },
+  'solarized-light': { bg: '#fdf6e3', surface: '#eee8d5', accent: '#268bd2', text: '#3f4f5a' },
+  'solarized-dark': { bg: '#002b36', surface: '#073642', accent: '#b58900', text: '#c8d5d6' },
+  'cvd-rg-blue-amber': { bg: '#0d111a', surface: '#243248', accent: '#f4b942', text: '#e7eefb' },
+  'cvd-by-violet-amber': { bg: '#1a1830', surface: '#2f2b4d', accent: '#ffbf47', text: '#efe9ff' }
+}
 
 export type SetupTourRuntimePanelProps = {
   ollamaReachable: boolean | null
@@ -33,24 +48,38 @@ export type SetupTourRuntimePanelProps = {
 export type SetupTourFinishPayload = {
   uiRole: UiRole
   colorScheme: ColorSchemeId
+  showOnStartup: boolean
   /** Open this drawer after closing (e.g. runtime). */
-  openDrawer: 'runtime' | 'hf' | 'settings' | null
+  openDrawer: ToolDrawerId | 'settings' | null
   /** Optional main view switch. */
   mainView?: AppMainView
 }
 
 type Step = 0 | 1 | 2 | 3 | 4
+const SETUP_TOUR_TOTAL_STEPS = 5
+
+function SetupTourStepLabel(props: { stepNumber: number; title: string }): ReactElement {
+  return (
+    <p className="setup-tour-step-label">
+      <span className="setup-tour-step-label-n">{props.stepNumber}</span>
+      <span className="setup-tour-step-label-of"> / {SETUP_TOUR_TOTAL_STEPS}</span>
+      <span className="setup-tour-step-label-title">{props.title}</span>
+    </p>
+  )
+}
 
 export function SetupRoleTour(props: {
   open: boolean
   initialRole: UiRole
   initialColorScheme: ColorSchemeId
+  initialShowOnStartup: boolean
   runtime: SetupTourRuntimePanelProps
   onComplete: (p: SetupTourFinishPayload) => void | Promise<void>
 }): ReactElement | null {
   const [step, setStep] = useState<Step>(0)
   const [draftRole, setDraftRole] = useState<UiRole>(props.initialRole)
   const [draftColorScheme, setDraftColorScheme] = useState<ColorSchemeId>(props.initialColorScheme)
+  const [draftShowOnStartup, setDraftShowOnStartup] = useState<boolean>(props.initialShowOnStartup)
   const installLogRef = useRef<HTMLPreElement>(null)
 
   useEffect(() => {
@@ -58,8 +87,9 @@ export function SetupRoleTour(props: {
     setStep(0)
     setDraftRole(props.initialRole)
     setDraftColorScheme(props.initialColorScheme)
+    setDraftShowOnStartup(props.initialShowOnStartup)
     applyColorSchemeToDocument(props.initialColorScheme)
-  }, [props.open, props.initialRole, props.initialColorScheme])
+  }, [props.open, props.initialRole, props.initialColorScheme, props.initialShowOnStartup])
 
   useEffect(() => {
     if (!props.open || step !== 1) return
@@ -76,21 +106,23 @@ export function SetupRoleTour(props: {
     setStep(0)
     setDraftRole(props.initialRole)
     setDraftColorScheme(props.initialColorScheme)
+    setDraftShowOnStartup(props.initialShowOnStartup)
     applyColorSchemeToDocument(props.initialColorScheme)
-  }, [props.initialRole, props.initialColorScheme])
+  }, [props.initialRole, props.initialColorScheme, props.initialShowOnStartup])
 
   const finish = useCallback(
-    async (opts: { openDrawer: 'runtime' | 'hf' | 'settings' | null; mainView?: AppMainView }) => {
+    async (opts: { openDrawer: ToolDrawerId | 'settings' | null; mainView?: AppMainView }) => {
       applyColorSchemeToDocument(draftColorScheme)
       await props.onComplete({
         uiRole: draftRole,
         colorScheme: draftColorScheme,
+        showOnStartup: draftShowOnStartup,
         openDrawer: opts.openDrawer,
         mainView: opts.mainView
       })
       resetLocal()
     },
-    [draftColorScheme, draftRole, props, resetLocal]
+    [draftColorScheme, draftRole, draftShowOnStartup, props, resetLocal]
   )
 
   const goBack = useCallback(() => {
@@ -116,18 +148,14 @@ export function SetupRoleTour(props: {
       <div className="modal-box modal-box--welcome modal-box--setup-tour" onClick={(e) => e.stopPropagation()}>
         {step === 0 && (
           <>
-            <p className="setup-tour-step-label">
-              <span className="setup-tour-step-label-n">1</span>
-              <span className="setup-tour-step-label-of"> / 5</span>
-              <span className="setup-tour-step-label-title">Workspace role</span>
-            </p>
+            <SetupTourStepLabel stepNumber={1} title="Workspace role" />
             <h2 id="setup-tour-title" className="modal-title">
               How will you use this app?
             </h2>
             <p id="setup-tour-role-desc" className="modal-text welcome-modal-lead">
               <strong className="setup-tour-role-lead-strong">Tap one card</strong> to choose your role. This shapes task
               navigation, workspace defaults, and which settings are surfaced first. You can switch anytime under{' '}
-              <strong>Settings → General</strong>.
+              <strong>Settings -&gt; General</strong>.
             </p>
             <div
               className="setup-tour-role-grid"
@@ -176,19 +204,53 @@ export function SetupRoleTour(props: {
 
         {step === 1 && (
           <>
+            <SetupTourStepLabel stepNumber={2} title="Color theme" />
             <h2 className="modal-title">Choose a color theme</h2>
             <p className="modal-text welcome-modal-lead">
-              The preview updates as you click. You can refine appearance later under Settings → Appearance.
+              The preview updates as you click. You can refine appearance later under Settings -&gt; Appearance.
             </p>
-            <div className="setup-tour-theme-list" role="list">
+            <div className="setup-tour-theme-list" role="radiogroup" aria-label="Color themes">
               {COLOR_SCHEME_IDS.map((id) => (
                 <button
                   key={id}
                   type="button"
-                  role="listitem"
+                  role="radio"
+                  aria-checked={draftColorScheme === id}
                   className={`setup-tour-theme-card${draftColorScheme === id ? ' setup-tour-theme-card--selected' : ''}`}
                   onClick={() => setDraftColorScheme(id)}
                 >
+                  {(() => {
+                    const preview = THEME_PREVIEW_SWATCHES[id]
+                    return (
+                  <span className="setup-tour-theme-preview" aria-hidden="true">
+                    <span className="setup-tour-theme-preview-ui" style={{ background: preview.bg }}>
+                      <span className="setup-tour-theme-preview-ui-sidebar" style={{ background: preview.surface }} />
+                      <span className="setup-tour-theme-preview-ui-main">
+                        <span className="setup-tour-theme-preview-ui-header" style={{ background: preview.surface }}>
+                          <span
+                            className="setup-tour-theme-preview-ui-dot"
+                            style={{ background: preview.accent }}
+                          />
+                          <span
+                            className="setup-tour-theme-preview-ui-line"
+                            style={{ background: preview.text }}
+                          />
+                        </span>
+                        <span className="setup-tour-theme-preview-ui-cards">
+                          <span
+                            className="setup-tour-theme-preview-ui-card"
+                            style={{ background: preview.surface }}
+                          />
+                          <span
+                            className="setup-tour-theme-preview-ui-card setup-tour-theme-preview-ui-card--accent"
+                            style={{ background: preview.accent }}
+                          />
+                        </span>
+                      </span>
+                    </span>
+                  </span>
+                    )
+                  })()}
                   <span className="setup-tour-theme-card-label">{COLOR_SCHEME_LABELS[id]}</span>
                 </button>
               ))}
@@ -206,11 +268,12 @@ export function SetupRoleTour(props: {
 
         {step === 2 && (
           <>
+            <SetupTourStepLabel stepNumber={3} title="Runtime setup" />
             <h2 className="modal-title">Runtime environments</h2>
             <p className="modal-text welcome-modal-lead">
               This app talks to a local model through <span className="setup-tour-em">Ollama</span> (easiest) or a{' '}
               <span className="setup-tour-em">llama-server</span> binary. Install what you need now, or continue and open Run
-              from the sidebar when you are ready.
+              from the sidebar when you are ready. This is step 1 of the presentation flow.
             </p>
             <div className="setup-tour-runtime-scroll">
               <div className="runtime-ollama-probe" role="status">
@@ -296,7 +359,7 @@ export function SetupRoleTour(props: {
               <details className="setup-tour-runtime-advanced">
                 <summary>Advanced: llama.cpp (llama-server)</summary>
                 <p className="muted setup-tour-runtime-llama-lead">
-                  Download a release build, add <code className="inline-code">llama-server</code> to your PATH, or set the full path under Run → Binary (or Settings → AI engine).
+                  Download a release build, add <code className="inline-code">llama-server</code> to your PATH, or set the full path under Run -&gt; Binary (or Settings -&gt; AI engine).
                 </p>
                 <div className="runtime-llama-setup-actions">
                   <button type="button" className="btn-primary" onClick={() => void window.api.openExternalUrl(LLAMA_CPP_RELEASES_URL)}>
@@ -309,7 +372,7 @@ export function SetupRoleTour(props: {
               </details>
 
               {rt.ollamaReachable ? (
-                <p className="muted setup-tour-runtime-foot">Ollama is responding. You can pull models from Run or the Models drawer after you finish setup.</p>
+                <p className="muted setup-tour-runtime-foot">Ollama is responding. Next step: open Knowledge after setup to continue the presentation flow.</p>
               ) : null}
             </div>
             <div className="modal-actions welcome-modal-actions setup-tour-actions-split">
@@ -325,6 +388,7 @@ export function SetupRoleTour(props: {
 
         {step === 3 && (
           <>
+            <SetupTourStepLabel stepNumber={4} title="Role quick tip" />
             <h2 className="modal-title">Quick tip</h2>
             <p className="modal-text welcome-modal-lead">
               <span className="setup-tour-em">{UI_ROLE_LABELS[draftRole]} workspace:</span> {layout.tourTip}
@@ -367,31 +431,58 @@ export function SetupRoleTour(props: {
 
         {step === 4 && (
           <>
-            <h2 className="modal-title">Start your model</h2>
+            <SetupTourStepLabel stepNumber={5} title="First-run checklist" />
+            <h2 className="modal-title">{layout.tourChecklist.title}</h2>
             <ol className="welcome-modal-steps">
               <li>
-                <span className="setup-tour-em">Open Run</span> in the sidebar if you need Ollama or llama.cpp paths.
+                <span className="setup-tour-em">{layout.tourChecklist.steps[0]}</span>
               </li>
               <li>
-                <span className="setup-tour-em">Pick a model</span> in the top bar, press <span className="setup-tour-em">play</span>, and wait for the green dot.
+                <span className="setup-tour-em">{layout.tourChecklist.steps[1]}</span>
               </li>
               <li>
-                <span className="setup-tour-em">New chat</span>, type a message, and send.
+                <span className="setup-tour-em">{layout.tourChecklist.steps[2]}</span>
               </li>
             </ol>
             <p className="welcome-modal-foot muted">
-              Reopen tips from Settings → General. Change role or theme there anytime.
+              {layout.tourChecklist.footnote}
             </p>
+            <label className="setup-tour-startup-toggle">
+              <input
+                type="checkbox"
+                checked={draftShowOnStartup}
+                onChange={(e) => setDraftShowOnStartup(e.target.checked)}
+              />
+              <span>Show setup tour on startup when onboarding updates are available</span>
+            </label>
             <div className="modal-actions welcome-modal-actions setup-tour-actions-split">
               <button type="button" className="btn-secondary" onClick={goBack}>
                 Back
               </button>
               <div className="setup-tour-actions-cluster">
-                <button type="button" className="btn-primary" onClick={() => void finish({ openDrawer: 'runtime' })}>
-                  Open Run &amp; finish
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() =>
+                    void finish({
+                      openDrawer: layout.tourChecklist.primaryAction.openDrawer,
+                      mainView: layout.tourChecklist.primaryAction.mainView
+                    })
+                  }
+                >
+                  {layout.tourChecklist.primaryAction.label}
                 </button>
-                <button type="button" className="btn-secondary" onClick={() => void finish({ openDrawer: null })}>
-                  I&apos;m ready
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() =>
+                    void finish({
+                      openDrawer: layout.tourChecklist.secondaryAction.openDrawer,
+                      mainView: layout.tourChecklist.secondaryAction.mainView
+                    })
+                  }
+                >
+                  {layout.tourChecklist.secondaryAction.label}
                 </button>
               </div>
             </div>

@@ -8,6 +8,8 @@ const WAKE_OUTRO_MS = 520
 const WAKE_OUTRO_REDUCED_MS = 280
 const PARTICLE_COUNT = 56
 const SPARK_COUNT = 28
+/** Dots on a medium-radius ring, orbiting the core. */
+const ORBITAL_PARTICLE_COUNT = 56
 const STARFIELD_COUNT = 140
 const SETUP_LINE_INTERVAL_MS = 3400
 const SETUP_DETAIL_MAX_CHARS = 96
@@ -122,6 +124,32 @@ function buildSparks(seed: number, count: number): WakeParticleSpec[] {
   }))
 }
 
+type WakeOrbitalSpec = {
+  id: number
+  startAngleDeg: number
+  radiusVmin: number
+  durationMs: number
+  delayMs: number
+  sizePx: number
+  hueNudge: number
+  clockwise: boolean
+}
+
+function buildOrbitalParticles(seed: number, count: number): WakeOrbitalSpec[] {
+  const rnd = mulberry32(seed ^ 0x4f1bbcd1)
+  const step = 360 / count
+  return Array.from({ length: count }, (_, i) => ({
+    id: i + 8192,
+    startAngleDeg: i * step + rnd() * step * 0.38,
+    radiusVmin: 23.5 + rnd() * 8.8,
+    durationMs: 15000 + Math.floor(rnd() * 15000),
+    delayMs: Math.floor(rnd() * 4200),
+    sizePx: 1.05 + rnd() * 2.35,
+    hueNudge: rnd() * 24 - 12,
+    clockwise: rnd() > 0.44
+  }))
+}
+
 function buildStarfield(seed: number, count: number): WakeStarSpec[] {
   const rnd = mulberry32(seed ^ 0x27d4eb2d)
   return Array.from({ length: count }, (_, i) => ({
@@ -175,6 +203,10 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
     []
   )
   const sparkSpecs = useMemo(() => buildSparks(particleSeedRef.current, SPARK_COUNT), [])
+  const orbitalSpecs = useMemo(
+    () => buildOrbitalParticles(particleSeedRef.current, ORBITAL_PARTICLE_COUNT),
+    []
+  )
   const starSpecs = useMemo(() => buildStarfield(particleSeedRef.current, STARFIELD_COUNT), [])
 
   const [reducedMotion, setReducedMotion] = useState(() => {
@@ -408,6 +440,16 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
       '--st-dur': `${s.durationMs}ms`
     }) as CSSProperties
 
+  const orbitalStyle = (o: WakeOrbitalSpec): CSSProperties =>
+    ({
+      '--o-start': `${o.startAngleDeg.toFixed(2)}deg`,
+      '--o-r': `${o.radiusVmin.toFixed(2)}vmin`,
+      '--o-dur': `${o.durationMs}ms`,
+      '--o-delay': `${o.delayMs}ms`,
+      '--o-size': `${o.sizePx.toFixed(2)}px`,
+      '--o-hue-nudge': `${o.hueNudge.toFixed(1)}`
+    }) as CSSProperties
+
   const setupLine = setupLines[Math.min(setupLineIndex, setupLines.length - 1)] ?? 'Starting…'
 
   return (
@@ -425,8 +467,6 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
       </h1>
       <div className="presence-wake-visual" aria-hidden="true">
         <div className="presence-wake-frost" />
-        <div className="presence-wake-nebula presence-wake-nebula--a" />
-        <div className="presence-wake-nebula presence-wake-nebula--b" />
         <div className="presence-wake-aurora" />
         <div className="presence-wake-starfield">
           {starSpecs.map((s) => (
@@ -444,6 +484,15 @@ export function PresenceWakeOverlay(props: PresenceWakeOverlayProps): ReactEleme
                 key={p.id}
                 className={`presence-wake-particle${p.trail ? ' presence-wake-particle--dust' : ''}`}
                 style={particleStyle(p)}
+              />
+            ))}
+          </div>
+          <div className="presence-wake-orbitals">
+            {orbitalSpecs.map((o) => (
+              <span
+                key={o.id}
+                className={`presence-wake-orbital${o.clockwise ? '' : ' presence-wake-orbital--ccw'}`}
+                style={orbitalStyle(o)}
               />
             ))}
           </div>

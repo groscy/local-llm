@@ -26,6 +26,12 @@ export type ModelPresenceBackdropProps = {
   personality?: ModelPersonalityVibe | null
   /** 0–1: brief startup “wake” pulse while the presence overlay is visible (idle runtime only). */
   wakeIntensity?: number
+  /** 0..100 blended local machine load (CPU + memory pressure). */
+  resourceLoadPercent?: number
+  /** Live-status mirror: whether bridge status is currently positive. */
+  bridgeStatusPositive?: boolean
+  /** Live-status mirror: whether runtime status is currently positive. */
+  runtimeStatusPositive?: boolean
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -66,6 +72,11 @@ type Phys = {
   pulsePos: number
   pulseVel: number
   activity: number
+  resourceLoad: number
+  satellitePhaseA: number
+  satellitePhaseB: number
+  bridgeVisiblePrev: boolean
+  runtimeVisiblePrev: boolean
   init: boolean
 }
 
@@ -83,6 +94,11 @@ function createPhys(): Phys {
     pulsePos: (Math.random() - 0.5) * 0.15,
     pulseVel: 0,
     activity: 0.1,
+    resourceLoad: 0,
+    satellitePhaseA: Math.random() * Math.PI * 2,
+    satellitePhaseB: Math.random() * Math.PI * 2,
+    bridgeVisiblePrev: false,
+    runtimeVisiblePrev: false,
     init: false
   }
 }
@@ -243,6 +259,16 @@ export function ModelPresenceBackdrop(props: ModelPresenceBackdropProps): ReactE
       }
 
       const pulse = clamp(0.52 + s.pulsePos * 0.72, 0.14, 0.96)
+      const targetResourceLoad = clamp((p.resourceLoadPercent ?? 0) / 100, 0, 1)
+      const resourceBlend = 1 - Math.exp(-2.2 * dt)
+      s.resourceLoad += (targetResourceLoad - s.resourceLoad) * resourceBlend
+      const resourceLoad = clamp(s.resourceLoad, 0, 1)
+      const bridgeVisible = p.bridgeStatusPositive === true
+      const runtimeVisible = p.runtimeStatusPositive === true
+      if (bridgeVisible && !s.bridgeVisiblePrev) s.satellitePhaseA = Math.random() * Math.PI * 2
+      if (runtimeVisible && !s.runtimeVisiblePrev) s.satellitePhaseB = Math.random() * Math.PI * 2
+      s.bridgeVisiblePrev = bridgeVisible
+      s.runtimeVisiblePrev = runtimeVisible
 
       const baseHue = p.chatBusy ? 300 : p.starting ? 205 : 252
       let hue =
@@ -250,22 +276,56 @@ export function ModelPresenceBackdrop(props: ModelPresenceBackdropProps): ReactE
         modelTint +
         activity * 30 +
         s.pulsePos * 18 * pulseDriveMult +
+        (0.5 - resourceLoad) * 42 +
         pers.hueShift * 44 +
         (warm - 0.5) * 22
       let sat =
         48 +
         activity * 36 * (0.85 + expr * 0.28) +
+        resourceLoad * 10 +
         (p.chatBusy ? 12 : 0) +
         (warm - 0.5) * 26
-      let light = 52 + activity * 14 + (warm - 0.5) * 10 - (calm - 0.5) * 6
+      let light = 52 + activity * 14 + (warm - 0.5) * 10 - (calm - 0.5) * 6 - resourceLoad * 8
       let orbScale =
         0.78 +
         activity * 0.62 * (0.82 + expr * 0.35) +
         (p.starting && p.loadPercent != null ? p.loadPercent / 220 : 0)
       let outerBlur = 72 + activity * 64 * (0.78 + expr * 0.42)
-      let opacity = 0.26 + activity * 0.5 * (0.9 + expr * 0.3)
+      let opacity = 0.26 + activity * 0.5 * (0.9 + expr * 0.3) + resourceLoad * 0.08
       let orbitX = 0
       let orbitY = 0
+      const satelliteOrbitSpeedA = 0.2 + activity * 0.16 + resourceLoad * 0.08
+      const satelliteOrbitSpeedB = 0.13 + activity * 0.1 + resourceLoad * 0.06
+      s.satellitePhaseA += satelliteOrbitSpeedA * dt
+      s.satellitePhaseB += satelliteOrbitSpeedB * dt
+      if (s.satellitePhaseA > Math.PI * 2) s.satellitePhaseA -= Math.PI * 2
+      if (s.satellitePhaseB > Math.PI * 2) s.satellitePhaseB -= Math.PI * 2
+      const satellitePhaseA = s.satellitePhaseA
+      const satellitePhaseB = s.satellitePhaseB + Math.PI * 0.92
+      const satelliteARadius = 58 + activity * 22 + resourceLoad * 8
+      const satelliteBRadius = 46 + activity * 18 + resourceLoad * 10
+      const orbitATiltAspect = 0.6
+      const orbitBTiltAspect = 0.66
+      const orbitARotateDeg = 17
+      const orbitBRotateDeg = -29
+      const orbitARotate = (orbitARotateDeg * Math.PI) / 180
+      const orbitBRotate = (orbitBRotateDeg * Math.PI) / 180
+      const orbitACos = Math.cos(orbitARotate)
+      const orbitASin = Math.sin(orbitARotate)
+      const orbitBCos = Math.cos(orbitBRotate)
+      const orbitBSin = Math.sin(orbitBRotate)
+      // Orbit A: X-axis tilt feel (vertical compression).
+      const satABaseX = Math.cos(satellitePhaseA) * satelliteARadius
+      const satABaseY = Math.sin(satellitePhaseA) * satelliteARadius * orbitATiltAspect
+      const satelliteAX = satABaseX * orbitACos - satABaseY * orbitASin
+      const satelliteAY = satABaseX * orbitASin + satABaseY * orbitACos
+      // Orbit B: Y-axis tilt feel (horizontal compression).
+      const satBBaseX = Math.cos(satellitePhaseB) * satelliteBRadius * orbitBTiltAspect
+      const satBBaseY = Math.sin(satellitePhaseB) * satelliteBRadius
+      const satelliteBX = satBBaseX * orbitBCos - satBBaseY * orbitBSin
+      const satelliteBY = satBBaseX * orbitBSin + satBBaseY * orbitBCos
+      const satelliteAPulse = clamp(0.62 + pulse * 0.48 + resourceLoad * 0.2, 0.42, 1.35)
+      const satelliteBPulse = clamp(0.58 + (1 - pulse) * 0.34 + resourceLoad * 0.2, 0.4, 1.28)
 
       hue = ((hue % 360) + 360) % 360
       sat = clamp(sat, 28, 92)
@@ -295,6 +355,18 @@ export function ModelPresenceBackdrop(props: ModelPresenceBackdropProps): ReactE
       el.style.setProperty('--mp-activity', activity.toFixed(4))
       el.style.setProperty('--mp-orbit-x', `${orbitX.toFixed(2)}px`)
       el.style.setProperty('--mp-orbit-y', `${orbitY.toFixed(2)}px`)
+      el.style.setProperty('--mp-sat-a-x', `${satelliteAX.toFixed(2)}px`)
+      el.style.setProperty('--mp-sat-a-y', `${satelliteAY.toFixed(2)}px`)
+      el.style.setProperty('--mp-sat-b-x', `${satelliteBX.toFixed(2)}px`)
+      el.style.setProperty('--mp-sat-b-y', `${satelliteBY.toFixed(2)}px`)
+      el.style.setProperty('--mp-sat-a-pulse', satelliteAPulse.toFixed(4))
+      el.style.setProperty('--mp-sat-b-pulse', satelliteBPulse.toFixed(4))
+      el.style.setProperty('--mp-sat-a-width', `${(satelliteARadius * 2).toFixed(2)}px`)
+      el.style.setProperty('--mp-sat-a-height', `${(satelliteARadius * 2 * orbitATiltAspect).toFixed(2)}px`)
+      el.style.setProperty('--mp-sat-b-width', `${(satelliteBRadius * 2 * orbitBTiltAspect).toFixed(2)}px`)
+      el.style.setProperty('--mp-sat-b-height', `${(satelliteBRadius * 2).toFixed(2)}px`)
+      el.style.setProperty('--mp-sat-a-rotate-deg', `${orbitARotateDeg.toFixed(2)}deg`)
+      el.style.setProperty('--mp-sat-b-rotate-deg', `${orbitBRotateDeg.toFixed(2)}deg`)
 
       raf = requestAnimationFrame(tick)
     }
@@ -314,7 +386,20 @@ export function ModelPresenceBackdrop(props: ModelPresenceBackdropProps): ReactE
         <div className="model-presence-orb model-presence-orb--halo" />
         <div className="model-presence-orb model-presence-orb--body" />
         <div className="model-presence-orb model-presence-orb--core" />
+        <div className="model-presence-orb model-presence-orb--mini" />
         <div className="model-presence-orb model-presence-orb--spark" />
+        {props.bridgeStatusPositive ? (
+          <>
+            <div className="model-presence-orbit-line model-presence-orbit-line--bridge" aria-hidden />
+            <div className="model-presence-satellite model-presence-satellite--bridge" aria-hidden />
+          </>
+        ) : null}
+        {props.runtimeStatusPositive ? (
+          <>
+            <div className="model-presence-orbit-line model-presence-orbit-line--runtime" aria-hidden />
+            <div className="model-presence-satellite model-presence-satellite--runtime" aria-hidden />
+          </>
+        ) : null}
       </div>
     </div>
   )
