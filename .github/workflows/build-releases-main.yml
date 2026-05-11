@@ -83,6 +83,14 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npx electron-builder --publish never --linux deb AppImage zip pacman
 
+      - name: Build Linux unpacked app for smoke test
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never --linux dir
+
+      - name: Smoke test Linux packaged app
+        run: node scripts/release-smoke-check.mjs --platform linux --releaseDir release
+
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -173,6 +181,14 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npx electron-builder --publish never --win nsis zip
 
+      - name: Build Windows unpacked app for smoke test
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never --win dir
+
+      - name: Smoke test Windows packaged app
+        run: node scripts/release-smoke-check.mjs --platform windows --releaseDir release
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -229,6 +245,14 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npx electron-builder --publish never --mac dmg zip
+
+      - name: Build macOS unpacked app for smoke test
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never --mac dir
+
+      - name: Smoke test macOS packaged app
+        run: node scripts/release-smoke-check.mjs --platform macos --releaseDir release
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
