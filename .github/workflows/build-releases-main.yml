@@ -6,14 +6,41 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-releases-main-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  MAIN_RELEASE_TAG: main-latest
+
 jobs:
+  prepare_release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure rolling main release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "${MAIN_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${MAIN_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Main branch rolling build" \
+              --notes "Latest artifacts from merges to main." \
+              --prerelease
+          else
+            gh release create "${MAIN_RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "Main branch rolling build" \
+              --notes "Latest artifacts from merges to main." \
+              --prerelease
+          fi
+
   linux:
+    needs: prepare_release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -87,7 +114,28 @@ jobs:
           path: integrations/intellij-plugin/build/distributions/local-llm-intellij-*.zip
           if-no-files-found: error
 
+      - name: Publish Linux artifacts to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(
+            release/*.deb
+            release/*.AppImage
+            release/*.zip
+            release/*.pkg.tar.*
+            release/*.yml
+            integrations/intellij-plugin/build/distributions/local-llm-intellij-*.zip
+          )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No Linux/plugin files to upload"
+            exit 1
+          fi
+          gh release upload "${MAIN_RELEASE_TAG}" "${files[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+
   windows:
+    needs: prepare_release
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -131,7 +179,20 @@ jobs:
             release/*.zip
           if-no-files-found: error
 
+      - name: Publish Windows artifacts to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path release -File -Include *.exe,*.zip,*.yml
+          if (-not $files -or $files.Count -eq 0) {
+            throw "No Windows files to upload"
+          }
+          $paths = $files | ForEach-Object { $_.FullName }
+          gh release upload $env:MAIN_RELEASE_TAG @paths --clobber --repo $env:GITHUB_REPOSITORY
+
   macos:
+    needs: prepare_release
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -174,3 +235,20 @@ jobs:
             release/*.dmg
             release/*.zip
           if-no-files-found: error
+
+      - name: Publish macOS artifacts to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(
+            release/*.dmg
+            release/*.zip
+            release/*.yml
+          )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No macOS files to upload"
+            exit 1
+          fi
+          gh release upload "${MAIN_RELEASE_TAG}" "${files[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
