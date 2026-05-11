@@ -1,41 +1,44 @@
-name: Build releases on main
+name: Build releases on master
 
 on:
   push:
     branches:
-      - main
+      - master
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-releases-main-${{ github.ref }}
+  group: build-releases-master-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  MAIN_RELEASE_TAG: main-latest
 
 jobs:
   prepare_release:
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release_meta.outputs.release_tag }}
+      release_title: ${{ steps.release_meta.outputs.release_title }}
     steps:
-      - name: Ensure rolling main release exists
+      - name: Compute release metadata
+        id: release_meta
+        run: |
+          short_sha="${GITHUB_SHA::12}"
+          echo "release_tag=master-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "release_title=Master build ${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Create per-merge master release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if gh release view "${MAIN_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release edit "${MAIN_RELEASE_TAG}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "Main branch rolling build" \
-              --notes "Latest artifacts from merges to main." \
-              --prerelease
+          if gh release view "${{ steps.release_meta.outputs.release_tag }}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release already exists for ${GITHUB_SHA}; continuing."
           else
-            gh release create "${MAIN_RELEASE_TAG}" \
+            gh release create "${{ steps.release_meta.outputs.release_tag }}" \
               --repo "${GITHUB_REPOSITORY}" \
               --target "${GITHUB_SHA}" \
-              --title "Main branch rolling build" \
-              --notes "Latest artifacts from merges to main." \
+              --title "${{ steps.release_meta.outputs.release_title }}" \
+              --notes "Automated release artifacts for merge commit ${GITHUB_SHA} on master." \
               --prerelease
           fi
 
@@ -132,7 +135,7 @@ jobs:
             echo "No Linux/plugin files to upload"
             exit 1
           fi
-          gh release upload "${MAIN_RELEASE_TAG}" "${files[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+          gh release upload "${{ needs.prepare_release.outputs.release_tag }}" "${files[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
 
   windows:
     needs: prepare_release
@@ -184,12 +187,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $files = Get-ChildItem -Path release -File -Include *.exe,*.zip,*.yml
+          $files = Get-ChildItem -Path release -File | Where-Object { $_.Extension -in @('.exe', '.zip', '.yml') }
           if (-not $files -or $files.Count -eq 0) {
             throw "No Windows files to upload"
           }
           $paths = $files | ForEach-Object { $_.FullName }
-          gh release upload $env:MAIN_RELEASE_TAG @paths --clobber --repo $env:GITHUB_REPOSITORY
+          gh release upload "${{ needs.prepare_release.outputs.release_tag }}" @paths --clobber --repo $env:GITHUB_REPOSITORY
 
   macos:
     needs: prepare_release
@@ -251,4 +254,57 @@ jobs:
             echo "No macOS files to upload"
             exit 1
           fi
-          gh release upload "${MAIN_RELEASE_TAG}" "${files[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+          gh release upload "${{ needs.prepare_release.outputs.release_tag }}" "${files[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+
+  verify_release_assets:
+    needs:
+      - prepare_release
+      - linux
+      - windows
+      - macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate all platform assets exist on GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare_release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t assets < <(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')
+
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "Release ${RELEASE_TAG} has no assets."
+            exit 1
+          fi
+
+          has_linux=0
+          has_windows=0
+          has_macos=0
+
+          for a in "${assets[@]}"; do
+            case "$a" in
+              *.AppImage|*.deb|*.pkg.tar.*) has_linux=1 ;;
+            esac
+            case "$a" in
+              *.exe) has_windows=1 ;;
+            esac
+            case "$a" in
+              *.dmg) has_macos=1 ;;
+            esac
+          done
+
+          if [ "$has_linux" -ne 1 ]; then
+            echo "Missing Linux release assets on ${RELEASE_TAG}."
+            exit 1
+          fi
+          if [ "$has_windows" -ne 1 ]; then
+            echo "Missing Windows release assets on ${RELEASE_TAG}."
+            exit 1
+          fi
+          if [ "$has_macos" -ne 1 ]; then
+            echo "Missing macOS release assets on ${RELEASE_TAG}."
+            exit 1
+          fi
+
+          echo "Release ${RELEASE_TAG} contains Linux, Windows, and macOS assets."
