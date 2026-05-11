@@ -10,7 +10,7 @@ import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 
 /**
- * Shared apply path for chat and agent: structured + implicit attachment edits, transcript + notifications.
+ * Shared apply path for chat and agent: structured + implicit attachment edits, inline output + notifications.
  */
 object LocalLlmApplyCoordinator {
 
@@ -35,6 +35,7 @@ object LocalLlmApplyCoordinator {
     fun applyEditsIfAny(
         project: Project,
         applyEnabled: Boolean,
+        previewBeforeApply: Boolean = true,
         modelReply: String,
         referencedFiles: List<VirtualFile>,
         appendTranscript: (String) -> Unit,
@@ -56,27 +57,28 @@ object LocalLlmApplyCoordinator {
                 onComplete()
                 return@invokeLater
             }
-            if (LocalLlmIntegrationProperties.confirmBeforeFileApply()) {
-                val summary = edits.joinToString("\n") { e ->
-                    when (e) {
-                        is StructuredApplyParser.StructuredEdit.Patch ->
-                            "PATCH ${e.path} (${e.hunks.size} hunk(s))"
-                        is StructuredApplyParser.StructuredEdit.FullFile ->
-                            "FILE ${e.path}"
-                    }
-                }
-                val ok = Messages.showYesNoDialog(
+            if (previewBeforeApply) {
+                val previewPaths = edits.take(8).joinToString("\n") { "• ${it.path}" }
+                val more = if (edits.size > 8) "\n… and ${edits.size - 8} more" else ""
+                val decision = Messages.showYesNoDialog(
                     project,
-                    "Apply the following to the project?\n\n$summary",
-                    "Local LLM — confirm apply",
-                    Messages.getQuestionIcon()
+                    "Apply ${edits.size} proposed file edit(s)?\n\n$previewPaths$more",
+                    "Local LLM — apply preview",
+                    "Apply edits",
+                    "Skip",
+                    null
                 )
-                if (ok != Messages.YES) {
-                    appendTranscript("(Apply cancelled — confirmation declined.)\n\n")
+                if (decision != Messages.YES) {
                     notifyDesktop(
                         PluginReportKind.APPLY_CANCELLED,
-                        "User declined confirm dialog",
-                        mapOf("project" to project.name, "edits" to edits.size)
+                        "User skipped previewed edits",
+                        mapOf("project" to project.name, "filesTotal" to edits.size)
+                    )
+                    LocalLlmNotifications.notify(
+                        project,
+                        "Local LLM — apply",
+                        "Skipped model file edits.",
+                        NotificationType.INFORMATION
                     )
                     onComplete()
                     return@invokeLater
@@ -106,20 +108,14 @@ object LocalLlmApplyCoordinator {
                 LocalLlmNotifications.notify(
                     project,
                     "Local LLM — apply",
-                    "$okN file(s) updated, $failN failed. See transcript for details.",
+                    "$okN file(s) updated, $failN failed.",
                     type
                 )
-                if (results.any { !it.ok }) {
-                    Messages.showWarningDialog(
-                        project,
-                        "Some edits could not be applied. See the conversation log for details.",
-                        "Local LLM"
-                    )
-                }
                 val base = project.basePath
                 if (base != null) {
                     results.filter { it.ok }.forEachIndexed { idx, r ->
                         val target = ProjectFileApplyService.resolveUnderProject(base, r.path) ?: return@forEachIndexed
+                        if (!target.toFile().exists()) return@forEachIndexed
                         val vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(target.toFile()) ?: return@forEachIndexed
                         FileEditorManager.getInstance(project).openFile(vf, idx == 0)
                     }
@@ -127,7 +123,6 @@ object LocalLlmApplyCoordinator {
             } catch (e: Exception) {
                 notifyDesktop(PluginReportKind.APPLY_FAILED, e.message?.take(200), mapOf("project" to project.name))
                 appendTranscript("Apply error: ${e.message ?: e}\n\n")
-                Messages.showErrorDialog(project, e.message ?: e.toString(), "Local LLM")
             }
             onComplete()
         }

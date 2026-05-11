@@ -6,14 +6,11 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.project.Project
 import com.intellij.ui.JBColor
-import com.intellij.ui.scale.JBUIScale
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 import java.awt.Color
-import java.awt.FlowLayout
 import java.awt.Font
-import javax.swing.JButton
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.Timer
@@ -22,13 +19,9 @@ import javax.swing.Timer
 class ConnectionStatusPanel(private val project: Project) : JPanel(BorderLayout()), Disposable {
 
     private val summaryLabel = JLabel().apply {
-        font = JBFont.label().deriveFont(Font.BOLD)
-        iconTextGap = 8
-    }
-
-    val refreshButton = JButton("Refresh").apply {
-        font = JBFont.label()
-        toolTipText = "Ping the Local LLM Desktop bridge (GET /health)"
+        font = JBFont.label().deriveFont(Font.PLAIN)
+        iconTextGap = 6
+        border = JBUI.Borders.empty(4, 8)
     }
 
     @Volatile
@@ -38,23 +31,8 @@ class ConnectionStatusPanel(private val project: Project) : JPanel(BorderLayout(
 
     init {
         isOpaque = false
-
-        val west = JPanel(FlowLayout(FlowLayout.LEFT, JBUIScale.scale(8), 0)).apply {
-            isOpaque = false
-            border = JBUI.Borders.empty(8, 10, 8, 4)
-            add(summaryLabel)
-        }
-
-        val east = JPanel(FlowLayout(FlowLayout.RIGHT, JBUIScale.scale(6), 0)).apply {
-            isOpaque = false
-            border = JBUI.Borders.empty(8, 4, 8, 10)
-            add(refreshButton)
-        }
-
-        add(west, BorderLayout.WEST)
-        add(east, BorderLayout.EAST)
-
-        refreshButton.addActionListener { refreshNow() }
+        border = JBUI.Borders.empty()
+        add(summaryLabel, BorderLayout.CENTER)
         timer.isRepeats = true
         timer.start()
         ApplicationManager.getApplication().invokeLater { refreshNow() }
@@ -62,19 +40,38 @@ class ConnectionStatusPanel(private val project: Project) : JPanel(BorderLayout(
 
     private fun setCheckingUi() {
         summaryLabel.icon = AllIcons.Process.Step_1
-        summaryLabel.text = "Checking…"
+        summaryLabel.text = "Bridge: checking"
         summaryLabel.foreground = JBColor(Color(0x303030), Color(0xBBBBBB))
     }
 
-    private fun applyHealth(health: LocalLlmHttpClient.BridgeHealth) {
+    private fun applyHealth(health: LocalLlmHttpClient.BridgeHealth, runtime: LocalLlmHttpClient.RuntimeStatus?) {
         val bridgeOk = health.reachable && health.httpStatus == 200
         if (bridgeOk) {
             summaryLabel.icon = AllIcons.General.GreenCheckmark
-            summaryLabel.text = "Connected"
+            val model = runtime
+                ?.takeIf { it.httpStatus == 200 && it.running == true }
+                ?.let { status ->
+                    status.modelPath
+                        ?.substringAfterLast('/')
+                        ?.substringAfterLast('\\')
+                        ?.ifBlank { null }
+                        ?: status.endpoint
+                        ?: status.kind
+                }
+            summaryLabel.text = if (model.isNullOrBlank()) {
+                "Bridge: connected"
+            } else {
+                "Bridge: connected · model: $model"
+            }
             summaryLabel.foreground = JBColor(Color(0x1B5E20), Color(0xC8E6C9))
         } else {
             summaryLabel.icon = AllIcons.General.Error
-            summaryLabel.text = "Not connected"
+            val detail = health.errorHint
+                ?.replace('\n', ' ')
+                ?.replace(Regex("\\s+"), " ")
+                ?.trim()
+                ?.take(140)
+            summaryLabel.text = if (detail.isNullOrBlank()) "Bridge: connection failed" else "Bridge: $detail"
             summaryLabel.foreground = JBColor(Color(0xB71C1C), Color(0xFF8A80))
         }
         timer.delay = if (bridgeOk) 12_000 else 30_000
@@ -83,13 +80,19 @@ class ConnectionStatusPanel(private val project: Project) : JPanel(BorderLayout(
     fun refreshNow() {
         if (disposed || project.isDisposed) return
         val port = LocalLlmIntegrationProperties.integrationPort()
+        val token = LocalLlmIntegrationProperties.integrationToken()
         setCheckingUi()
         ApplicationManager.getApplication().executeOnPooledThread {
             val health = LocalLlmHttpClient.fetchHealth(port)
+            val runtime = if (health.reachable && health.httpStatus == 200) {
+                LocalLlmHttpClient.fetchRuntimeStatus(port, token)
+            } else {
+                null
+            }
             ApplicationManager.getApplication().invokeLater(
                 {
                     if (disposed || project.isDisposed) return@invokeLater
-                    applyHealth(health)
+                    applyHealth(health, runtime)
                 },
                 ModalityState.any()
             )

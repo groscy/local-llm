@@ -20,7 +20,7 @@ object LocalLlmAgentSystemPrompts {
         appendLine()
         appendLine("### done")
         appendLine(
-            """{"schemaVersion":1,"kind":"done","summary":"one-line what you did","finalReply":"optional full final message including LOCAL_LLM_* / code if the user should see it or the IDE should apply file edits"}"""
+            """{"schemaVersion":1,"kind":"done","summary":"one-line what you did","finalReply":"optional full final message including LOCAL_LLM_PATCH / LOCAL_LLM_FILE / LOCAL_LLM_DELETE blocks or code if the user should see it or the IDE should apply file edits"}"""
         )
         appendLine("When you are finished investigating and any edits are described in finalReply, set kind to done.")
         appendLine("If there is nothing to apply, finalReply may be empty or a short plain summary.")
@@ -29,6 +29,8 @@ object LocalLlmAgentSystemPrompts {
         appendLine("- Prefer small tool batches (1–3 calls) per step.")
         appendLine("- After tool results arrive, decide whether to call more tools or emit done.")
         appendLine("- Never invent tool names or paths outside the project.")
+        appendLine("- If the best outcome requires project file changes, put LOCAL_LLM_PATCH / LOCAL_LLM_FILE / LOCAL_LLM_DELETE")
+        appendLine("  blocks in finalReply so the IntelliJ plugin can apply them automatically.")
         appendLine()
     }
 }

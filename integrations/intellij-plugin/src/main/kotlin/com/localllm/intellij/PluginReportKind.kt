@@ -5,6 +5,7 @@ package com.localllm.intellij
  * Must match `pluginReportBodySchema` in the desktop `integrationServer.ts`.
  */
 object PluginReportKind {
+    const val CHAT_JOB_QUEUED = "chat_job_queued"
     const val CHAT_COMPLETED = "chat_completed"
     const val CHAT_FAILED = "chat_failed"
     const val APPLY_COMPLETED = "apply_completed"

@@ -7,11 +7,14 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.SeparatorFactory
 import com.intellij.ui.ToolbarDecorator
 import com.intellij.ui.components.JBCheckBox
+import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
@@ -44,7 +47,7 @@ class LocalLlmComposePanel(private val project: Project) : JPanel(BorderLayout()
         enterToSend = handler
     }
 
-    val fileModel = DefaultListModel<com.intellij.openapi.vfs.VirtualFile>()
+    val fileModel = DefaultListModel<VirtualFile>()
     private val fileList = JBList(fileModel).apply {
         layoutOrientation = JList.HORIZONTAL_WRAP
         visibleRowCount = 1
@@ -61,7 +64,7 @@ class LocalLlmComposePanel(private val project: Project) : JPanel(BorderLayout()
                 cellHasFocus: Boolean
             ): Component {
                 super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus)
-                if (value is com.intellij.openapi.vfs.VirtualFile) {
+                if (value is VirtualFile) {
                     text = value.presentableName
                     toolTipText = value.path
                     icon = value.fileType.icon
@@ -87,13 +90,21 @@ class LocalLlmComposePanel(private val project: Project) : JPanel(BorderLayout()
         })
     }
 
+    private val progressLabel = JBLabel("Idle").apply {
+        font = JBFont.label()
+        border = JBUI.Borders.empty(6, 8)
+        isOpaque = true
+        background = LocalLlmUiTheme.editorLikeSurface()
+        foreground = LocalLlmUiTheme.accentLabelForeground()
+    }
+
     val includeGraph = JBCheckBox("Include structural codebase graph (Java / Kotlin)", true).apply {
         border = JBUI.Borders.empty(0, 0, 0, JBUIScale.scale(4))
     }
 
     val applyStructuredEdits = JBCheckBox(
-        "Write model file changes to the project (patches, LOCAL_LLM blocks, // File: code fences)",
-        true
+        "Allow model file changes (preview shown before apply)",
+        false
     ).apply {
         border = JBUI.Borders.empty(JBUIScale.scale(4), 0, 0, JBUIScale.scale(4))
     }
@@ -121,13 +132,13 @@ class LocalLlmComposePanel(private val project: Project) : JPanel(BorderLayout()
     init {
         isOpaque = false
         border = JBUI.Borders.emptyBottom(JBUIScale.scale(8))
-        applyStructuredEdits.isSelected =
-            PropertiesComponent.getInstance().getBoolean("localLlm.applyStructuredEdits", true)
+        val props = PropertiesComponent.getInstance()
+        applyStructuredEdits.isSelected = props.getBoolean("localLlm.applyStructuredEdits", false)
         applyStructuredEdits.addActionListener {
             PropertiesComponent.getInstance().setValue(
                 "localLlm.applyStructuredEdits",
                 applyStructuredEdits.isSelected,
-                true
+                false
             )
         }
 
@@ -195,7 +206,22 @@ class LocalLlmComposePanel(private val project: Project) : JPanel(BorderLayout()
             )
         }
 
-        advancedPanel.isVisible = advancedToggle.isSelected
+        val progressBox = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            border = JBUI.Borders.empty(8, 0, 0, 0)
+            add(SeparatorFactory.createSeparator("Prompt progress", null), BorderLayout.NORTH)
+            add(
+                JPanel(BorderLayout()).apply {
+                    border = LocalLlmUiTheme.innerChromeBorder()
+                    isOpaque = true
+                    background = LocalLlmUiTheme.editorLikeSurface()
+                    add(progressLabel, BorderLayout.CENTER)
+                },
+                BorderLayout.CENTER
+            )
+        }
+
+        advancedPanel.isVisible = false
 
         val body = JPanel(GridBagLayout()).apply {
             isOpaque = false
@@ -213,28 +239,79 @@ class LocalLlmComposePanel(private val project: Project) : JPanel(BorderLayout()
             c.gridy = 1
             c.weighty = 0.0
             c.fill = GridBagConstraints.HORIZONTAL
-            c.insets = JBUI.insets(0, 0, 0, 0)
-            add(advancedToggle, c)
-            c.gridy = 2
-            add(advancedPanel, c)
+            c.insets = JBUI.insets(8, 0, 0, 0)
+            add(progressBox, c)
         }
 
         add(SeparatorFactory.createSeparator("Your message", null), BorderLayout.NORTH)
         add(body, BorderLayout.CENTER)
     }
 
-    fun addFileUnique(vf: com.intellij.openapi.vfs.VirtualFile) {
+    fun addFileUnique(vf: VirtualFile) {
         for (i in 0 until fileModel.size()) {
             if (fileModel.getElementAt(i).path == vf.path) return
         }
         fileModel.addElement(vf)
     }
 
-    fun snapshotFiles(): List<com.intellij.openapi.vfs.VirtualFile> {
-        val out = ArrayList<com.intellij.openapi.vfs.VirtualFile>(fileModel.size())
+    fun snapshotFiles(): List<VirtualFile> {
+        val out = ArrayList<VirtualFile>(fileModel.size())
         for (i in 0 until fileModel.size()) {
             out.add(fileModel.getElementAt(i))
         }
         return out
+    }
+
+    fun snapshotFilesForSend(): List<VirtualFile> {
+        val ordered = LinkedHashMap<String, VirtualFile>()
+        resolveActiveEditorFile()?.let { ordered[it.path] = it }
+        for (f in snapshotFiles()) {
+            ordered.putIfAbsent(f.path, f)
+        }
+        return ordered.values.toList()
+    }
+
+    fun appendOutput(text: String) {
+        val normalized = text.lineSequence().lastOrNull { it.isNotBlank() }?.trim().orEmpty()
+        if (normalized.isBlank()) return
+        setProgress(normalized)
+    }
+
+    fun appendOutputSection(title: String, body: String) {
+        val compact = if (title.equals("Apply results", ignoreCase = true)) {
+            val ok = Regex("""^\s*✓\s""", RegexOption.MULTILINE).findAll(body).count()
+            val fail = Regex("""^\s*✗\s""", RegexOption.MULTILINE).findAll(body).count()
+            "Apply finished: $ok ok, $fail failed"
+        } else {
+            title
+        }
+        setProgress(compact)
+    }
+
+    fun clearOutput() {
+        setProgress("Idle")
+    }
+
+    fun setProgress(status: String) {
+        val compact = status.replace('\n', ' ').replace(Regex("\\s+"), " ").trim().take(220)
+        if (compact.isBlank()) return
+        progressLabel.text = compact
+        progressLabel.foreground = LocalLlmUiTheme.accentLabelForeground()
+    }
+
+    fun setProgressError(status: String) {
+        val compact = status.replace('\n', ' ').replace(Regex("\\s+"), " ").trim().take(220)
+        if (compact.isBlank()) return
+        progressLabel.text = compact
+        progressLabel.foreground = com.intellij.ui.JBColor.RED
+    }
+
+    private fun resolveActiveEditorFile(): VirtualFile? {
+        val manager = FileEditorManager.getInstance(project)
+        val fromEditor = manager.selectedTextEditor?.let { editor ->
+            FileDocumentManager.getInstance().getFile(editor.document)
+        }
+        if (fromEditor != null && !fromEditor.isDirectory) return fromEditor
+        return manager.selectedFiles.firstOrNull { !it.isDirectory }
     }
 }
