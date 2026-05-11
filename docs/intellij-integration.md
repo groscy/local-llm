@@ -13,7 +13,7 @@ The runtime (Ollama or llama.cpp) must already be **started** from **Run** in th
 ## Security
 
 - The server binds to **127.0.0.1** only (not reachable from other machines).
-- If you set a token, unauthenticated requests to `/v1/chat`, `/v1/runtime/status`, and `/v1/plugin/report` receive `401`.
+- If you set a token, unauthenticated requests to `/v1/chat`, `/v1/runtime/status`, `/v1/jobs*`, and `/v1/plugin/report` receive `401`.
 - `GET /health` stays open for simple reachability checks.
 
 ## HTTP API
@@ -66,6 +66,80 @@ Uses the app’s **Max response tokens** setting. Errors return JSON `{ "error":
 
 Optional usage fields when the runtime reports them: `promptTokens`, `completionTokens` (integers).
 
+### `POST /v1/jobs`
+
+Asynchronous submission endpoint for IDE background processing.
+
+```json
+{
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "Refactor this file" }
+  ],
+  "maxTokens": 320,
+  "context": {
+    "source": "intellij-plugin",
+    "projectName": "MyProject",
+    "projectBasePath": "C:/work/MyProject"
+  }
+}
+```
+
+Response `202`:
+
+```json
+{
+  "jobId": "uuid",
+  "status": "queued",
+  "progress": "Queued",
+  "createdAt": 1710000000000,
+  "schemaVersion": 1
+}
+```
+
+### `GET /v1/jobs/:id`
+
+Returns status snapshot:
+
+```json
+{
+  "jobId": "uuid",
+  "status": "running",
+  "progress": "Preprocessing request",
+  "hasResult": false,
+  "schemaVersion": 1
+}
+```
+
+`status` is one of: `queued`, `running`, `completed`, `failed`, `cancelled`.
+
+### `GET /v1/jobs/:id/result`
+
+When status is `completed`, returns:
+
+```json
+{
+  "jobId": "uuid",
+  "status": "completed",
+  "result": {
+    "reply": "…assistant text…",
+    "model": "llama3.2",
+    "promptTokens": 1200,
+    "completionTokens": 400,
+    "editOperations": [
+      { "op": "update", "path": "src/App.kt" }
+    ]
+  },
+  "schemaVersion": 1
+}
+```
+
+If not complete yet, returns `409` with current status/progress.
+
+### `POST /v1/jobs/:id/cancel`
+
+Best-effort cancellation request. Returns `200` with `ok` + current status.
+
 ### `POST /v1/plugin/report`
 
 Same auth as `/v1/chat`. Lets an IDE plugin **push short activity events** to the desktop app (shown in the pinned **Activity** sidebar and kept in a small in-memory history).
@@ -87,7 +161,7 @@ Same auth as `/v1/chat`. Lets an IDE plugin **push short activity events** to th
 }
 ```
 
-`kind` must be one of: `chat_completed`, `chat_failed`, `apply_completed`, `apply_failed`, `apply_cancelled`, `send_cancelled`.
+`kind` must be one of: `chat_job_queued`, `chat_completed`, `chat_failed`, `apply_completed`, `apply_failed`, `apply_cancelled`, `send_cancelled`.
 
 `source` defaults to `intellij` when omitted. `message` and `meta` are optional. `meta` values must be strings, numbers, booleans, or `null`.
 
@@ -98,7 +172,7 @@ Response `200`: `{ "ok": true }`.
 See `integrations/intellij-plugin/` for an IntelliJ Platform plugin (Gradle) with:
 
 - **Settings → Tools → Local LLM Desktop** — port and token (must match the app).
-- **Local LLM** tool window — prompt the local model; optional **codebase knowledge graph** (Java via PSI, Kotlin via **text** so Kotlin **K2** mode is supported); `**[CLARIFY]`** follow-up dialogs when the model asks for clarification; optional **structured apply** — the model can emit `**LOCAL_LLM_PATCH`** blocks (search/replace hunks, preferred for edits to existing files) and/or `**LOCAL_LLM_FILE`** blocks (full file replace / new files). Attached files are labeled with **project-relative paths** and a path list footer so the model can target the right `path=` values. After you confirm, the plugin applies in order, reloads documents, and opens the first successfully touched file. **Vocabulary…** builds a **domain vocabulary** from scanned sources (grouped by coarse package domain and full package) plus attached file context. After chat / apply / cancel outcomes, the plugin **POSTs** summaries to `/v1/plugin/report` so the desktop app can surface them (pin **Activity** to see the **IDE plugin** feed).
+- **Local LLM** tool window — prompt the local model; optional **codebase knowledge graph** (Java via PSI, Kotlin via **text** so Kotlin **K2** mode is supported); `**[CLARIFY]`** follow-up dialogs when the model asks for clarification; optional **structured apply** — the model can emit `**LOCAL_LLM_PATCH`** blocks (search/replace hunks, preferred for edits to existing files), `**LOCAL_LLM_FILE`** blocks (full file replace / new files), and `**LOCAL_LLM_DELETE`** blocks (file removal). The plugin auto-attaches the active editor file on each send/run, keeps output inline in the composer view, applies edits immediately, reloads documents, and opens the first successfully touched file that still exists. **Vocabulary…** builds a **domain vocabulary** from scanned sources (grouped by coarse package domain and full package) plus attached file context. After chat / apply / cancel outcomes, the plugin **POSTs** summaries to `/v1/plugin/report` so the desktop app can surface them (pin **Activity** to see the **IDE plugin** feed).
 
 Patch shape (must match plugin parser / system prompt):
 
@@ -110,6 +184,13 @@ exact excerpt from file
 replacement
 >>>>
 <<<END_LOCAL_LLM_PATCH>>>
+```
+
+Delete shape:
+
+```
+<<<LOCAL_LLM_DELETE path="src/main/kotlin/OldFile.kt">>>
+<<<END_LOCAL_LLM_DELETE>>>
 ```
 
 - **Tools → Local LLM Chat…** — opens the tool window and prefills from the editor selection when present.

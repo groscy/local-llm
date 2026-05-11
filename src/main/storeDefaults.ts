@@ -22,6 +22,7 @@ import { CODEBASE_FORMAL_STORE_KEY, emptyCodebaseFormalBundle } from '@shared/co
 /** Default keys written on first launch and after “factory reset”. */
 export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   ollamaBaseUrl: 'http://127.0.0.1:11434',
+  trainBackend: 'axolotl',
   llamaPort: 8080,
   /** Passed to llama-server `-c` (prompt + generation must fit; long chat / RAG needs more). */
   llamaContextTokens: 32_768,
@@ -99,6 +100,16 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   uiRole: DEFAULT_UI_ROLE,
   /** Workspace visual density (focused / standard / expanded). */
   workspaceDensity: 'standard',
+  /** If false, left rail shows icons only and hides button labels. */
+  navRailShowLabels: false,
+  /** If true, setup tour auto-opens when onboarding version increments. */
+  setupTourOnStartup: true,
+  /** Focuses navigation on the core demo workflow for presentations. */
+  presentationModeEnabled: true,
+  /** Reveals non-core screens (developer diagnostics, architecture internals, ontology internals). */
+  showAdvancedSurfaces: false,
+  /** Version marker for idempotent first-run demo data seeding. */
+  demoSeedBundleVersion: 0,
   /** Codebases, formal tool profiles, and verification run history (see `@shared/codebaseRegistry`). */
   [CODEBASE_FORMAL_STORE_KEY]: emptyCodebaseFormalBundle()
 }
@@ -159,6 +170,15 @@ export function migrateChatProfileSettings(store: Store<Record<string, unknown>>
   if (typeof store.get('chatResponsePostProcess') !== 'boolean') {
     store.set('chatResponsePostProcess', true)
   }
+  if (typeof store.get('presentationModeEnabled') !== 'boolean') {
+    store.set('presentationModeEnabled', true)
+  }
+  if (typeof store.get('showAdvancedSurfaces') !== 'boolean') {
+    store.set('showAdvancedSurfaces', false)
+  }
+  if (typeof store.get('demoSeedBundleVersion') !== 'number' || !Number.isFinite(store.get('demoSeedBundleVersion'))) {
+    store.set('demoSeedBundleVersion', 0)
+  }
   if (typeof store.get('ontologyEnabled') !== 'boolean') {
     store.set('ontologyEnabled', true)
   }
@@ -217,6 +237,9 @@ export function migrateRoleSetupIfNeeded(store: Store<Record<string, unknown>>):
       store.set('setupTourVersion', 0)
     }
   }
+  if (typeof store.get('setupTourOnStartup') !== 'boolean') {
+    store.set('setupTourOnStartup', true)
+  }
 
   const roleRaw = store.get('uiRole')
   if (!parseUiRole(roleRaw)) {
@@ -225,5 +248,8 @@ export function migrateRoleSetupIfNeeded(store: Store<Record<string, unknown>>):
   const densityRaw = store.get('workspaceDensity')
   if (densityRaw !== 'focused' && densityRaw !== 'standard' && densityRaw !== 'expanded') {
     store.set('workspaceDensity', 'standard')
+  }
+  if (typeof store.get('navRailShowLabels') !== 'boolean') {
+    store.set('navRailShowLabels', false)
   }
 }

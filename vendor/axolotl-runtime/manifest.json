@@ -1,0 +1,9 @@
+{
+  "runtime": "axolotl-bundled",
+  "version": "0.1.0",
+  "entrypoints": {
+    "probe": "bin/axolotl-probe.js",
+    "train": "bin/axolotl-train.js"
+  },
+  "supportedFamilies": ["llama", "mistral", "qwen", "phi", "gemma"]
+}

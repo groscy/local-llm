@@ -11,8 +11,6 @@ import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
-import com.intellij.ui.JBSplitter
-import com.intellij.ui.OnePixelSplitter
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
@@ -33,7 +31,6 @@ class LocalLlmToolWindowPanel(private val project: Project) :
 
     private val connection = ConnectionStatusPanel(project)
     private val compose = LocalLlmComposePanel(project)
-    private val transcript = LocalLlmTranscriptPanel(project)
 
     private val actionToolbar = ActionManager.getInstance().createActionToolbar(
         "ToolwindowToolbar",
@@ -47,7 +44,6 @@ class LocalLlmToolWindowPanel(private val project: Project) :
         chatController = LocalLlmChatController(
             project,
             compose,
-            transcript,
             refreshConnection = { connection.refreshNow() },
             finishSendTurn = { success -> applyFinishSendTurn(success) }
         )
@@ -67,28 +63,10 @@ class LocalLlmToolWindowPanel(private val project: Project) :
         }
 
         val composeCard = LocalLlmUiTheme.chatCardShell(composeScroll)
-        val composeSlot = JPanel(BorderLayout()).apply {
-            isOpaque = false
-            border = JBUI.Borders.empty(0, 0, LocalLlmUiTheme.sectionGap() / 2, 0)
-            add(composeCard, BorderLayout.CENTER)
-        }
-
-        val transcriptCard = LocalLlmUiTheme.chatCardShell(transcript)
-
-        val ratio = LocalLlmIntegrationProperties.splitRatio(0.42f)
-        val split = OnePixelSplitter(true, ratio).apply {
-            dividerWidth = com.intellij.ui.scale.JBUIScale.scale(1)
-            firstComponent = composeSlot
-            secondComponent = transcriptCard
-            setHonorComponentsMinimumSize(true)
-            addPropertyChangeListener(JBSplitter.PROP_PROPORTION) {
-                LocalLlmIntegrationProperties.setSplitRatio(proportion)
-            }
-        }
 
         val connectionSlot = JPanel(BorderLayout()).apply {
             isOpaque = false
-            border = JBUI.Borders.empty(LocalLlmUiTheme.sectionGap(), 0, LocalLlmUiTheme.sectionGap(), 0)
+            border = JBUI.Borders.empty(LocalLlmUiTheme.sectionGap() / 2, 0, LocalLlmUiTheme.sectionGap() / 2, 0)
             add(LocalLlmGlassCardPanel(connection), BorderLayout.CENTER)
         }
 
@@ -100,7 +78,7 @@ class LocalLlmToolWindowPanel(private val project: Project) :
                 LocalLlmUiTheme.cardPadding()
             )
             add(connectionSlot, BorderLayout.NORTH)
-            add(split, BorderLayout.CENTER)
+            add(composeCard, BorderLayout.CENTER)
         }
 
         setContent(canvas)
@@ -169,15 +147,15 @@ class LocalLlmToolWindowPanel(private val project: Project) :
         }
         isSending = true
         syncToolbarActions()
-        val files = compose.snapshotFiles()
+        val files = compose.snapshotFilesForSend()
         val port = LocalLlmIntegrationProperties.integrationPort()
         val token = LocalLlmIntegrationProperties.integrationToken()
-        // Goal text remains in the compose area — transcript only marks the run.
+        // Goal text remains in the compose area — inline output only marks the run.
         val agentLine = buildString {
             append("Agent")
             if (files.isNotEmpty()) append(" · ${files.size} attachment(s)")
         }
-        transcript.append("$agentLine\n\n")
+        compose.setProgress("$agentLine · starting…")
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Local LLM Agent", true) {
             override fun run(indicator: ProgressIndicator) {
                 try {
@@ -191,7 +169,7 @@ class LocalLlmToolWindowPanel(private val project: Project) :
                         token = token,
                         onLog = { line ->
                             ApplicationManager.getApplication().invokeLater {
-                                if (!project.isDisposed) transcript.append(line)
+                                if (!project.isDisposed) compose.setProgress(line)
                             }
                         },
                         notifyDesktop = { kind, message, meta ->
@@ -205,7 +183,7 @@ class LocalLlmToolWindowPanel(private val project: Project) :
                     )
                 } catch (_: ProcessCanceledException) {
                     ApplicationManager.getApplication().invokeLater {
-                        if (!project.isDisposed) transcript.append("(Agent cancelled.)\n\n")
+                        if (!project.isDisposed) compose.setProgress("Agent cancelled")
                         applyFinishSendTurn(false)
                     }
                 }

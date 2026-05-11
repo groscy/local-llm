@@ -33,6 +33,8 @@ object StructuredApplyParser {
         data class FullFile(override val path: String, val content: String) : StructuredEdit
 
         data class Patch(override val path: String, val hunks: List<Hunk>) : StructuredEdit
+
+        data class DeleteFile(override val path: String) : StructuredEdit
     }
 
     private const val OPEN_FILE = "<<<LOCAL_LLM_FILE"
@@ -40,6 +42,8 @@ object StructuredApplyParser {
 
     private const val OPEN_PATCH = "<<<LOCAL_LLM_PATCH"
     private const val CLOSE_PATCH = "<<<END_LOCAL_LLM_PATCH>>>"
+    private const val OPEN_DELETE = "<<<LOCAL_LLM_DELETE"
+    private const val CLOSE_DELETE = "<<<END_LOCAL_LLM_DELETE>>>"
 
     private const val MARK_SEARCH = "<<<< SEARCH"
     private const val MARK_SEP = "===="
@@ -58,23 +62,29 @@ object StructuredApplyParser {
         while (i < text.length) {
             val nextFile = text.indexOf(OPEN_FILE, i, ignoreCase = true)
             val nextPatch = text.indexOf(OPEN_PATCH, i, ignoreCase = true)
-            val takeFile = when {
-                nextFile < 0 && nextPatch < 0 -> break
-                nextFile < 0 -> false
-                nextPatch < 0 -> true
-                else -> nextFile <= nextPatch
-            }
-            if (takeFile) {
+            val nextDelete = text.indexOf(OPEN_DELETE, i, ignoreCase = true)
+            val candidates = listOf(
+                "file" to nextFile,
+                "patch" to nextPatch,
+                "delete" to nextDelete
+            ).filter { it.second >= 0 }
+            if (candidates.isEmpty()) break
+            val nextType = candidates.minByOrNull { it.second }!!.first
+            if (nextType == "file") {
                 val block = parseFileBlock(text, nextFile) ?: break
                 if (block.content.isNotEmpty()) {
                     out.add(StructuredEdit.FullFile(block.path, block.content))
                 }
                 i = block.nextIndex
-            } else {
+            } else if (nextType == "patch") {
                 val block = parsePatchBlock(text, nextPatch) ?: break
                 if (block.hunks.isNotEmpty()) {
                     out.add(StructuredEdit.Patch(block.path, block.hunks))
                 }
+                i = block.nextIndex
+            } else {
+                val block = parseDeleteBlock(text, nextDelete) ?: break
+                out.add(StructuredEdit.DeleteFile(block.path))
                 i = block.nextIndex
             }
         }
@@ -91,23 +101,29 @@ object StructuredApplyParser {
         while (i < text.length) {
             val nextFile = text.indexOf(OPEN_FILE, i, ignoreCase = true)
             val nextPatch = text.indexOf(OPEN_PATCH, i, ignoreCase = true)
-            val takeFile = when {
-                nextFile < 0 && nextPatch < 0 -> break
-                nextFile < 0 -> false
-                nextPatch < 0 -> true
-                else -> nextFile <= nextPatch
-            }
-            if (takeFile) {
+            val nextDelete = text.indexOf(OPEN_DELETE, i, ignoreCase = true)
+            val candidates = listOf(
+                "file" to nextFile,
+                "patch" to nextPatch,
+                "delete" to nextDelete
+            ).filter { it.second >= 0 }
+            if (candidates.isEmpty()) break
+            val nextType = candidates.minByOrNull { it.second }!!.first
+            if (nextType == "file") {
                 val block = parseFileBlock(text, nextFile) ?: break
                 if (block.content.isNotEmpty()) {
                     out.add(nextFile to block.nextIndex)
                 }
                 i = block.nextIndex
-            } else {
+            } else if (nextType == "patch") {
                 val block = parsePatchBlock(text, nextPatch) ?: break
                 if (block.hunks.isNotEmpty()) {
                     out.add(nextPatch to block.nextIndex)
                 }
+                i = block.nextIndex
+            } else {
+                val block = parseDeleteBlock(text, nextDelete) ?: break
+                out.add(nextDelete to block.nextIndex)
                 i = block.nextIndex
             }
         }
@@ -138,6 +154,7 @@ object StructuredApplyParser {
     }
 
     private data class ParsedPatch(val path: String, val hunks: List<Hunk>, val nextIndex: Int)
+    private data class ParsedDelete(val path: String, val nextIndex: Int)
 
     private fun parsePatchBlock(text: String, start: Int): ParsedPatch? {
         val afterOpen = start + OPEN_PATCH.length
@@ -156,6 +173,19 @@ object StructuredApplyParser {
         val body = text.substring(bodyStart, closeIdx)
         val hunks = parsePatchHunks(body)
         return ParsedPatch(path, hunks, closeIdx + CLOSE_PATCH.length)
+    }
+
+    private fun parseDeleteBlock(text: String, start: Int): ParsedDelete? {
+        val afterOpen = start + OPEN_DELETE.length
+        val headerEnd = text.indexOf(">>>", afterOpen)
+        if (headerEnd < 0) return null
+        val headerLine = text.substring(start, headerEnd + 3)
+        val pathMatch = pathAttr.find(headerLine) ?: return null
+        val path = pathMatch.groupValues[1].trim()
+        if (path.isEmpty()) return null
+        val closeIdx = text.indexOf(CLOSE_DELETE, headerEnd + 3, ignoreCase = true)
+        if (closeIdx < 0) return null
+        return ParsedDelete(path, closeIdx + CLOSE_DELETE.length)
     }
 
     private fun parsePatchHunks(body: String): List<Hunk> {

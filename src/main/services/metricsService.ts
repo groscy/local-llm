@@ -18,6 +18,33 @@ function processCpuApprox(): number {
   return Math.max(0, Math.min(100, 100 - (100 * idle) / total))
 }
 
+type CpuSample = { idle: number; total: number }
+let prevSystemCpuSample: CpuSample | null = null
+
+function readCpuSample(): CpuSample {
+  const c = cpus()
+  let idle = 0
+  let total = 0
+  for (const cpu of c) {
+    idle += cpu.times.idle
+    total += cpu.times.user + cpu.times.nice + cpu.times.sys + cpu.times.idle + cpu.times.irq
+  }
+  return { idle, total }
+}
+
+/** Delta-based host CPU usage estimate across calls (0..100). */
+function systemCpuPercentSampled(): number {
+  const current = readCpuSample()
+  const previous = prevSystemCpuSample
+  prevSystemCpuSample = current
+  if (!previous) return processCpuApprox()
+  const totalDelta = current.total - previous.total
+  const idleDelta = current.idle - previous.idle
+  if (!Number.isFinite(totalDelta) || totalDelta <= 0) return processCpuApprox()
+  const busyRatio = 1 - idleDelta / totalDelta
+  return Math.max(0, Math.min(100, busyRatio * 100))
+}
+
 /** Sample metrics without writing to the database (for live widget polling). */
 export async function peekSnapshot(runtime: RuntimeAdapter | null): Promise<MetricsSnapshot> {
   const ts = Date.now()
@@ -35,6 +62,16 @@ export async function peekSnapshot(runtime: RuntimeAdapter | null): Promise<Metr
     }
   }
   const rssMb = process.memoryUsage().rss / (1024 * 1024)
+  const systemCpuPercent = systemCpuPercentSampled()
+  const totalMem = totalmem()
+  const freeMem = freemem()
+  const usedMem = Math.max(0, totalMem - freeMem)
+  const systemMemoryPressurePercent =
+    totalMem > 0 ? Math.max(0, Math.min(100, (usedMem / totalMem) * 100)) : undefined
+  const systemLoadPercent =
+    systemMemoryPressurePercent != null
+      ? Math.max(0, Math.min(100, systemCpuPercent * 0.65 + systemMemoryPressurePercent * 0.35))
+      : systemCpuPercent
   const gpu = probeNvidiaGpuMemoryMb()
   const avgPromptToResponseMs = averageChatRoundtripMs()
   return {
@@ -43,6 +80,9 @@ export async function peekSnapshot(runtime: RuntimeAdapter | null): Promise<Metr
     runtimeCtxUsed,
     modelMemoryMb,
     processCpuPercent: processCpuApprox(),
+    systemCpuPercent,
+    systemMemoryPressurePercent,
+    systemLoadPercent,
     processRssMb: rssMb,
     gpuMemUsedMb: gpu?.usedMb,
     gpuMemTotalMb: gpu?.totalMb,

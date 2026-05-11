@@ -19,7 +19,6 @@ import java.util.concurrent.TimeUnit
 class LocalLlmChatController(
     private val project: Project,
     private val compose: LocalLlmComposePanel,
-    private val transcript: LocalLlmTranscriptPanel,
     private val refreshConnection: () -> Unit,
     private val finishSendTurn: (success: Boolean) -> Unit
 ) {
@@ -59,7 +58,7 @@ class LocalLlmChatController(
 
     fun sendToModel() {
         val question = compose.promptArea.text.trim()
-        val files = compose.snapshotFiles()
+        val files = compose.snapshotFilesForSend()
         if (question.isBlank() && files.isEmpty()) {
             Messages.showWarningDialog(
                 project,
@@ -78,17 +77,7 @@ class LocalLlmChatController(
         val port = LocalLlmIntegrationProperties.integrationPort()
         val token = LocalLlmIntegrationProperties.integrationToken()
 
-        // Prompt text stays in the compose area — do not duplicate it in the transcript.
-        val youLine = buildString {
-            append("You")
-            when {
-                files.isNotEmpty() && question.isNotEmpty() ->
-                    append(" · ${files.size} file(s) attached")
-                files.isNotEmpty() ->
-                    append(" · ${files.size} file(s) only (no extra message text)")
-            }
-        }
-        transcript.append("$youLine\n\n")
+        compose.setProgress("Queued: prompt + ${files.size} attachment(s)")
 
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Local LLM", true) {
             override fun run(indicator: ProgressIndicator) {
@@ -98,33 +87,69 @@ class LocalLlmChatController(
                     } else {
                         question
                     }
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!project.isDisposed) compose.setProgress("Preparing prompt…")
+                    }
                     indicator.text = "Preparing message…"
                     val bundled = ApplicationManager.getApplication().runReadAction<PromptAttachmentBundler.Result> {
                         PromptAttachmentBundler.bundle(project, basePrompt, files, indicator)
                     }
-                    if (bundled.summaryLines.isNotEmpty()) {
-                        val summary = bundled.summaryLines.joinToString("\n") { "  · $it" }
-                        ApplicationManager.getApplication().invokeLater {
-                            transcript.appendSection("Attachments", summary)
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!project.isDisposed) compose.setProgress("Prompt prepared")
+                    }
+                    trimHistoryIfNeeded()
+                    val graphText = if (compose.includeGraph.isSelected) {
+                        indicator.text = "Building knowledge graph…"
+                        ApplicationManager.getApplication().runReadAction<String> {
+                            KnowledgeGraphCollector.collect(project, indicator)
+                        }
+                    } else {
+                        ""
+                    }
+                    val messages = mutableListOf(
+                        LocalLlmHttpClient.ChatMessage("system", LocalLlmSystemPrompts.build(graphText))
+                    )
+                    messages.addAll(apiHistory)
+                    messages.add(LocalLlmHttpClient.ChatMessage("user", bundled.augmentedUserMessage))
+                    indicator.text = "Submitting background job…"
+                    val submitted = LocalLlmHttpClient.submitJob(
+                        port = port,
+                        token = token,
+                        messages = messages,
+                        projectName = project.name,
+                        projectBasePath = project.basePath
+                    )
+                    notifyDesktop(
+                        PluginReportKind.CHAT_JOB_QUEUED,
+                        "Queued ${submitted.jobId}",
+                        mapOf("project" to project.name, "jobId" to submitted.jobId, "attachments" to files.size)
+                    )
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!project.isDisposed) {
+                            compose.setProgress("Background job queued: ${submitted.jobId.take(8)}")
+                            LocalLlmNotifications.notify(
+                                project,
+                                "Local LLM",
+                                "Prompt is running in background.",
+                                com.intellij.notification.NotificationType.INFORMATION
+                            )
+                            endSendTurn(true)
                         }
                     }
-
-                    runChatWithOptionalClarify(
+                    pollJobUntilDone(
                         indicator = indicator,
                         port = port,
                         token = token,
-                        userMessage = bundled.augmentedUserMessage,
+                        submitted = submitted,
+                        messagesSent = messages,
                         includeGraph = compose.includeGraph.isSelected,
                         attachmentCount = files.size,
-                        referencedFiles = files,
-                        onLog = { line ->
-                            ApplicationManager.getApplication().invokeLater { transcript.append(line) }
-                        }
+                        referencedFiles = files
                     )
                 } catch (_: ProcessCanceledException) {
                     ApplicationManager.getApplication().invokeLater {
                         notifyDesktop(PluginReportKind.SEND_CANCELLED, "Send cancelled", mapOf("project" to project.name))
-                        transcript.append("(Cancelled.)\n\n")
+                        compose.setProgress("Cancelled")
                         endSendTurn(false)
                     }
                 } catch (e: Exception) {
@@ -136,14 +161,11 @@ class LocalLlmChatController(
                                 e.message?.take(200),
                                 mapOf("project" to project.name, "reason" to "prepare_or_network")
                             )
-                            transcript.append(
-                                "Connection error · 127.0.0.1:$port · ${e.javaClass.simpleName}: ${e.message ?: ""}\n" +
-                                    "See the status strip at the top of this tool window. Enable IDE integration in Local LLM Desktop.\n\n"
-                            )
+                            compose.setProgressError("Connection failed (127.0.0.1:$port)")
                             refreshConnection()
                         } else {
                             notifyDesktop(PluginReportKind.CHAT_FAILED, e.message?.take(200), mapOf("project" to project.name))
-                            transcript.append("Error: ${e.message ?: e}\n\n")
+                            compose.setProgressError("Error: ${e.javaClass.simpleName}")
                             Messages.showErrorDialog(project, e.message ?: e.toString(), "Local LLM")
                         }
                         endSendTurn(false)
@@ -182,7 +204,7 @@ class LocalLlmChatController(
     fun clearConversation() {
         apiHistory.clear()
         ApplicationManager.getApplication().invokeLater {
-            if (!project.isDisposed) transcript.clearTranscript()
+            if (!project.isDisposed) compose.clearOutput()
         }
     }
 
@@ -201,18 +223,83 @@ class LocalLlmChatController(
         LocalLlmPluginReports.postAsync(project, kind, message, meta)
     }
 
-    private fun formatTokenUsageLine(
-        completion: LocalLlmHttpClient.ChatCompletion,
-        messages: List<LocalLlmHttpClient.ChatMessage>
-    ): String {
-        fun charTokEst(s: String): Int = maxOf(1, (s.length + 3) / 4)
-        fun fmt(n: Int, est: Boolean): String = if (est) "~$n" else n.toString()
-        val promptChars = messages.joinToString("\n") { it.content }
-        val promptN = completion.promptTokens ?: charTokEst(promptChars)
-        val promptEst = completion.promptTokens == null
-        val compN = completion.completionTokens ?: charTokEst(completion.reply)
-        val compEst = completion.completionTokens == null
-        return "Sent ${fmt(promptN, promptEst)} tok · Generated ${fmt(compN, compEst)} tok"
+    private fun pollJobUntilDone(
+        indicator: ProgressIndicator,
+        port: Int,
+        token: String,
+        submitted: LocalLlmHttpClient.JobSubmitted,
+        messagesSent: List<LocalLlmHttpClient.ChatMessage>,
+        includeGraph: Boolean,
+        attachmentCount: Int,
+        referencedFiles: List<VirtualFile>
+    ) {
+        var status = submitted.status
+        while (true) {
+            indicator.checkCanceled()
+            val snap = LocalLlmHttpClient.fetchJobStatus(port, token, submitted.jobId)
+            status = snap.status
+            ApplicationManager.getApplication().invokeLater {
+                if (!project.isDisposed) compose.setProgress("Job ${submitted.jobId.take(8)}: ${snap.progress ?: snap.status}")
+            }
+            when (status) {
+                "queued", "running" -> {
+                    Thread.sleep(1400)
+                    continue
+                }
+                "completed" -> {
+                    val result = LocalLlmHttpClient.fetchJobResult(port, token, submitted.jobId)
+                    val assistantRecorded = (ApplyReplyExtractor.applyPayloadOnlyOrNull(result.reply) ?: result.reply).trim()
+                    val tail = messagesSent.drop(1).toMutableList()
+                    tail.add(LocalLlmHttpClient.ChatMessage("assistant", assistantRecorded))
+                    apiHistory.clear()
+                    apiHistory.addAll(tail)
+                    val meta = mutableMapOf<String, Any?>(
+                        "project" to project.name,
+                        "attachments" to attachmentCount,
+                        "includeGraph" to includeGraph,
+                        "jobId" to submitted.jobId
+                    )
+                    result.promptTokens?.let { meta["promptTokens"] = it }
+                    result.completionTokens?.let { meta["completionTokens"] = it }
+                    notifyDesktop(PluginReportKind.CHAT_COMPLETED, project.name, meta)
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!project.isDisposed) {
+                            compose.setProgress("Background job completed")
+                            LocalLlmNotifications.notify(
+                                project,
+                                "Local LLM",
+                                "Background prompt finished.",
+                                com.intellij.notification.NotificationType.INFORMATION
+                            )
+                        }
+                    }
+                    offerApplyStructuredEdits(assistantRecorded, referencedFiles) {}
+                    return
+                }
+                "failed", "cancelled" -> {
+                    notifyDesktop(
+                        PluginReportKind.CHAT_FAILED,
+                        snap.error?.take(200) ?: "Job $status",
+                        mapOf("project" to project.name, "jobId" to submitted.jobId, "status" to status)
+                    )
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!project.isDisposed) {
+                            compose.setProgressError("Background job $status")
+                            LocalLlmNotifications.notify(
+                                project,
+                                "Local LLM",
+                                "Background prompt $status${snap.error?.let { ": $it" } ?: "."}",
+                                com.intellij.notification.NotificationType.WARNING
+                            )
+                        }
+                    }
+                    return
+                }
+                else -> {
+                    throw IllegalStateException("Unknown job status: $status")
+                }
+            }
+        }
     }
 
     private fun runChatWithOptionalClarify(
@@ -225,6 +312,7 @@ class LocalLlmChatController(
         referencedFiles: List<VirtualFile>,
         onLog: (String) -> Unit
     ) {
+        onLog("Building context…")
         val graphText = if (includeGraph) {
             indicator.text = "Building knowledge graph…"
             ApplicationManager.getApplication().runReadAction<String> {
@@ -245,6 +333,7 @@ class LocalLlmChatController(
         while (round < 3) {
             indicator.checkCanceled()
             indicator.text = "Waiting for local model…"
+            onLog("Waiting for model response…")
             val completion = try {
                 LocalLlmHttpClient.chat(port, token, messages)
             } catch (e: LocalLlmHttpClient.LocalLlmHttpException) {
@@ -253,7 +342,7 @@ class LocalLlmChatController(
                     "HTTP ${e.status}",
                     mapOf("project" to project.name, "httpStatus" to e.status)
                 )
-                onLog("HTTP ${e.status}: ${e.body.take(800)}\n\n")
+                onLog("Request failed: HTTP ${e.status}")
                 ApplicationManager.getApplication().invokeLater { refreshConnection() }
                 endSendTurn(false)
                 return
@@ -263,10 +352,7 @@ class LocalLlmChatController(
                     e.message?.take(200),
                     mapOf("project" to project.name, "reason" to "io")
                 )
-                onLog(
-                    "Cannot reach Local LLM Desktop at 127.0.0.1:$port — ${e.javaClass.simpleName}: ${e.message ?: ""}\n" +
-                        "Check the status strip (GET /health). Enable IDE integration in the desktop app.\n\n"
-                )
+                onLog("Connection failed (127.0.0.1:$port)")
                 ApplicationManager.getApplication().invokeLater { refreshConnection() }
                 endSendTurn(false)
                 return
@@ -277,10 +363,7 @@ class LocalLlmChatController(
                         e.message?.take(200),
                         mapOf("project" to project.name, "reason" to "connect")
                     )
-                    onLog(
-                        "Cannot reach Local LLM Desktop at 127.0.0.1:$port — ${e.javaClass.simpleName}: ${e.message ?: ""}\n" +
-                            "Check the status strip.\n\n"
-                    )
+                    onLog("Connection failed (127.0.0.1:$port)")
                     ApplicationManager.getApplication().invokeLater { refreshConnection() }
                     endSendTurn(false)
                     return
@@ -297,12 +380,7 @@ class LocalLlmChatController(
                     apiHistory.clear()
                     apiHistory.addAll(tail)
 
-                    if (payloadOnly != null) {
-                        onLog("$assistantRecorded\n\n")
-                    } else {
-                        onLog("Model:\n$assistantRecorded\n\n")
-                    }
-                    onLog("${formatTokenUsageLine(completion, messages)}\n\n")
+                    onLog("Model response received")
                     val meta = mutableMapOf<String, Any?>(
                         "project" to project.name,
                         "attachments" to attachmentCount,
@@ -312,6 +390,7 @@ class LocalLlmChatController(
                     completion.promptTokens?.let { meta["promptTokens"] = it }
                     completion.completionTokens?.let { meta["completionTokens"] = it }
                     notifyDesktop(PluginReportKind.CHAT_COMPLETED, project.name, meta)
+                    onLog("Applying edits…")
                     offerApplyStructuredEdits(assistantRecorded, referencedFiles) { endSendTurn(true) }
                     return
                 }
@@ -320,8 +399,7 @@ class LocalLlmChatController(
                     var answerLines: List<String>? = null
                     ApplicationManager.getApplication().invokeLater {
                         try {
-                            onLog(ClarifyResponseParser.userFacingClarifyText(parsed.questions))
-                            onLog("${formatTokenUsageLine(completion, messages)}\n\n")
+                            onLog("Waiting for clarification…")
                             val dlg = ClarifyQuestionsDialog(project, parsed.questions)
                             if (dlg.showAndGet()) {
                                 answerLines = dlg.answersLines()
@@ -339,18 +417,19 @@ class LocalLlmChatController(
                     val lines = answerLines
                     if (lines == null) {
                         notifyDesktop(PluginReportKind.SEND_CANCELLED, "Clarification cancelled", mapOf("project" to project.name))
-                        onLog("(Cancelled — no clarification provided.)\n\n")
+                        onLog("Cancelled")
                         endSendTurn(false)
                         return
                     }
                     messages.add(LocalLlmHttpClient.ChatMessage("assistant", completion.reply))
                     messages.add(LocalLlmHttpClient.ChatMessage("user", "My clarifications:\n${lines.joinToString("\n")}"))
+                    onLog("Clarification submitted; retrying…")
                     round++
                 }
             }
         }
         notifyDesktop(PluginReportKind.CHAT_FAILED, "Max clarification rounds", mapOf("project" to project.name))
-        onLog("Model: (max clarification rounds reached — try a more specific prompt.)\n\n")
+        onLog("Failed: max clarification rounds reached")
         endSendTurn(false)
     }
 
@@ -364,10 +443,24 @@ class LocalLlmChatController(
             applyEnabled = compose.applyStructuredEdits.isSelected,
             modelReply = modelReply,
             referencedFiles = referencedFiles,
-            appendTranscript = { line -> if (!project.isDisposed) transcript.append(line) },
-            appendTranscriptSection = { title, body -> if (!project.isDisposed) transcript.appendSection(title, body) },
+            appendTranscript = { line ->
+                if (!project.isDisposed && line.contains("error", ignoreCase = true)) {
+                    compose.setProgressError("Apply failed")
+                }
+            },
+            appendTranscriptSection = { _, body ->
+                if (!project.isDisposed) {
+                    val ok = Regex("""^\s*✓\s""", RegexOption.MULTILINE).findAll(body).count()
+                    val fail = Regex("""^\s*✗\s""", RegexOption.MULTILINE).findAll(body).count()
+                    if (fail > 0) compose.setProgressError("Apply finished: $ok ok, $fail failed")
+                    else compose.setProgress("Apply finished: $ok ok")
+                }
+            },
             notifyDesktop = { kind, message, meta -> notifyDesktop(kind, message, meta) },
-            onComplete = onDone
+            onComplete = {
+                if (!project.isDisposed) compose.setProgress("Done")
+                onDone()
+            }
         )
     }
 }

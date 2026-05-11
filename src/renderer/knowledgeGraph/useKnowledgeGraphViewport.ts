@@ -24,6 +24,10 @@ export function useKnowledgeGraphViewport(wrapRef: RefObject<HTMLDivElement | nu
   const { contentW, contentH, resetKey } = opts
   const [vp, setVp] = useState<KgViewport>({ scale: 1, tx: 0, ty: 0 })
   const panRef = useRef<{ active: boolean; sx: number; sy: number; tx0: number; ty0: number } | null>(null)
+  const panRafRef = useRef<number | null>(null)
+  const panPendingRef = useRef<{ tx: number; ty: number } | null>(null)
+  const wheelRafRef = useRef<number | null>(null)
+  const wheelPendingRef = useRef<{ mx: number; my: number; factor: number } | null>(null)
   /** Latest graph dimensions (avoids refitting the viewport on every layout tweak, e.g. gravity slider). */
   const contentDimsRef = useRef({ w: contentW, h: contentH })
   contentDimsRef.current = { w: contentW, h: contentH }
@@ -75,11 +79,19 @@ export function useKnowledgeGraphViewport(wrapRef: RefObject<HTMLDivElement | nu
       const mx = e.clientX - rect.left
       const my = e.clientY - rect.top
       const factor = e.deltaY < 0 ? 1.09 : 1 / 1.09
-      setVp((prev) => {
-        const s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev.scale * factor))
-        const worldX = (mx - prev.tx) / prev.scale
-        const worldY = (my - prev.ty) / prev.scale
-        return { scale: s, tx: mx - worldX * s, ty: my - worldY * s }
+      wheelPendingRef.current = { mx, my, factor }
+      if (wheelRafRef.current != null) return
+      wheelRafRef.current = globalThis.requestAnimationFrame(() => {
+        wheelRafRef.current = null
+        const pending = wheelPendingRef.current
+        wheelPendingRef.current = null
+        if (!pending) return
+        setVp((prev) => {
+          const s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev.scale * pending.factor))
+          const worldX = (pending.mx - prev.tx) / prev.scale
+          const worldY = (pending.my - prev.ty) / prev.scale
+          return { scale: s, tx: pending.mx - worldX * s, ty: pending.my - worldY * s }
+        })
       })
     },
     [wrapRef]
@@ -103,7 +115,15 @@ export function useKnowledgeGraphViewport(wrapRef: RefObject<HTMLDivElement | nu
       if (!p?.active) return
       const dx = e.clientX - p.sx
       const dy = e.clientY - p.sy
-      setVp((v) => ({ ...v, tx: p.tx0 + dx, ty: p.ty0 + dy }))
+      panPendingRef.current = { tx: p.tx0 + dx, ty: p.ty0 + dy }
+      if (panRafRef.current != null) return
+      panRafRef.current = globalThis.requestAnimationFrame(() => {
+        panRafRef.current = null
+        const next = panPendingRef.current
+        panPendingRef.current = null
+        if (!next) return
+        setVp((v) => ({ ...v, tx: next.tx, ty: next.ty }))
+      })
     },
     []
   )
@@ -116,8 +136,27 @@ export function useKnowledgeGraphViewport(wrapRef: RefObject<HTMLDivElement | nu
         /* ignore */
       }
       panRef.current = null
+      if (panRafRef.current != null) {
+        globalThis.cancelAnimationFrame(panRafRef.current)
+        panRafRef.current = null
+      }
+      const next = panPendingRef.current
+      panPendingRef.current = null
+      if (next) setVp((v) => ({ ...v, tx: next.tx, ty: next.ty }))
     }
   }, [])
+
+  useLayoutEffect(
+    () => () => {
+      if (panRafRef.current != null) globalThis.cancelAnimationFrame(panRafRef.current)
+      if (wheelRafRef.current != null) globalThis.cancelAnimationFrame(wheelRafRef.current)
+      panRafRef.current = null
+      wheelRafRef.current = null
+      panPendingRef.current = null
+      wheelPendingRef.current = null
+    },
+    []
+  )
 
   const zoomIn = useCallback(() => {
     const el = wrapRef.current

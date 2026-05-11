@@ -64,7 +64,7 @@ private class LocalLlmRunAgentAction : DumbAwareAction(
 
 private class LocalLlmClearConversationAction : DumbAwareAction(
     "Clear conversation",
-    "Clear transcript and in-tool-window chat history for the next messages",
+    "Clear inline output and in-tool-window chat history for the next messages",
     AllIcons.General.Remove
 ) {
     override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT

@@ -126,9 +126,39 @@ function pickWikiKwEl(target: EventTarget | null): HTMLElement | null {
   return target instanceof HTMLElement ? target.closest(`.${CHAT_WIKI_KW_CLASS}`) : null
 }
 
+function pickInPageHashLink(target: EventTarget | null): HTMLAnchorElement | null {
+  if (!(target instanceof HTMLElement)) return null
+  const a = target.closest('a[href]')
+  if (!(a instanceof HTMLAnchorElement)) return null
+  const href = a.getAttribute('href')?.trim() ?? ''
+  if (!href || !href.startsWith('#')) return null
+  if (href === '#') return null
+  return a
+}
+
+function scrollToHashTarget(root: HTMLElement, href: string): boolean {
+  const raw = href.slice(1).trim()
+  if (!raw) return false
+  let hash = raw
+  try {
+    hash = decodeURIComponent(raw)
+  } catch {
+    hash = raw
+  }
+  const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(hash) : hash
+  const local = root.querySelector<HTMLElement>(`#${escaped}`)
+  const fallback = document.getElementById(hash)
+  const target = local ?? fallback
+  if (!target) return false
+  target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  target.classList.add('wiki-passage-focus')
+  window.setTimeout(() => target.classList.remove('wiki-passage-focus'), 1400)
+  return true
+}
+
 function ChatWikiKeywordShell(props: {
   children: ReactNode
-  onNavigate?: (sourceId: string) => void
+  onNavigate?: (sourceId: string, phrase: string) => void
 }): ReactElement {
   const [tip, setTip] = useState<{
     left: number
@@ -170,18 +200,20 @@ function ChatWikiKeywordShell(props: {
       onClick={(e) => {
         const el = pickWikiKwEl(e.target)
         const sid = el?.getAttribute('data-source-id')
+        const phrase = el?.getAttribute('data-phrase') ?? ''
         if (sid && props.onNavigate) {
           e.preventDefault()
-          props.onNavigate(sid)
+          props.onNavigate(sid, phrase)
         }
       }}
       onKeyDown={(e) => {
         if (e.key !== 'Enter') return
         const el = e.target instanceof HTMLElement ? e.target.closest(`.${CHAT_WIKI_KW_CLASS}`) : null
         const sid = el?.getAttribute('data-source-id')
+        const phrase = el?.getAttribute('data-phrase') ?? ''
         if (sid && props.onNavigate) {
           e.preventDefault()
-          props.onNavigate(sid)
+          props.onNavigate(sid, phrase)
         }
       }}
     >
@@ -217,7 +249,7 @@ export function ChatRichContent(props: {
   onRichDomReady?: (root: HTMLDivElement) => void
   /** When set, phrases that match the knowledge base are linked to wiki articles. */
   wikiHighlightTerms?: WikiChatHighlightTerm[]
-  onWikiKeywordNavigate?: (sourceId: string) => void
+  onWikiKeywordNavigate?: (sourceId: string, phrase: string) => void
 }): ReactElement {
   const {
     content,
@@ -267,6 +299,7 @@ export function ChatRichContent(props: {
               role="link"
               tabIndex={0}
               data-source-id={p.term.sourceId}
+              data-phrase={p.value}
               data-snippet={p.term.snippet.replace(/\s+/g, ' ').trim()}
               {...(p.term.graphSummary?.trim()
                 ? { 'data-graph-summary': p.term.graphSummary.replace(/\s+/g, ' ').trim() }
@@ -302,7 +335,22 @@ export function ChatRichContent(props: {
     }
   }
 
-  const richBlock = <div ref={setRichEl} className={rootClass} />
+  const richBlock = (
+    <div
+      ref={setRichEl}
+      className={rootClass}
+      onClick={(e) => {
+        const link = pickInPageHashLink(e.target)
+        if (!link) return
+        const href = link.getAttribute('href') ?? ''
+        const root = richRef.current
+        if (!root) return
+        if (scrollToHashTarget(root, href)) {
+          e.preventDefault()
+        }
+      }}
+    />
+  )
 
   return wikiShell ? (
     <ChatWikiKeywordShell onNavigate={onWikiKeywordNavigate}>{richBlock}</ChatWikiKeywordShell>

@@ -28,12 +28,13 @@ Or open this folder in IntelliJ as a Gradle project and use the **Gradle** tool 
 ## Usage
 
 - Open the **Local LLM** tool window (**View → Tool Windows → Local LLM** or **Tools → Local LLM Chat…**). Enter a prompt and **Send to local model**.
+- The plugin auto-attaches the currently focused editor file on each **Send** and **Run agent** call (you can still add more files manually).
 - Optional **Include codebase knowledge graph** (default on) walks Java/Kotlin sources under module roots and sends a structural graph as **system** context. **Java** uses PSI; **Kotlin** uses **source-text heuristics** (no dependency on Kotlin K1 PSI), so the plugin stays compatible with the Kotlin plugin in **K2** mode. Large projects are truncated with a note in the graph.
 - If the model needs more detail, it should start the reply with a line `[CLARIFY]` and numbered questions; the plugin then opens input dialogs so you can answer, and continues the chat (up to a few rounds).
-- Optional **Apply file replacement blocks from replies**: when enabled, the plugin looks for `<<<LOCAL_LLM_FILE path="…">>>` … `<<<END_LOCAL_LLM_FILE>>>` in the model’s answer (full-file UTF-8 replacement, paths relative to project root). You confirm in a dialog before anything is written.
+- Optional **Apply model file operations from replies**: when enabled, the plugin looks for `<<<LOCAL_LLM_PATCH path="…">>>`, `<<<LOCAL_LLM_FILE path="…">>>`, and `<<<LOCAL_LLM_DELETE path="…">>>` blocks in the model’s answer and applies them immediately (paths relative to project root).
 - **Vocabulary…** — scans the same Java/Kotlin sources as the structural graph (plus attached file names/paths) and opens a **domain vocabulary** report: terms grouped by **domain** (first two package segments, e.g. `com.example`), then by **package**, with types, methods, properties, and CamelCase-derived word hints.
 - **Connection strip** at the top polls **GET /health** on the configured port (same as the desktop bridge): shows disconnected / bridge OK / runtime running vs stopped, with **Refresh connection**. Chat **ConnectException**-style failures refresh this strip and avoid a noisy modal when it is clearly a network reachability issue.
-- **IDE setup guide in the desktop app** — empty transcript links to a notification that explains the **IDE setup** rail in Local LLM Desktop (checklist, live status, Test bridge).
+- **IDE setup guide in the desktop app** — inline output starts empty and links to the IDE setup checklist in Local LLM Desktop.
 - **Tools → Local LLM Chat…** (or editor context menu) opens the tool window and **prefills the prompt** from the current selection when there is one.
 - **Inline completion** — in **Settings → Tools → Local LLM Desktop**, leave **Enable gray inline completion** on (default). With the desktop **runtime** running, the IDE shows **gray ghost text** after a short typing pause; accept with the platform **inline completion** shortcut (often **Tab**, depending on keymap). Uses `POST /v1/chat` with a small per-request `maxTokens` cap.
 
