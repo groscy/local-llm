@@ -34,6 +34,10 @@ extraResources:
     to: llama-hf-to-gguf
     filter:
       - "**/*"
+  - from: vendor/axolotl-runtime
+    to: axolotl-runtime
+    filter:
+      - "**/*"
 
 win:
   icon: build/icon.ico
