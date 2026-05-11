@@ -96,6 +96,7 @@ export function applyWikiHighlightsToElement(root: HTMLElement, terms: readonly 
     span.setAttribute('role', 'link')
     span.setAttribute('tabindex', '0')
     span.dataset.sourceId = term.sourceId
+    span.dataset.phrase = mid
     span.dataset.snippet = term.snippet.replace(/\s+/g, ' ').trim()
     if (term.graphSummary?.trim()) {
       span.dataset.graphSummary = term.graphSummary.replace(/\s+/g, ' ').trim()

@@ -6,6 +6,7 @@ import type {
   EvidenceCard,
   KbSource,
   PromptDomainRow,
+  TrainStartValidationResult,
   TrainJob,
   WikiSourceKind,
   WikiTopic
@@ -48,6 +49,7 @@ export type TrainMainViewProps = {
   reviewQueue: EvidenceCard[]
   onReviewSetStatus: (cardId: string, status: 'pending' | 'approved' | 'rejected') => Promise<void>
   onManifestPreview: (args: { baseModelPath: string; datasetPath: string; domainId?: string; sourceIds?: string[] }) => Promise<void>
+  onValidateStart: (args: { baseModelPath: string }) => Promise<TrainStartValidationResult>
   manifestPreviewMarkdown: string | null
   domainModelVersions: DomainModelVersion[]
   setErr: (msg: string | null) => void
@@ -113,6 +115,7 @@ export function TrainMainView(props: TrainMainViewProps): ReactElement {
     reviewQueue,
     onReviewSetStatus,
     onManifestPreview,
+    onValidateStart,
     manifestPreviewMarkdown,
     domainModelVersions,
     setErr
@@ -165,9 +168,9 @@ export function TrainMainView(props: TrainMainViewProps): ReactElement {
   return (
     <div className="train-main-view">
       <p className="muted train-main-view-lead">
-        Improve how the model behaves in <strong>two complementary ways</strong>: <strong>bake knowledge into weights</strong>{' '}
-        (LoRA fine-tune from a base GGUF on your selected domains), or <strong>augment at inference</strong> (retrieve
-        snippets into chat and optionally add domain-specific system context) without changing the checkpoint.
+        Narrator flow: <strong>review evidence</strong>, then <strong>select knowledge + base model</strong>, then{' '}
+        <strong>start a fine-tune job</strong>. You can also augment at inference with retrieval and prompt-domain context
+        without changing the checkpoint.
       </p>
       <div className="drawer-section train-workflow-strip">
         <h3 className="settings-section-title">
@@ -221,7 +224,7 @@ export function TrainMainView(props: TrainMainViewProps): ReactElement {
           What was learned (review queue)
         </h3>
         {reviewQueue.length === 0 ? (
-          <p className="muted">No evidence cards yet. Use chat or IDE integration to collect automatic events.</p>
+          <p className="muted">No evidence cards yet. Generate a chat or IDE event first, then return here to approve data.</p>
         ) : (
           <div className="train-review-list">
             {reviewQueue.slice(0, 14).map((card) => (
@@ -360,8 +363,8 @@ export function TrainMainView(props: TrainMainViewProps): ReactElement {
           <p className="muted train-mode-card-lead">
             Export <code className="inline-code">Alpaca-style</code> JSONL (each line: <code className="inline-code">instruction</code> is a{' '}
             <code className="inline-code">&lt;kb-chunk …/&gt;</code> tag with human-readable <code className="inline-code">context</code>,{' '}
-            <code className="inline-code">rationale</code>, and <code className="inline-code">provenance</code>; <code className="inline-code">output</code> stays raw chunk text) from the knowledge domains above, run{' '}
-            <code className="inline-code">training/train_lora.py</code>, then copy{' '}
+            <code className="inline-code">rationale</code>, and <code className="inline-code">provenance</code>; <code className="inline-code">output</code> stays raw chunk text) from the knowledge domains above, run the bundled{' '}
+            <code className="inline-code">Axolotl</code> backend, then copy{' '}
             <code className="inline-code">merged.gguf</code> (or largest <code className="inline-code">.gguf</code>) into{' '}
             <code className="inline-code">models/finetunes/</code> for Run&apos;s file picker.
           </p>
@@ -437,6 +440,11 @@ export function TrainMainView(props: TrainMainViewProps): ReactElement {
               setTrainStartBusy(true)
               setErr(null)
               try {
+                const preflight = await onValidateStart({ baseModelPath: trainBase.trim() })
+                if (!preflight.supported) {
+                  setErr(preflight.details ? `${preflight.reason} ${preflight.details}` : preflight.reason)
+                  return
+                }
                 await onManifestPreview({
                   baseModelPath: trainBase.trim(),
                   datasetPath: manualDs || '(generated from selected knowledge sources)',
@@ -531,7 +539,7 @@ export function TrainMainView(props: TrainMainViewProps): ReactElement {
           Jobs
         </h3>
         {trainJobs.length === 0 ? (
-          <p className="muted">No jobs yet.</p>
+          <p className="muted">No jobs yet. Start one fine-tune job here to show the training lifecycle.</p>
         ) : (
           <ul className="train-job-list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {trainJobs.map((j) => {
@@ -596,7 +604,7 @@ export function TrainMainView(props: TrainMainViewProps): ReactElement {
           Domain model quality loop
         </h3>
         {domainModelVersions.length === 0 ? (
-          <p className="muted">No domain model versions recorded yet.</p>
+          <p className="muted">No domain model versions yet. They appear after completed jobs are assessed.</p>
         ) : (
           <ul className="train-job-list" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {domainModelVersions.slice(0, 8).map((v) => (

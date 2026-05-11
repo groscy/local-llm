@@ -93,6 +93,8 @@ export type ForceSimulationOptions = {
   onTick: (snapshot: ForceSnapshot) => void
 }
 
+const WORKER_LAYOUT_NODE_THRESHOLD = 1400
+
 function edgeBaseDistance(kind: KnowledgeGraphEdgeKind): number {
   switch (kind) {
     case 'contains':
@@ -335,6 +337,10 @@ export function createKnowledgeGraphSimulation(
       }
     })
 
+  if (nodes.length >= WORKER_LAYOUT_NODE_THRESHOLD) {
+    return createWorkerSimulationHandle(data, seed, opts, nodes, links, nodeGroupMap)
+  }
+
   const simulation = forceSimulation<KgForceNode, KgForceLink>(nodes)
     .alpha(0.92)
     .alphaMin(0.02)
@@ -425,6 +431,92 @@ export function createKnowledgeGraphSimulation(
         raf = 0
       }
       simulation.stop()
+    }
+  }
+}
+
+function createWorkerSimulationHandle(
+  data: KnowledgeGraphPayload,
+  seed: KnowledgeGraphLayoutResult,
+  opts: ForceSimulationOptions,
+  nodes: KgForceNode[],
+  links: KgForceLink[],
+  nodeGroupMap: Map<string, { id: string; mode: KnowledgeGraphClusterMode | 'wiki'; label: string }>
+): ForceSimulationHandle {
+  const worker = new Worker(new URL('./layoutWorker.ts', import.meta.url), { type: 'module' })
+  const nodeById = new Map(nodes.map((node) => [node.id, node] as const))
+  let disposed = false
+  const onMessage = (event: MessageEvent<{ type: 'snapshot'; positions: Array<{ id: string; x: number; y: number }> }>) => {
+    if (disposed) return
+    if (event.data?.type !== 'snapshot') return
+    for (const p of event.data.positions) {
+      const node = nodeById.get(p.id)
+      if (!node) continue
+      node.x = p.x
+      node.y = p.y
+    }
+    opts.onTick(buildSnapshot(data, nodes, nodeGroupMap, seed))
+  }
+  worker.addEventListener('message', onMessage)
+
+  worker.postMessage({
+    type: 'init',
+    gravity: opts.gravity,
+    nodes: nodes.map((node) => ({
+      id: node.id,
+      x: Number.isFinite(node.x) ? Number(node.x) : node.seedX,
+      y: Number.isFinite(node.y) ? Number(node.y) : node.seedY,
+      seedX: node.seedX,
+      seedY: node.seedY,
+      groupId: node.groupId
+    })),
+    edges: links.map((link) => ({
+      from: typeof link.source === 'string' ? link.source : link.source.id,
+      to: typeof link.target === 'string' ? link.target : link.target.id,
+      weight: link.salience
+    }))
+  })
+  opts.onTick(buildSnapshot(data, nodes, nodeGroupMap, seed))
+
+  return {
+    simulation: {} as Simulation<KgForceNode, KgForceLink>,
+    dragNode(nodeId, x, y) {
+      if (disposed) return
+      const node = nodeById.get(nodeId)
+      if (node) {
+        node.fx = x
+        node.fy = y
+        node.x = x
+        node.y = y
+      }
+      worker.postMessage({ type: 'drag', nodeId, x, y })
+    },
+    pinNode(nodeId, pos) {
+      if (disposed) return
+      const node = nodeById.get(nodeId)
+      if (!node) return
+      if (!pos) {
+        node.fx = null
+        node.fy = null
+        worker.postMessage({ type: 'pin', nodeId, x: null, y: null })
+        return
+      }
+      node.fx = pos.x
+      node.fy = pos.y
+      node.x = pos.x
+      node.y = pos.y
+      worker.postMessage({ type: 'pin', nodeId, x: pos.x, y: pos.y })
+    },
+    reheat(alpha = 0.38) {
+      if (disposed) return
+      worker.postMessage({ type: 'reheat', alpha })
+    },
+    destroy() {
+      if (disposed) return
+      disposed = true
+      worker.postMessage({ type: 'destroy' })
+      worker.removeEventListener('message', onMessage)
+      worker.terminate()
     }
   }
 }

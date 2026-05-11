@@ -151,6 +151,23 @@ export function injectMarkdownMathSlots(src: string): { text: string; slots: Mat
       return `<span class="${KATEX_SLOT_CLASS} ${KATEX_SLOT_CLASS}--inline" data-katex-id="${id}" data-katex-display="false"></span>`
     })
 
+    s = s.replace(
+      /(^|[^\\$])\$(?!\$)([^\n$]*?[^\s$])[^\n$]*?\$(?!\$)/g,
+      (full: string, prefix: string) => {
+        const math = full.slice(prefix.length + 1, -1).trim()
+        if (!math) return full
+        const id = nextId()
+        slots.push({ id, tex: math, display: false })
+        return `${prefix}<span class="${KATEX_SLOT_CLASS} ${KATEX_SLOT_CLASS}--inline" data-katex-id="${id}" data-katex-display="false"></span>`
+      }
+    )
+
+    s = s.replace(/\\begin\{([a-z*]+)\}([\s\S]*?)\\end\{\1\}/g, (_, _env: string, body: string) => {
+      const id = nextId()
+      slots.push({ id, tex: body.trim(), display: true })
+      return `\n\n<div class="${KATEX_SLOT_CLASS}" data-katex-id="${id}" data-katex-display="true"></div>\n\n`
+    })
+
     return s
   }
 

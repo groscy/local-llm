@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
 import type { KnowledgeGraphPayload, OntologyEntityDetails, OntologyQueryRequest, OntologyStats, OntologySubgraphPayload } from '@shared/types'
 import { KnowledgeGraphView } from './KnowledgeGraphView'
 
@@ -26,6 +26,8 @@ export function OntologyView(props: Props): ReactNode {
   const [typeFilter, setTypeFilter] = useState('')
   const [predicateFilter, setPredicateFilter] = useState('')
   const [recentMode, setRecentMode] = useState<'all' | '24h' | '7d'>('all')
+  const [selectionAnchor, setSelectionAnchor] = useState<{ x: number; y: number } | null>(null)
+  const graphCardRef = useRef<HTMLDivElement>(null)
 
   const availableTypes = useMemo(() => {
     if (!data) return [] as string[]
@@ -48,6 +50,8 @@ export function OntologyView(props: Props): ReactNode {
       typeFilters: typeFilter ? [typeFilter] : undefined,
       predicateFilters: predicateFilter ? [predicateFilter] : undefined,
       recentOnlyMs,
+      lodTier: 'mid',
+      maxEdgeDensity: 0.65,
       limitEntities: 130,
       limitTriples: 320,
       maxHops: 2
@@ -128,55 +132,78 @@ export function OntologyView(props: Props): ReactNode {
       </section>
 
       <div className="ontology-main">
-        <div className="ontology-graph card">
+        <div ref={graphCardRef} className="ontology-graph card">
           <KnowledgeGraphView
             hideToolbarTitle
             data={graphData}
             loading={loading}
             onRefresh={onRefresh}
-            onPickSource={(iri) => onSelectEntity(iri)}
+            onInspectNode={({ node, anchorClient }) => {
+              const rect = graphCardRef.current?.getBoundingClientRect()
+              if (rect) {
+                setSelectionAnchor({
+                  x: Math.max(12, Math.min(rect.width - 24, anchorClient.x - rect.left)),
+                  y: Math.max(12, Math.min(rect.height - 24, anchorClient.y - rect.top))
+                })
+              }
+              onSelectEntity(node.id)
+            }}
           />
-        </div>
-        <aside className="ontology-details card">
-          <h3>Entity details</h3>
-          {detailLoading ? <p className="muted">Loading entity details...</p> : null}
-          {!detailLoading && !details?.entity ? <p className="muted">Select a graph node to inspect provenance.</p> : null}
-          {details?.entity ? (
-            <>
-              <p>
-                <strong>{details.entity.label}</strong>
-              </p>
-              <p className="muted">
-                {details.entity.type} - confidence {(details.entity.confidence * 100).toFixed(0)}%
-              </p>
-              <p className="muted ontology-iri">{details.entity.iri}</p>
-              <h4>Outgoing facts</h4>
-              <ul className="ontology-fact-list">
-                {details.outgoing.slice(0, 50).map((edge) => (
-                  <li key={edge.id}>
-                    <span className="ontology-fact-predicate">{predicateLabel(edge.predicateIri)}</span>{' '}
-                    <span>{edge.objectIri ?? edge.objectLiteral ?? '(unknown)'}</span>
-                    <div className="muted ontology-fact-meta">
-                      {edge.sourceType} - {edge.sourceRef}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-              <h4>Incoming facts</h4>
-              <ul className="ontology-fact-list">
-                {details.incoming.slice(0, 50).map((edge) => (
-                  <li key={edge.id}>
-                    <span>{edge.subjectIri}</span>{' '}
-                    <span className="ontology-fact-predicate">{predicateLabel(edge.predicateIri)}</span>
-                    <div className="muted ontology-fact-meta">
-                      {edge.sourceType} - {edge.sourceRef}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </>
+          {!detailLoading && !details?.entity ? (
+            <p className="ontology-overlay-hint muted">Select a graph node to inspect provenance.</p>
           ) : null}
-        </aside>
+          {detailLoading || details?.entity ? (
+            <aside
+              className="ontology-details ontology-details--overlay ontology-details--popover card"
+              style={
+                selectionAnchor
+                  ? ({
+                      left: selectionAnchor.x,
+                      top: selectionAnchor.y
+                    } as const)
+                  : undefined
+              }
+            >
+              <h3>Entity details</h3>
+              {detailLoading ? <p className="muted">Loading entity details...</p> : null}
+              {details?.entity ? (
+                <>
+                  <p>
+                    <strong>{details.entity.label}</strong>
+                  </p>
+                  <p className="muted">
+                    {details.entity.type} - confidence {(details.entity.confidence * 100).toFixed(0)}%
+                  </p>
+                  <p className="muted ontology-iri">{details.entity.iri}</p>
+                  <h4>Outgoing facts</h4>
+                  <ul className="ontology-fact-list">
+                    {details.outgoing.slice(0, 50).map((edge) => (
+                      <li key={edge.id}>
+                        <span className="ontology-fact-predicate">{predicateLabel(edge.predicateIri)}</span>{' '}
+                        <span>{edge.objectIri ?? edge.objectLiteral ?? '(unknown)'}</span>
+                        <div className="muted ontology-fact-meta">
+                          {edge.sourceType} - {edge.sourceRef}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  <h4>Incoming facts</h4>
+                  <ul className="ontology-fact-list">
+                    {details.incoming.slice(0, 50).map((edge) => (
+                      <li key={edge.id}>
+                        <span>{edge.subjectIri}</span>{' '}
+                        <span className="ontology-fact-predicate">{predicateLabel(edge.predicateIri)}</span>
+                        <div className="muted ontology-fact-meta">
+                          {edge.sourceType} - {edge.sourceRef}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
+            </aside>
+          ) : null}
+        </div>
       </div>
     </div>
   )

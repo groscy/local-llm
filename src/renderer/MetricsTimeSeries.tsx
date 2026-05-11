@@ -127,6 +127,39 @@ function areaPath(points: Point[], baseY: number): string {
   return `${pathFromPoints(points)} L ${last.x.toFixed(1)},${baseY} L ${first.x.toFixed(1)},${baseY} Z`
 }
 
+/** Approximate cumulative tokens from sampled runtime token rate (tok/s) over time. */
+function cumulativeTokensFromRate(
+  rates: (number | undefined)[],
+  tsList: number[]
+): (number | undefined)[] {
+  const out: (number | undefined)[] = []
+  let cumulative = 0
+  let started = false
+  for (let i = 0; i < rates.length; i++) {
+    const rate = rates[i]
+    const ts = tsList[i]
+    if (!Number.isFinite(ts)) {
+      out.push(started ? cumulative : undefined)
+      continue
+    }
+    if (rate == null || Number.isNaN(rate)) {
+      out.push(started ? cumulative : undefined)
+      continue
+    }
+    const safeRate = Math.max(0, Number(rate))
+    if (!started) {
+      started = true
+      out.push(0)
+      continue
+    }
+    const prevTs = tsList[i - 1]
+    const dtSec = Number.isFinite(prevTs) ? Math.max(0, (ts - prevTs) / 1000) : 0
+    cumulative += safeRate * dtSec
+    out.push(cumulative)
+  }
+  return out
+}
+
 interface MiniChartProps {
   title: string
   unit: string
@@ -268,6 +301,7 @@ export function MetricsTimeSeries({
   const rss = useMemo(() => chron.map((h) => h.processRssMb), [chron])
   const cpu = useMemo(() => chron.map((h) => h.processCpuPercent), [chron])
   const tok = useMemo(() => chron.map((h) => h.runtimeTokensPerSec), [chron])
+  const cumulativeTok = useMemo(() => cumulativeTokensFromRate(tok, ts), [tok, ts])
   const ctx = useMemo(() => chron.map((h) => h.runtimeCtxUsed), [chron])
   const gpuUsed = useMemo(() => chron.map((h) => h.gpuMemUsedMb), [chron])
   const modelMem = useMemo(() => chron.map((h) => h.modelMemoryMb), [chron])
@@ -281,7 +315,7 @@ export function MetricsTimeSeries({
     [chron]
   )
 
-  const hasTok = tok.some((v) => v !== undefined && v !== null && !Number.isNaN(v))
+  const hasTok = cumulativeTok.some((v) => v !== undefined && v !== null && !Number.isNaN(v))
   const hasCtx = ctx.some((v) => v !== undefined && v !== null && !Number.isNaN(v))
   const hasGpu = gpuUsed.some((v) => v != null && !Number.isNaN(v))
   const hasModelMem = modelMem.some((v) => v != null && !Number.isNaN(v))
@@ -395,12 +429,12 @@ export function MetricsTimeSeries({
       )}
       {hasTok && (
         <MiniChart
-          title={variant === 'drawer' ? 'Runtime tokens / sec' : 'Tok/s'}
-          unit="tok/s"
+          title={variant === 'drawer' ? 'Cumulative tokens used (runtime)' : 'Total tok'}
+          unit="tokens"
           color="var(--chart-line-tok)"
-          values={tok}
+          values={cumulativeTok}
           ts={ts}
-          formatTick={(v) => v.toFixed(1)}
+          formatTick={(v) => v.toFixed(0)}
           timeDomain={timeDomain}
           layout={layout}
           variant={variant}

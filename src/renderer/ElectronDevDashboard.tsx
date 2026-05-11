@@ -1,5 +1,5 @@
 import { useCallback, useState, type ReactElement } from 'react'
-import { IdeDeveloperJourneyView, type IdeDeveloperJourneyViewProps } from './IdeDeveloperJourneyView'
+import type { IdeDeveloperJourneyViewProps } from './IdeDeveloperJourneyView'
 
 export type ElectronDevDashboardProps = IdeDeveloperJourneyViewProps & {
   userDataPath: string | null
@@ -8,6 +8,17 @@ export type ElectronDevDashboardProps = IdeDeveloperJourneyViewProps & {
   onOpenSettingsGeneral: () => void
   /** Toggle IDE HTTP bridge (127.0.0.1); persisted like Settings → Integrations. */
   onBridgeListenChange: (enabled: boolean) => void
+  idePromptMonitor: {
+    modelState: 'idle' | 'processing'
+    requestId: string | null
+    source: string | null
+    startedAt: number | null
+    promptPreview: string
+    generatedResponse: string
+    actions: string[]
+    error: string | null
+    updatedAt: number | null
+  }
 }
 
 export function ElectronDevDashboard(props: ElectronDevDashboardProps): ReactElement {
@@ -32,7 +43,14 @@ export function ElectronDevDashboard(props: ElectronDevDashboardProps): ReactEle
     bridgeEnabled,
     bridgePort,
     tokenConfigured,
-    ...journey
+    runtimeRunning,
+    runtimeKind,
+    onOpenWiki,
+    onOpenModels,
+    onOpenRun,
+    onOpenMetrics,
+    onOpenIntegrations,
+    idePromptMonitor
   } = props
 
   return (
@@ -41,10 +59,17 @@ export function ElectronDevDashboard(props: ElectronDevDashboardProps): ReactEle
         <div className="electron-dev-hero-text">
           <h1 className="electron-dev-hero-title">Developer hub</h1>
           <p className="electron-dev-hero-sub muted">
-            Bridge status, shortcuts, and paths. Full checklist lives below—collapsed by default.
+            Bridge status, runtime health, shortcuts, and local paths in one place.
           </p>
         </div>
-        <div className="electron-dev-hero-aside">
+      </header>
+
+      <section className="electron-dev-live-status" aria-label="Live status">
+        <div className="electron-dev-live-status-head">
+          <h2 className="electron-dev-live-status-title">Live status</h2>
+          <p className="electron-dev-live-status-sub muted">Current bridge and runtime state updates live as this view refreshes.</p>
+        </div>
+        <div className="electron-dev-live-status-body">
           <div className={`electron-dev-hero-status${bridgeEnabled ? ' electron-dev-hero-status--on' : ''}`}>
             <span className="electron-dev-hero-status-dot" aria-hidden />
             <span>{bridgeEnabled ? 'Bridge on' : 'Bridge off'}</span>
@@ -54,7 +79,14 @@ export function ElectronDevDashboard(props: ElectronDevDashboardProps): ReactEle
               {tokenConfigured ? 'Token set' : 'No token'}
             </span>
           </div>
-          <div className="electron-dev-hero-actions">
+          <div className={`electron-dev-hero-status${runtimeRunning ? ' electron-dev-hero-status--on' : ''}`}>
+            <span className="electron-dev-hero-status-dot" aria-hidden />
+            <span>{runtimeRunning ? 'Runtime on' : 'Runtime off'}</span>
+            <span className="electron-dev-hero-status-meta">
+              {runtimeKind || 'unknown'}
+            </span>
+          </div>
+          <div className="electron-dev-hero-actions electron-dev-live-status-actions">
             {bridgeEnabled ? (
               <button
                 type="button"
@@ -70,21 +102,58 @@ export function ElectronDevDashboard(props: ElectronDevDashboardProps): ReactEle
             )}
           </div>
         </div>
-      </header>
+        <div className="electron-dev-model-monitor" role="region" aria-label="IDE prompt monitor">
+          <div className="electron-dev-model-monitor-head">
+            <strong>Model state</strong>
+            <span
+              className={`electron-dev-model-monitor-badge ${
+                idePromptMonitor.modelState === 'processing' ? 'is-processing' : 'is-idle'
+              }`}
+            >
+              {idePromptMonitor.modelState === 'processing' ? 'Processing prompt' : 'Idle'}
+            </span>
+            {idePromptMonitor.source ? <span className="muted">Source: {idePromptMonitor.source}</span> : null}
+          </div>
+          {idePromptMonitor.promptPreview ? (
+            <p className="electron-dev-model-monitor-prompt">
+              <span className="muted">Prompt:</span> {idePromptMonitor.promptPreview}
+            </p>
+          ) : null}
+          {idePromptMonitor.error ? (
+            <p className="electron-dev-model-monitor-error">{idePromptMonitor.error}</p>
+          ) : (
+            <pre className="electron-dev-model-monitor-response">
+              {idePromptMonitor.generatedResponse.trim() || 'No generated response yet.'}
+            </pre>
+          )}
+          <div className="electron-dev-model-monitor-actions">
+            <div className="muted">IDE plugin actions</div>
+            {idePromptMonitor.actions.length === 0 ? (
+              <div className="muted">No actions reported yet.</div>
+            ) : (
+              <ul>
+                {idePromptMonitor.actions.map((line, idx) => (
+                  <li key={`${idx}-${line.slice(0, 32)}`}>{line}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </section>
 
       <div className="electron-dev-grid">
         <section className="electron-dev-panel" aria-label="Quick actions">
           <h2 className="electron-dev-panel-title">Open</h2>
           <div className="electron-dev-tiles">
-            <button type="button" className="electron-dev-tile" onClick={() => journey.onOpenWiki()}>
+            <button type="button" className="electron-dev-tile" onClick={() => onOpenWiki()}>
               <i className="fa-solid fa-book electron-dev-tile-icon" aria-hidden />
               <span className="electron-dev-tile-label">Wiki</span>
             </button>
-            <button type="button" className="electron-dev-tile" onClick={() => journey.onOpenModels()}>
+            <button type="button" className="electron-dev-tile" onClick={() => onOpenModels()}>
               <i className="fa-solid fa-box electron-dev-tile-icon" aria-hidden />
               <span className="electron-dev-tile-label">Models</span>
             </button>
-            <button type="button" className="electron-dev-tile" onClick={() => journey.onOpenRun()}>
+            <button type="button" className="electron-dev-tile" onClick={() => onOpenRun()}>
               <i className="fa-solid fa-microchip electron-dev-tile-icon" aria-hidden />
               <span className="electron-dev-tile-label">Run</span>
             </button>
@@ -92,11 +161,11 @@ export function ElectronDevDashboard(props: ElectronDevDashboardProps): ReactEle
               <i className="fa-solid fa-flask electron-dev-tile-icon" aria-hidden />
               <span className="electron-dev-tile-label">Train</span>
             </button>
-            <button type="button" className="electron-dev-tile" onClick={() => journey.onOpenMetrics()}>
+            <button type="button" className="electron-dev-tile" onClick={() => onOpenMetrics()}>
               <i className="fa-solid fa-chart-line electron-dev-tile-icon" aria-hidden />
-              <span className="electron-dev-tile-label">Stats</span>
+              <span className="electron-dev-tile-label">Metrics</span>
             </button>
-            <button type="button" className="electron-dev-tile" onClick={() => journey.onOpenIntegrations()}>
+            <button type="button" className="electron-dev-tile" onClick={() => onOpenIntegrations()}>
               <i className="fa-solid fa-plug electron-dev-tile-icon" aria-hidden />
               <span className="electron-dev-tile-label">Integrations</span>
             </button>
@@ -120,19 +189,6 @@ export function ElectronDevDashboard(props: ElectronDevDashboardProps): ReactEle
           {pathNote ? <p className="electron-dev-path-note">{pathNote}</p> : null}
         </section>
       </div>
-
-      <details className="electron-dev-journey-details">
-        <summary className="electron-dev-journey-summary">IntelliJ journey, API notes, and bridge tests</summary>
-        <div className="electron-dev-journey-body">
-          <IdeDeveloperJourneyView
-            {...journey}
-            bridgeEnabled={bridgeEnabled}
-            bridgePort={bridgePort}
-            tokenConfigured={tokenConfigured}
-            showOpenChatShortcut={false}
-          />
-        </div>
-      </details>
     </div>
   )
 }
