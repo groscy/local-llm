@@ -377,33 +377,51 @@ jobs:
             exit 1
           fi
 
-          has_linux=0
-          has_windows=0
-          has_macos=0
+          has_linux_pkg=0
+          has_linux_zip=0
+          has_windows_pkg=0
+          has_windows_zip=0
+          has_macos_pkg=0
+          has_macos_zip=0
 
           for a in "${assets[@]}"; do
             case "$a" in
-              *.AppImage|*.deb|*.pkg.tar.*|*.pacman) has_linux=1 ;;
+              *.AppImage|*.deb|*.pkg.tar.*|*.pacman) has_linux_pkg=1 ;;
+              *-linux-*.zip) has_linux_zip=1 ;;
             esac
             case "$a" in
-              *.exe) has_windows=1 ;;
+              *.exe) has_windows_pkg=1 ;;
+              *-win-*.zip) has_windows_zip=1 ;;
             esac
             case "$a" in
-              *.dmg) has_macos=1 ;;
+              *.dmg) has_macos_pkg=1 ;;
+              *-mac-*.zip) has_macos_zip=1 ;;
             esac
           done
 
-          if [ "$has_linux" -ne 1 ]; then
+          if [ "$has_linux_pkg" -ne 1 ]; then
             echo "Missing Linux release assets on ${RELEASE_TAG}."
             exit 1
           fi
-          if [ "$has_windows" -ne 1 ]; then
+          if [ "$has_linux_zip" -ne 1 ]; then
+            echo "Missing Linux ZIP release asset on ${RELEASE_TAG}."
+            exit 1
+          fi
+          if [ "$has_windows_pkg" -ne 1 ]; then
             echo "Missing Windows release assets on ${RELEASE_TAG}."
             exit 1
           fi
-          if [ "$has_macos" -ne 1 ]; then
+          if [ "$has_windows_zip" -ne 1 ]; then
+            echo "Missing Windows ZIP release asset on ${RELEASE_TAG}."
+            exit 1
+          fi
+          if [ "$has_macos_pkg" -ne 1 ]; then
             echo "Missing macOS release assets on ${RELEASE_TAG}."
             exit 1
           fi
+          if [ "$has_macos_zip" -ne 1 ]; then
+            echo "Missing macOS ZIP release asset on ${RELEASE_TAG}."
+            exit 1
+          fi
 
-          echo "Release ${RELEASE_TAG} contains Linux, Windows, and macOS assets."
+          echo "Release ${RELEASE_TAG} contains Linux/Windows/macOS packages and ZIP assets."
