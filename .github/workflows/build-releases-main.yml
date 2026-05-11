@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 concurrency:
   group: build-releases-master-${{ github.ref }}
@@ -148,6 +149,34 @@ jobs:
           fi
           gh release upload "${{ needs.prepare_release.outputs.release_tag }}" "${files[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
 
+      - name: Setup ORAS (GitHub Packages publish)
+        uses: oras-project/setup-oras@v1
+
+      - name: Publish Linux bundle to GitHub Packages (GHCR)
+        env:
+          ORAS_USER: ${{ github.actor }}
+          ORAS_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(
+            release/*.deb
+            release/*.AppImage
+            release/*.zip
+            release/*.pkg.tar.*
+            release/*.pacman
+            release/*.yml
+            integrations/intellij-plugin/build/distributions/local-llm-intellij-*.zip
+          )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No Linux files to publish to GHCR"
+            exit 1
+          fi
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          ref="ghcr.io/${owner}/local-llm-desktop-releases:${{ needs.prepare_release.outputs.release_tag }}-linux"
+          echo "${ORAS_PASSWORD}" | oras login ghcr.io -u "${ORAS_USER}" --password-stdin
+          oras push "${ref}" "${files[@]}"
+
   windows:
     needs: prepare_release
     runs-on: windows-latest
@@ -212,6 +241,25 @@ jobs:
           }
           $paths = $files | ForEach-Object { $_.FullName }
           gh release upload "${{ needs.prepare_release.outputs.release_tag }}" @paths --clobber --repo $env:GITHUB_REPOSITORY
+
+      - name: Setup ORAS (GitHub Packages publish)
+        uses: oras-project/setup-oras@v1
+
+      - name: Publish Windows bundle to GitHub Packages (GHCR)
+        env:
+          ORAS_USER: ${{ github.actor }}
+          ORAS_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path release -File | Where-Object { $_.Extension -in @('.exe', '.zip', '.yml') }
+          if (-not $files -or $files.Count -eq 0) {
+            throw "No Windows files to publish to GHCR"
+          }
+          $paths = $files | ForEach-Object { $_.FullName }
+          $owner = $env:GITHUB_REPOSITORY_OWNER.ToLowerInvariant()
+          $ref = "ghcr.io/$owner/local-llm-desktop-releases:${{ needs.prepare_release.outputs.release_tag }}-windows"
+          $env:ORAS_PASSWORD | oras login ghcr.io -u $env:ORAS_USER --password-stdin
+          oras push $ref @paths
 
   macos:
     needs: prepare_release
@@ -282,6 +330,30 @@ jobs:
             exit 1
           fi
           gh release upload "${{ needs.prepare_release.outputs.release_tag }}" "${files[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+
+      - name: Setup ORAS (GitHub Packages publish)
+        uses: oras-project/setup-oras@v1
+
+      - name: Publish macOS bundle to GitHub Packages (GHCR)
+        env:
+          ORAS_USER: ${{ github.actor }}
+          ORAS_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(
+            release/*.dmg
+            release/*.zip
+            release/*.yml
+          )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No macOS files to publish to GHCR"
+            exit 1
+          fi
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          ref="ghcr.io/${owner}/local-llm-desktop-releases:${{ needs.prepare_release.outputs.release_tag }}-macos"
+          echo "${ORAS_PASSWORD}" | oras login ghcr.io -u "${ORAS_USER}" --password-stdin
+          oras push "${ref}" "${files[@]}"
 
   verify_release_assets:
     needs:
