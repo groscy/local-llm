@@ -239,7 +239,7 @@ jobs:
           if (-not $files -or $files.Count -eq 0) {
             throw "No Windows files to upload"
           }
-          $paths = $files | ForEach-Object { $_.FullName }
+          $paths = $files | ForEach-Object { Join-Path 'release' $_.Name }
           gh release upload "${{ needs.prepare_release.outputs.release_tag }}" @paths --clobber --repo $env:GITHUB_REPOSITORY
 
       - name: Setup ORAS (GitHub Packages publish)
@@ -255,7 +255,7 @@ jobs:
           if (-not $files -or $files.Count -eq 0) {
             throw "No Windows files to publish to GHCR"
           }
-          $paths = $files | ForEach-Object { $_.FullName }
+          $paths = $files | ForEach-Object { Join-Path 'release' $_.Name }
           $owner = $env:GITHUB_REPOSITORY_OWNER.ToLowerInvariant()
           $ref = "ghcr.io/$owner/local-llm-desktop-releases:${{ needs.prepare_release.outputs.release_tag }}-windows"
           $env:ORAS_PASSWORD | oras login ghcr.io -u $env:ORAS_USER --password-stdin
