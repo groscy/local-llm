@@ -6,6 +6,7 @@ package com.localllm.intellij
  * Contract (must stay aligned with [src/main/services/integrationServer.ts] in the desktop app):
  * - [fetchHealth]: `GET /health` — no auth; reachability + `runtimeRunning` / `runtimeKind` snapshot.
  * - [chat]: `POST /v1/chat` — optional `Authorization: Bearer <token>` when the app has a token set.
+ * - [submitJob]/[fetchJobStatus]/[fetchJobResult]/[cancelJob]: async background workflow over `/v1/jobs`.
  * - [postPluginReport]: `POST /v1/plugin/report` — same auth as chat; `kind` must match the desktop Zod enum (see [PluginReportKind]).
  * - [fetchRuntimeStatus]: `GET /v1/runtime/status` — same auth as chat; optional richer model info for the IDE UI.
  *
@@ -34,6 +35,28 @@ object LocalLlmHttpClient {
 
     /** Result of POST /v1/chat (desktop integration server). */
     data class ChatCompletion(
+        val reply: String,
+        val promptTokens: Int? = null,
+        val completionTokens: Int? = null
+    )
+
+    data class JobSubmitted(
+        val jobId: String,
+        val status: String,
+        val progress: String?
+    )
+
+    data class JobStatus(
+        val jobId: String,
+        val status: String,
+        val progress: String?,
+        val error: String?,
+        val hasResult: Boolean
+    )
+
+    data class JobResult(
+        val jobId: String,
+        val status: String,
         val reply: String,
         val promptTokens: Int? = null,
         val completionTokens: Int? = null
@@ -289,6 +312,76 @@ object LocalLlmHttpClient {
     fun chat(port: Int, token: String, messages: List<ChatMessage>): ChatCompletion =
         chat(port, token, messages, maxTokens = null, requestTimeout = Duration.ofMinutes(15))
 
+    fun submitJob(
+        port: Int,
+        token: String,
+        messages: List<ChatMessage>,
+        maxTokens: Int? = null,
+        projectName: String? = null,
+        projectBasePath: String? = null
+    ): JobSubmitted {
+        val body = buildJobSubmitJson(messages, maxTokens, projectName, projectBasePath)
+        val uri = URI.create("http://127.0.0.1:$port/v1/jobs")
+        val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build()
+        val rb = HttpRequest.newBuilder(uri)
+            .timeout(Duration.ofSeconds(45))
+            .header("Content-Type", "application/json; charset=utf-8")
+        if (token.isNotBlank()) rb.header("Authorization", "Bearer $token")
+        val req = rb.POST(HttpRequest.BodyPublishers.ofString(body)).build()
+        val res = client.send(req, HttpResponse.BodyHandlers.ofString())
+        if (res.statusCode() / 100 != 2) throw LocalLlmHttpException(res.statusCode(), res.body())
+        val raw = res.body()
+        val jobId = extractJsonStringField(raw, "jobId")
+            ?: throw IllegalStateException("Bridge did not return jobId")
+        val status = extractJsonStringField(raw, "status") ?: "queued"
+        val progress = extractJsonStringField(raw, "progress")
+        return JobSubmitted(jobId = jobId, status = status, progress = progress)
+    }
+
+    fun fetchJobStatus(port: Int, token: String, jobId: String): JobStatus {
+        val uri = URI.create("http://127.0.0.1:$port/v1/jobs/${urlEncodePath(jobId)}")
+        val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).build()
+        val rb = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(12)).GET()
+        if (token.isNotBlank()) rb.header("Authorization", "Bearer $token")
+        val res = client.send(rb.build(), HttpResponse.BodyHandlers.ofString())
+        if (res.statusCode() / 100 != 2) throw LocalLlmHttpException(res.statusCode(), res.body())
+        val raw = res.body()
+        return JobStatus(
+            jobId = extractJsonStringField(raw, "jobId") ?: jobId,
+            status = extractJsonStringField(raw, "status") ?: "unknown",
+            progress = extractJsonStringField(raw, "progress"),
+            error = extractJsonStringField(raw, "error"),
+            hasResult = extractJsonBooleanField(raw, "hasResult") ?: false
+        )
+    }
+
+    fun fetchJobResult(port: Int, token: String, jobId: String): JobResult {
+        val uri = URI.create("http://127.0.0.1:$port/v1/jobs/${urlEncodePath(jobId)}/result")
+        val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).build()
+        val rb = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(30)).GET()
+        if (token.isNotBlank()) rb.header("Authorization", "Bearer $token")
+        val res = client.send(rb.build(), HttpResponse.BodyHandlers.ofString())
+        if (res.statusCode() / 100 != 2) throw LocalLlmHttpException(res.statusCode(), res.body())
+        val raw = res.body()
+        val resultJson = extractJsonObjectField(raw, "result") ?: raw
+        return JobResult(
+            jobId = extractJsonStringField(raw, "jobId") ?: jobId,
+            status = extractJsonStringField(raw, "status") ?: "completed",
+            reply = extractReply(resultJson) ?: resultJson,
+            promptTokens = extractJsonIntField(resultJson, "promptTokens"),
+            completionTokens = extractJsonIntField(resultJson, "completionTokens")
+        )
+    }
+
+    fun cancelJob(port: Int, token: String, jobId: String) {
+        val uri = URI.create("http://127.0.0.1:$port/v1/jobs/${urlEncodePath(jobId)}/cancel")
+        val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).build()
+        val rb = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10))
+        if (token.isNotBlank()) rb.header("Authorization", "Bearer $token")
+        val res = client.send(rb.POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString())
+        if (res.statusCode() / 100 != 2) throw LocalLlmHttpException(res.statusCode(), res.body())
+    }
+
     /**
      * @param maxTokens when set, sent as `maxTokens` in the JSON body so the desktop app can cap completion length
      * (e.g. inline IDE suggestions) without changing global chat settings.
@@ -335,6 +428,67 @@ object LocalLlmHttpClient {
         val maxPart = if (maxTokens != null) ""","maxTokens":${maxTokens.coerceIn(1, 262_144)}""" else ""
         return """{"messages":[$parts]$maxPart}"""
     }
+
+    private fun buildJobSubmitJson(
+        messages: List<ChatMessage>,
+        maxTokens: Int?,
+        projectName: String?,
+        projectBasePath: String?
+    ): String {
+        val parts = messages.joinToString(",") { m ->
+            """{"role":${jsonString(m.role)},"content":${jsonString(m.content)}}"""
+        }
+        val maxPart = if (maxTokens != null) ""","maxTokens":${maxTokens.coerceIn(1, 262_144)}""" else ""
+        val context = buildString {
+            append("\"context\":{\"source\":\"intellij-plugin\"")
+            if (!projectName.isNullOrBlank()) append(""","projectName":${jsonString(projectName)}""")
+            if (!projectBasePath.isNullOrBlank()) append(""","projectBasePath":${jsonString(projectBasePath)}""")
+            append("}")
+        }
+        return """{"messages":[$parts]$maxPart,$context}"""
+    }
+
+    private fun extractJsonBooleanField(json: String, field: String): Boolean? {
+        val m = Regex(""""$field"\s*:\s*(true|false)""").find(json) ?: return null
+        return m.groupValues[1] == "true"
+    }
+
+    private fun extractJsonObjectField(json: String, field: String): String? {
+        val key = "\"$field\""
+        val keyIdx = json.indexOf(key)
+        if (keyIdx < 0) return null
+        val colon = json.indexOf(':', keyIdx)
+        if (colon < 0) return null
+        var i = colon + 1
+        while (i < json.length && json[i].isWhitespace()) i++
+        if (i >= json.length || json[i] != '{') return null
+        val start = i
+        var depth = 0
+        var inString = false
+        var escaped = false
+        while (i < json.length) {
+            val c = json[i]
+            if (inString) {
+                if (escaped) escaped = false
+                else if (c == '\\') escaped = true
+                else if (c == '"') inString = false
+            } else {
+                if (c == '"') inString = true
+                else if (c == '{') depth++
+                else if (c == '}') {
+                    depth--
+                    if (depth == 0) {
+                        return json.substring(start, i + 1)
+                    }
+                }
+            }
+            i++
+        }
+        return null
+    }
+
+    private fun urlEncodePath(raw: String): String =
+        java.net.URLEncoder.encode(raw, Charsets.UTF_8).replace("+", "%20")
 
     private fun jsonString(s: String): String {
         val sb = StringBuilder("\"")

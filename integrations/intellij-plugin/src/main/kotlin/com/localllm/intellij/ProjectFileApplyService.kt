@@ -2,11 +2,13 @@ package com.localllm.intellij
 
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.psi.PsiDocumentManager
 import java.nio.charset.StandardCharsets
+import java.nio.file.LinkOption
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -18,6 +20,7 @@ import java.nio.file.Paths
  * Call from [com.intellij.openapi.command.WriteCommandAction] on the EDT.
  */
 object ProjectFileApplyService {
+    private const val MAX_TEXT_FILE_BYTES = 1_500_000L
 
     data class ApplyResult(val path: String, val ok: Boolean, val message: String)
 
@@ -31,17 +34,26 @@ object ProjectFileApplyService {
                     results.add(applyOne(project, base, StructuredApplyParser.FileBlock(e.path, e.content)))
                 is StructuredApplyParser.StructuredEdit.Patch ->
                     results.add(applyPatch(project, base, e))
+                is StructuredApplyParser.StructuredEdit.DeleteFile ->
+                    results.add(applyDelete(project, base, e.path))
             }
         }
         return results
     }
 
     fun resolveUnderProject(basePath: String, relativePath: String): Path? {
-        val base = Paths.get(basePath).normalize()
+        val baseRaw = Paths.get(basePath)
+        val base = try {
+            if (Files.exists(baseRaw)) baseRaw.toRealPath(LinkOption.NOFOLLOW_LINKS) else baseRaw.toAbsolutePath().normalize()
+        } catch (_: Exception) {
+            baseRaw.toAbsolutePath().normalize()
+        }
         val rel = relativePath.trim().replace('\\', '/').trimStart('/')
         if (rel.isEmpty() || rel.contains("..")) return null
+        if (rel.split('/').any { it.isBlank() || it == "." || it == ".." }) return null
         val target = base.resolve(rel).normalize()
         if (!target.startsWith(base)) return null
+        if (containsSymlinkInPath(base, target)) return null
         return target
     }
 
@@ -79,6 +91,8 @@ object ProjectFileApplyService {
     private fun applyPatch(project: Project, basePath: String, patch: StructuredApplyParser.StructuredEdit.Patch): ApplyResult {
         val target = resolveUnderProject(basePath, patch.path)
             ?: return ApplyResult(patch.path, false, "Invalid or unsafe path (must be under project root)")
+        val guard = validateTargetForReadPatch(target)
+        if (guard != null) return ApplyResult(patch.path, false, guard)
         if (!Files.exists(target)) {
             return ApplyResult(
                 patch.path,
@@ -163,6 +177,8 @@ object ProjectFileApplyService {
     private fun applyOne(project: Project, basePath: String, block: StructuredApplyParser.FileBlock): ApplyResult {
         val target = resolveUnderProject(basePath, block.path)
             ?: return ApplyResult(block.path, false, "Invalid or unsafe path (must be under project root)")
+        val guard = validateTargetForWrite(target, block.content)
+        if (guard != null) return ApplyResult(block.path, false, guard)
         return try {
             Files.createDirectories(target.parent)
             val preExisted = Files.exists(target)
@@ -187,5 +203,84 @@ object ProjectFileApplyService {
         } catch (e: Exception) {
             ApplyResult(block.path, false, e.message ?: e.toString())
         }
+    }
+
+    private fun applyDelete(project: Project, basePath: String, path: String): ApplyResult {
+        val target = resolveUnderProject(basePath, path)
+            ?: return ApplyResult(path, false, "Invalid or unsafe path (must be under project root)")
+        val guard = validateDeleteTarget(target)
+        if (guard != null) return ApplyResult(path, false, guard)
+        return try {
+            if (!Files.exists(target)) {
+                return ApplyResult(path, false, "File does not exist")
+            }
+            if (!Files.isRegularFile(target)) {
+                return ApplyResult(path, false, "Path is not a regular file")
+            }
+            val vf = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(target.toFile())
+            if (vf != null) {
+                FileEditorManager.getInstance(project).closeFile(vf)
+                vf.delete(project)
+            } else {
+                Files.delete(target)
+            }
+            ApplyResult(path, true, "Deleted")
+        } catch (e: Exception) {
+            ApplyResult(path, false, e.message ?: e.toString())
+        }
+    }
+
+    private fun validateTargetForWrite(target: Path, content: String): String? {
+        val bytes = content.toByteArray(StandardCharsets.UTF_8).size.toLong()
+        if (bytes > MAX_TEXT_FILE_BYTES) {
+            return "Refusing to write very large file (${bytes} bytes > $MAX_TEXT_FILE_BYTES)"
+        }
+        if (content.indexOf('\u0000') >= 0) {
+            return "Refusing to write binary-like content (NUL byte found)"
+        }
+        val parent = target.parent ?: return "Invalid path"
+        if (containsSymlinkInPath(parent, parent)) return "Refusing to write through symlinked parent path"
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(target)) {
+            return "Refusing to overwrite symlink"
+        }
+        return null
+    }
+
+    private fun validateTargetForReadPatch(target: Path): String? {
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(target)) {
+            return "Refusing to patch symlink"
+        }
+        if (Files.exists(target) && Files.size(target) > MAX_TEXT_FILE_BYTES) {
+            return "Refusing to patch large file (> $MAX_TEXT_FILE_BYTES bytes)"
+        }
+        if (Files.exists(target) && isBinaryFile(target)) {
+            return "Refusing to patch binary file"
+        }
+        return null
+    }
+
+    private fun validateDeleteTarget(target: Path): String? {
+        if (Files.exists(target, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(target)) {
+            return "Refusing to delete symlink"
+        }
+        return null
+    }
+
+    private fun containsSymlinkInPath(base: Path, target: Path): Boolean {
+        val baseNorm = base.toAbsolutePath().normalize()
+        val targetNorm = target.toAbsolutePath().normalize()
+        var cur: Path? = targetNorm
+        while (cur != null && cur.startsWith(baseNorm)) {
+            if (Files.exists(cur, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(cur)) return true
+            if (cur == baseNorm) break
+            cur = cur.parent
+        }
+        return false
+    }
+
+    private fun isBinaryFile(path: Path): Boolean {
+        if (!Files.exists(path)) return false
+        val bytes = Files.readAllBytes(path).take(4096)
+        return bytes.any { it.toInt() == 0 }
     }
 }

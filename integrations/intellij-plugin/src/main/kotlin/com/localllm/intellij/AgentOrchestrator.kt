@@ -43,10 +43,11 @@ object AgentOrchestrator {
                 indicator.checkCanceled()
                 if (System.currentTimeMillis() > deadline) {
                     stopReason = "time_budget"
-                    onLog("(Agent stopped: time budget exceeded.)\n\n")
+                    onLog("Agent stopped: time budget exceeded")
                     break@agentLoop
                 }
                 indicator.text = "Agent step ${stepCounter.get()}/$DEFAULT_MAX_STEPS…"
+                onLog("Agent step ${stepCounter.get()} of $DEFAULT_MAX_STEPS")
 
                 var parsed: AgentJsonProtocol.Parsed = AgentJsonProtocol.Parsed.Invalid("no reply")
                 var rawReply = ""
@@ -56,13 +57,13 @@ object AgentOrchestrator {
                         LocalLlmHttpClient.chat(port, token, messages)
                     } catch (e: LocalLlmHttpClient.LocalLlmHttpException) {
                         notifyDesktop(PluginReportKind.CHAT_FAILED, "HTTP ${e.status}", mapOf("project" to project.name))
-                        onLog("HTTP ${e.status}: ${e.body.take(400)}\n\n")
+                        onLog("Agent request failed: HTTP ${e.status}")
                         stopReason = "http_error"
                         onFinished(false)
                         return
                     } catch (e: IOException) {
                         notifyDesktop(PluginReportKind.CHAT_FAILED, e.message?.take(200), mapOf("project" to project.name))
-                        onLog("Network: ${e.message}\n\n")
+                        onLog("Agent connection failed")
                         stopReason = "io_error"
                         onFinished(false)
                         return
@@ -72,7 +73,7 @@ object AgentOrchestrator {
                     if (parsed !is AgentJsonProtocol.Parsed.Invalid) break@parseRetry
                     if (attempt == MAX_PARSE_RETRIES) break@parseRetry
                     val err = (parsed as AgentJsonProtocol.Parsed.Invalid).reason
-                    onLog("(Agent: invalid JSON — retrying once: $err)\n\n")
+                    onLog("Agent response invalid; retrying once")
                     messages.add(LocalLlmHttpClient.ChatMessage("assistant", rawReply))
                     messages.add(
                         LocalLlmHttpClient.ChatMessage(
@@ -84,15 +85,12 @@ object AgentOrchestrator {
 
                 when (parsed) {
                     is AgentJsonProtocol.Parsed.Invalid -> {
-                        onLog("(Agent stopped: ${parsed.reason})\n\n")
+                        onLog("Agent stopped: ${parsed.reason}")
                         stopReason = "parse_error"
                         break@agentLoop
                     }
                     is AgentJsonProtocol.Parsed.Done -> {
-                        onLog("Agent done: ${parsed.summary}\n\n")
-                        if (parsed.finalReply.isNotBlank()) {
-                            onLog("${parsed.finalReply}\n\n")
-                        }
+                        onLog("Agent completed")
                         stopReason = "done"
                         val replyForApply = parsed.finalReply.ifBlank { rawReply }
                         finishAgent(
@@ -111,20 +109,13 @@ object AgentOrchestrator {
                     }
                     is AgentJsonProtocol.Parsed.ToolCalls -> {
                         messages.add(LocalLlmHttpClient.ChatMessage("assistant", rawReply))
-                        onLog("Agent tools: ${parsed.calls.joinToString { it.name }}\n")
+                        onLog("Running tools: ${parsed.calls.joinToString { it.name }}")
 
                         val results = runReadAction<List<Pair<AgentJsonProtocol.ToolCall, String>>> {
                             parsed.calls.map { call ->
                                 call to AgentToolRegistry.execute(project, call.name, call.args)
                             }
                         }
-
-                        for ((call, out) in results) {
-                            val preview = if (out.length > 6000) out.take(6000) + "\n… [truncated]" else out
-                            val first = preview.lineSequence().firstOrNull()?.take(120).orEmpty()
-                            onLog("  · ${call.name}: $first… (${out.length} chars)\n")
-                        }
-                        onLog("\n")
 
                         notifyDesktop(
                             PluginReportKind.AGENT_STEP,
@@ -143,7 +134,7 @@ object AgentOrchestrator {
             }
             if (stepCounter.get() > DEFAULT_MAX_STEPS) {
                 stopReason = "max_steps"
-                onLog("(Agent stopped: max steps $DEFAULT_MAX_STEPS.)\n\n")
+                onLog("Agent stopped: max steps reached")
             }
             notifyDesktop(
                 PluginReportKind.AGENT_STOP,
@@ -161,7 +152,7 @@ object AgentOrchestrator {
             onFinished(stopReason == "done")
         } catch (_: ProcessCanceledException) {
             notifyDesktop(PluginReportKind.SEND_CANCELLED, "agent_cancelled", mapOf("project" to project.name))
-            onLog("(Agent cancelled.)\n\n")
+            onLog("Agent cancelled")
             onFinished(false)
         }
     }
@@ -189,7 +180,11 @@ object AgentOrchestrator {
                 modelReply = replyForApply,
                 referencedFiles = referencedFiles,
                 appendTranscript = onLog,
-                appendTranscriptSection = { title, body -> onLog("$title\n$body\n\n") },
+                appendTranscriptSection = { _, body ->
+                    val ok = Regex("""^\s*✓\s""", RegexOption.MULTILINE).findAll(body).count()
+                    val fail = Regex("""^\s*✗\s""", RegexOption.MULTILINE).findAll(body).count()
+                    onLog("Apply finished: $ok ok, $fail failed")
+                },
                 notifyDesktop = notifyDesktop,
                 onComplete = {
                     notifyDesktop(
