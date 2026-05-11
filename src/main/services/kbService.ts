@@ -2,11 +2,14 @@ import { randomUUID } from 'crypto'
 import { createWriteStream, readFileSync } from 'fs'
 import { extractPdfTextWithDiagnostics, isPdfFilePath } from './pdfIngest'
 import { finished } from 'stream/promises'
+import { resolve } from 'path'
 import archiver from 'archiver'
 import type Database from 'better-sqlite3'
 import { composeWikiReadModel } from './wikiComposer'
 import { analyzeSourceDomains } from './domainAnalysisService'
 import { retrieveChunks, retrieveKbHits } from './retrievalService'
+import { runArticleCleanup, type ArticleCleanupProgress } from './articleCleanupService'
+import type { RuntimeAdapter } from './runtime/types'
 import { extractWikiGlossary, stripWikiControlMarkers, WIKI_REFERENCE_SECTION_MARKDOWN } from '@shared/wikiArticleExtras'
 import { wikiKindFromUri } from '@shared/wikiSourceGroups'
 import type {
@@ -17,6 +20,8 @@ import type {
   KbImportConfidence,
   KbIngestFileProgress,
   KbIngestJobSummary,
+  KbDomainOption,
+  KbSourceDomainUpdateResult,
   KbSearchHit,
   KbSource,
   KnowledgeGraphEdge,
@@ -25,6 +30,7 @@ import type {
   WikiChatHighlightTerm,
   WikiExtractArticleRequest,
   WikiExtractArticleResult,
+  WikiArticleCleanupResult,
   WikiKeywordCandidate,
   WikiPassageSummary,
   WikiPagePayload,
@@ -80,6 +86,30 @@ function hasWikiEntryTables(db: Database.Database): boolean {
   )
 }
 
+function canonicalizeFilePathForLookup(pathLike: string): string {
+  const raw = pathLike.replace(/^file:\/\//i, '')
+  let resolved = raw
+  try {
+    resolved = resolve(raw)
+  } catch {
+    resolved = raw
+  }
+  const normalized = resolved.replace(/\\/g, '/')
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+function findExistingFileSource(db: Database.Database, filePath: string): KbSource | undefined {
+  const target = canonicalizeFilePathForLookup(filePath)
+  const rows = db
+    .prepare(
+      `SELECT id, title, uri, created_at as createdAt, conversation_id as conversationId
+       FROM kb_sources
+       WHERE uri LIKE 'file://%'`
+    )
+    .all() as KbSource[]
+  return rows.find((row) => canonicalizeFilePathForLookup(row.uri) === target)
+}
+
 function upsertIngestJob(
   db: Database.Database,
   args: {
@@ -131,6 +161,82 @@ export function listIngestJobs(db: Database.Database, limit = 40): KbIngestJobSu
     .all(Math.max(1, Math.min(limit, 400))) as KbIngestJobSummary[]
 }
 
+export function listKnowledgeDomains(db: Database.Database, limit = 120): KbDomainOption[] {
+  if (!tableExists(db, 'kb_domains')) return []
+  return db
+    .prepare(
+      `SELECT id, slug, title, source_count as sourceCount
+       FROM kb_domains
+       ORDER BY source_count DESC, updated_at DESC
+       LIMIT ?`
+    )
+    .all(Math.max(1, Math.min(limit, 500))) as KbDomainOption[]
+}
+
+export function setSourceDomain(
+  db: Database.Database,
+  args: { sourceId: string; domainTitle: string }
+): KbSourceDomainUpdateResult {
+  if (!tableExists(db, 'kb_domain_membership') || !tableExists(db, 'kb_domains')) {
+    throw new Error('Domain tables are unavailable. Restart after migrations are applied.')
+  }
+  const sourceId = args.sourceId.trim()
+  const domainTitle = args.domainTitle.replace(/\s+/g, ' ').trim()
+  if (!sourceId) throw new Error('sourceId is required')
+  if (!domainTitle) throw new Error('domainTitle is required')
+  const src = db.prepare('SELECT id FROM kb_sources WHERE id = ? LIMIT 1').get(sourceId) as { id: string } | undefined
+  if (!src) throw new Error('source not found')
+  const slug = slugifyDomainTitle(domainTitle) || 'general-domain'
+  const now = Date.now()
+  const tx = db.transaction(() => {
+    const previous = db
+      .prepare('SELECT domain_id as domainId FROM kb_domain_membership WHERE source_id = ?')
+      .all(sourceId) as Array<{ domainId: string }>
+    const existing = db
+      .prepare('SELECT id, title FROM kb_domains WHERE slug = ? LIMIT 1')
+      .get(slug) as { id: string; title: string } | undefined
+    const domainId = existing?.id ?? randomUUID()
+    db.prepare(
+      `INSERT INTO kb_domains (id, slug, title, summary, confidence, centroid_terms_json, source_count, updated_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(slug) DO UPDATE SET
+         title = excluded.title,
+         updated_at = excluded.updated_at`
+    ).run(
+      domainId,
+      slug,
+      domainTitle,
+      `Manually assigned domain: ${domainTitle}`,
+      0.92,
+      JSON.stringify([]),
+      0,
+      now,
+      now
+    )
+    db.prepare('DELETE FROM kb_domain_membership WHERE source_id = ?').run(sourceId)
+    db.prepare(
+      `INSERT INTO kb_domain_membership (source_id, domain_id, confidence, rationale, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(sourceId, domainId, 0.98, 'Manual domain assignment by user.', now, now)
+    const affected = new Set<string>([domainId, ...previous.map((p) => p.domainId)])
+    const refreshCount = db.prepare(
+      `UPDATE kb_domains
+       SET source_count = (SELECT COUNT(*) FROM kb_domain_membership WHERE domain_id = kb_domains.id),
+           updated_at = ?
+       WHERE id = ?`
+    )
+    for (const id of affected) refreshCount.run(now, id)
+    return { domainId, domainTitle }
+  })
+  const out = tx()
+  return {
+    ok: true,
+    sourceId,
+    domainId: out.domainId,
+    domainTitle: out.domainTitle
+  }
+}
+
 export function normalizeWikiKeyword(raw: string): string {
   return raw
     .toLowerCase()
@@ -139,6 +245,16 @@ export function normalizeWikiKeyword(raw: string): string {
     .replace(/[^a-z0-9\s-]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+function slugifyDomainTitle(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[`"'“”‘’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 72)
 }
 
 function titleCaseKeyword(keyword: string): string {
@@ -215,9 +331,13 @@ type ChunkDraft = { text: string; heading?: string; anchor: string; passageTitle
 type IngestDocumentInput = {
   title: string
   uri: string
+  sourceRawText?: string
   rawText: string
   source: 'pdf' | 'text'
   diagnostics?: Partial<KbImportDiagnostic>
+  cleanupMode?: 'llm' | 'heuristic'
+  cleanupPromptVersion?: string
+  cleanupFallbackReason?: string
   heading?: string
   conversationId?: string | null
   onProgress?: (payload: KbIngestFileProgress) => void
@@ -376,6 +496,7 @@ function scoreImportConfidence(rawText: string, distilledBody: string, diagnosti
 function saveDocumentRecord(
   db: Database.Database,
   sourceId: string,
+  sourceRawText: string,
   rawText: string,
   distilledBody: string,
   confidence: KbImportConfidence,
@@ -385,10 +506,11 @@ function saveDocumentRecord(
   const now = Date.now()
   db.prepare(
     `INSERT OR REPLACE INTO kb_documents
-       (source_id, raw_text, distilled_body, confidence_score, confidence_reasons_json, diagnostics_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM kb_documents WHERE source_id = ?), ?), ?)`
+       (source_id, raw_source_text, raw_text, distilled_body, confidence_score, confidence_reasons_json, diagnostics_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM kb_documents WHERE source_id = ?), ?), ?)`
   ).run(
     sourceId,
+    sourceRawText,
     rawText,
     distilledBody,
     confidence.score,
@@ -483,13 +605,17 @@ function rebuildDocRelations(db: Database.Database, sourceId: string): void {
 function ingestDocument(db: Database.Database, input: IngestDocumentInput): KbSource {
   const sourceId = randomUUID()
   const t = Date.now()
+  const sourceRawText = input.sourceRawText ?? input.rawText
   const rawText = normalizeImportedRawText(input.rawText)
   const distilledBody = distillDocumentToWikiBody(input.title, rawText)
   const diagnostics: KbImportDiagnostic = {
     source: input.source,
     parserWarnings: input.diagnostics?.parserWarnings ?? [],
     truncated: input.diagnostics?.truncated === true,
-    cleanupEdits: Math.max(0, Number(input.diagnostics?.cleanupEdits ?? 0))
+    cleanupEdits: Math.max(0, Number(input.diagnostics?.cleanupEdits ?? 0)),
+    cleanupMode: input.cleanupMode,
+    cleanupPromptVersion: input.cleanupPromptVersion,
+    cleanupFallbackReason: input.cleanupFallbackReason
   }
   const confidence = scoreImportConfidence(rawText, distilledBody, diagnostics)
   db.prepare(
@@ -516,7 +642,7 @@ function ingestDocument(db: Database.Database, input: IngestDocumentInput): KbSo
   rebuildDocRelations(db, sourceId)
   const detectedDomains = analyzeSourceDomains(db, sourceId)
   const wikiBody = composeWikiReadModel(db, sourceId)
-  saveDocumentRecord(db, sourceId, rawText, wikiBody || distilledBody, confidence, diagnostics)
+  saveDocumentRecord(db, sourceId, sourceRawText, rawText, wikiBody || distilledBody, confidence, diagnostics)
   input.onProgress?.({ kind: 'analysis', sourceId, domainsDetected: detectedDomains.length })
   input.onProgress?.({ kind: 'done', sourceId, title: input.title, chunkCount: chunks.length })
   return { id: sourceId, title: input.title, uri: input.uri, createdAt: t, conversationId: input.conversationId ?? null }
@@ -534,6 +660,7 @@ export function ingestText(
   return ingestDocument(db, {
     title,
     uri,
+    sourceRawText: body,
     rawText: body,
     source: 'text',
     heading,
@@ -546,8 +673,13 @@ export async function ingestFile(
   db: Database.Database,
   filePath: string,
   title?: string,
-  onProgress?: (payload: KbIngestFileProgress) => void
+  onProgress?: (payload: KbIngestFileProgress) => void,
+  runtime?: RuntimeAdapter | null
 ): Promise<KbSource> {
+  const existing = findExistingFileSource(db, filePath)
+  if (existing) {
+    throw new Error(`This document is already in your wiki library as "${existing.title}".`)
+  }
   const name = title ?? filePath.split(/[/\\]/).pop() ?? filePath
   const jobId = randomUUID()
   upsertIngestJob(db, {
@@ -559,6 +691,7 @@ export async function ingestFile(
   })
   onProgress?.({ kind: 'stage', stage: 'selected', stageLabel: 'File selected', jobId, progress: 0.05 })
   let body: string
+  let sourceRawText = ''
   let diagnostics: Partial<KbImportDiagnostic> = {
     source: 'text',
     parserWarnings: [],
@@ -572,6 +705,7 @@ export async function ingestFile(
     const buf = readFileSync(filePath)
     const result = await extractPdfTextWithDiagnostics(buf)
     body = result.text
+    sourceRawText = body
     diagnostics = {
       source: 'pdf',
       parserWarnings: result.diagnostics.parserWarnings,
@@ -586,15 +720,26 @@ export async function ingestFile(
     onProgress?.({ kind: 'stage', stage: 'extracting', stageLabel: 'Reading document', jobId, progress: 0.2 })
     onProgress?.({ kind: 'reading', filePath, format: 'text' })
     body = readFileSync(filePath, 'utf8')
+    sourceRawText = body
   }
   try {
+    const cleanup = await runArticleCleanup({ title: name, body, runtime })
+    body = cleanup.body
+    diagnostics = {
+      ...diagnostics,
+      cleanupEdits: Math.max(0, Number(diagnostics.cleanupEdits ?? 0)) + cleanup.heuristicEdits
+    }
     onProgress?.({ kind: 'stage', stage: 'enriching', stageLabel: 'Extracting context and entities', jobId, progress: 0.55 })
     const out = ingestDocument(db, {
       title: name,
       uri: `file://${filePath}`,
+      sourceRawText,
       rawText: body,
       source: isPdfFilePath(filePath) ? 'pdf' : 'text',
       diagnostics,
+      cleanupMode: cleanup.mode,
+      cleanupPromptVersion: cleanup.promptVersion,
+      cleanupFallbackReason: cleanup.fallbackReason,
       onProgress
     })
     upsertIngestJob(db, {
@@ -616,6 +761,104 @@ export async function ingestFile(
       errorMessage: error instanceof Error ? error.message : String(error)
     })
     throw error
+  }
+}
+
+export async function cleanupWikiArticle(
+  db: Database.Database,
+  sourceId: string,
+  runtime?: RuntimeAdapter | null,
+  onProgress?: (payload: ArticleCleanupProgress) => void
+): Promise<WikiArticleCleanupResult> {
+  const source = db.prepare('SELECT id, title FROM kb_sources WHERE id = ? LIMIT 1').get(sourceId) as
+    | { id: string; title: string }
+    | undefined
+  if (!source) throw new Error('source not found')
+  const baseBody = getWikiPageBody(db, sourceId)
+  onProgress?.({ stage: 'prepare', label: 'Preparing article cleanup', progress: 4 })
+  const cleanup = await runArticleCleanup({ title: source.title, body: baseBody, runtime, onProgress })
+  const cleanedBody = normalizeImportedRawText(cleanup.body)
+  const chunks = chunkText(cleanedBody)
+  const doc = getDocumentRecord(db, sourceId)
+  const diagnostics: KbImportDiagnostic = {
+    source: doc?.diagnostics.source === 'pdf' ? 'pdf' : 'text',
+    parserWarnings: doc?.diagnostics.parserWarnings ?? [],
+    truncated: doc?.diagnostics.truncated === true,
+    cleanupEdits: Math.max(0, Number(doc?.diagnostics.cleanupEdits ?? 0)) + cleanup.heuristicEdits,
+    cleanupMode: cleanup.mode,
+    cleanupPromptVersion: cleanup.promptVersion,
+    cleanupFallbackReason: cleanup.fallbackReason
+  }
+  const confidence = scoreImportConfidence(doc?.rawText ?? cleanedBody, cleanedBody, diagnostics)
+  onProgress?.({ stage: 'reindex', label: 'Rebuilding indexed article chunks', progress: 86 })
+  const tx = db.transaction(() => {
+    const oldChunkIds = db.prepare('SELECT id FROM kb_chunks WHERE source_id = ?').all(sourceId) as Array<{ id: string }>
+    const pageId = `src:${sourceId}`
+    db.prepare('DELETE FROM wiki_page_chunks WHERE page_id = ?').run(pageId)
+    const delChunkLink = db.prepare('DELETE FROM wiki_page_chunks WHERE chunk_id = ?')
+    for (const row of oldChunkIds) delChunkLink.run(row.id)
+    db.prepare('DELETE FROM kb_chunks WHERE source_id = ?').run(sourceId)
+    const ins = db.prepare(
+      `INSERT INTO kb_chunks (id, source_id, ord, heading, text, anchor, passage_title) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    for (const [ord, chunk] of chunks.entries()) {
+      ins.run(randomUUID(), sourceId, ord, chunk.heading ?? null, chunk.text, chunk.anchor, chunk.passageTitle)
+    }
+    if (tableExists(db, 'kb_document_sections')) {
+      db.prepare('DELETE FROM kb_document_sections WHERE source_id = ?').run(sourceId)
+    }
+    if (tableExists(db, 'kb_entity_mentions')) {
+      db.prepare('DELETE FROM kb_entity_mentions WHERE source_id = ?').run(sourceId)
+    }
+    if (tableExists(db, 'kb_doc_relations')) {
+      db.prepare('DELETE FROM kb_doc_relations WHERE from_source_id = ? OR to_source_id = ?').run(sourceId, sourceId)
+    }
+    if (tableExists(db, 'kb_domain_membership')) {
+      db.prepare('DELETE FROM kb_domain_membership WHERE source_id = ?').run(sourceId)
+    }
+    if (tableExists(db, 'kb_domain_retrieval_units')) {
+      db.prepare('DELETE FROM kb_domain_retrieval_units WHERE source_id = ?').run(sourceId)
+    }
+    persistDocumentSections(db, sourceId, cleanedBody)
+    persistEntityMentions(db, sourceId, chunks)
+    rebuildDocRelations(db, sourceId)
+    analyzeSourceDomains(db, sourceId)
+    onProgress?.({ stage: 'persist', label: 'Persisting cleaned article content', progress: 94 })
+    const wikiBody = composeWikiReadModel(db, sourceId)
+    saveDocumentRecord(
+      db,
+      sourceId,
+      doc?.sourceRawText ?? doc?.rawText ?? cleanedBody,
+      doc?.rawText ?? cleanedBody,
+      wikiBody || cleanedBody,
+      confidence,
+      diagnostics
+    )
+    ensureWikiPageForSource(db, sourceId)
+    const activeEntry = resolveActiveWikiEntryForSource(db, sourceId)
+    if (activeEntry) {
+      createWikiEntryRevision(db, {
+        entryId: activeEntry.entryId,
+        title: activeEntry.title || source.title,
+        body: cleanedBody,
+        modelId: cleanup.modelId ?? null,
+        promptVersion: cleanup.promptVersion,
+        sourceIds: readSourceIdsJson(activeEntry.sourceIdsJson).length
+          ? readSourceIdsJson(activeEntry.sourceIdsJson)
+          : [sourceId]
+      })
+    }
+  })
+  tx()
+  return {
+    ok: true,
+    sourceId,
+    mode: cleanup.mode,
+    promptVersion: cleanup.promptVersion,
+    fallbackReason: cleanup.fallbackReason,
+    cleanupEdits: cleanup.heuristicEdits,
+    chunkCount: chunks.length,
+    modelId: cleanup.modelId
   }
 }
 
@@ -750,6 +993,7 @@ export function getDocumentRecord(db: Database.Database, sourceId: string): KbDo
   const row = db
     .prepare(
       `SELECT source_id as sourceId,
+              raw_source_text as sourceRawText,
               raw_text as rawText,
               distilled_body as distilledBody,
               confidence_score as confidenceScore,
@@ -764,6 +1008,7 @@ export function getDocumentRecord(db: Database.Database, sourceId: string): KbDo
     .get(sourceId) as
     | {
         sourceId: string
+        sourceRawText: string
         rawText: string
         distilledBody: string
         confidenceScore: number
@@ -790,13 +1035,19 @@ export function getDocumentRecord(db: Database.Database, sourceId: string): KbDo
         ? parsed.parserWarnings.filter((x): x is string => typeof x === 'string')
         : [],
       truncated: parsed.truncated === true,
-      cleanupEdits: Math.max(0, Number(parsed.cleanupEdits ?? 0))
+      cleanupEdits: Math.max(0, Number(parsed.cleanupEdits ?? 0)),
+      cleanupMode: parsed.cleanupMode === 'llm' || parsed.cleanupMode === 'heuristic' ? parsed.cleanupMode : undefined,
+      cleanupPromptVersion:
+        typeof parsed.cleanupPromptVersion === 'string' ? parsed.cleanupPromptVersion : undefined,
+      cleanupFallbackReason:
+        typeof parsed.cleanupFallbackReason === 'string' ? parsed.cleanupFallbackReason : undefined
     }
   } catch {
     /* ignore */
   }
   return {
     sourceId: row.sourceId,
+    sourceRawText: row.sourceRawText || row.rawText,
     rawText: row.rawText,
     distilledBody: row.distilledBody,
     confidenceScore: Number(row.confidenceScore) || 0.5,
@@ -1148,40 +1399,23 @@ export function listWikiChatHighlightTerms(db: Database.Database): WikiChatHighl
 /** Topic = source title with chunk count and kind (wiki index). */
 export function listWikiTopics(db: Database.Database): WikiTopic[] {
   ensureWikiVersioningBackfill(db)
-  if (hasWikiEntryTables(db)) {
+  const primaryDomainBySource = new Map<string, { domainId: string; domainTitle: string }>()
+  if (tableExists(db, 'kb_domain_membership') && tableExists(db, 'kb_domains')) {
     const rows = db
       .prepare(
-        `SELECT rep.source_id as id,
-                COALESCE(r.title, e.canonical_keyword) as title,
-                rep.uri as uri,
-                COALESCE(cc.chunkCount, 0) as chunkCount,
-                e.updated_at as updatedAt
-         FROM wiki_entries e
-         LEFT JOIN wiki_entry_revisions r ON r.id = e.active_revision_id
-         JOIN (
-           SELECT es.entry_id as entry_id, es.source_id as source_id, s.uri as uri
-           FROM wiki_entry_sources es
-           JOIN kb_sources s ON s.id = es.source_id
-           WHERE es.source_id = (
-             SELECT MIN(es2.source_id) FROM wiki_entry_sources es2 WHERE es2.entry_id = es.entry_id
-           )
-         ) rep ON rep.entry_id = e.id
-         LEFT JOIN (
-           SELECT es.entry_id as entry_id, COUNT(c.id) as chunkCount
-           FROM wiki_entry_sources es
-           LEFT JOIN kb_chunks c ON c.source_id = es.source_id
-           GROUP BY es.entry_id
-         ) cc ON cc.entry_id = e.id
-         ORDER BY updatedAt DESC`
+        `SELECT dm.source_id as sourceId, dm.domain_id as domainId, d.title as domainTitle
+         FROM kb_domain_membership dm
+         JOIN kb_domains d ON d.id = dm.domain_id
+         ORDER BY dm.source_id ASC, dm.confidence DESC, d.updated_at DESC`
       )
-      .all() as { id: string; title: string; uri: string | null; chunkCount: number }[]
-    if (rows.length > 0) {
-      return rows.map((r) => ({
-        id: r.id,
-        title: r.title,
-        chunkCount: Number(r.chunkCount),
-        kind: wikiKindFromUri(r.uri ?? '')
-      }))
+      .all() as Array<{ sourceId: string; domainId: string; domainTitle: string }>
+    for (const row of rows) {
+      if (!primaryDomainBySource.has(row.sourceId)) {
+        primaryDomainBySource.set(row.sourceId, {
+          domainId: row.domainId,
+          domainTitle: row.domainTitle
+        })
+      }
     }
   }
   const rows = db
@@ -1194,6 +1428,7 @@ export function listWikiTopics(db: Database.Database): WikiTopic[] {
     )
     .all() as { id: string; title: string; uri: string; chunkCount: number }[]
   return rows.map((r) => ({
+    ...(primaryDomainBySource.get(r.id) ?? {}),
     id: r.id,
     title: r.title,
     chunkCount: Number(r.chunkCount),

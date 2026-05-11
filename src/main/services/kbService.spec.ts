@@ -1,15 +1,24 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import { migrate } from '../db/migrations'
 import {
   buildWikiPagePayload,
+  cleanupWikiArticle,
   extractWikiArticlesFromSource,
   getDocumentRecord,
   getKnowledgeGraph,
+  ingestFile,
   ingestText,
   listIngestJobs,
+  listKnowledgeDomains,
+  listWikiTopics,
+  setSourceDomain,
   resolveWikiTerm
 } from './kbService'
+import type { RuntimeAdapter } from './runtime/types'
 
 describe('kbService structured wiki flow', () => {
   let db: Database.Database
@@ -127,6 +136,19 @@ describe('kbService structured wiki flow', () => {
     expect(related.length).toBeGreaterThan(0)
   })
 
+  maybeIt('allows manual domain assignment for a document', () => {
+    db = new Database(':memory:')
+    migrate(db)
+    const src = ingestText(db, 'Infra Notes', 'file://infra.md', 'Kubernetes deployment and observability.')
+    const assigned = setSourceDomain(db, { sourceId: src.id, domainTitle: 'Platform Engineering' })
+    expect(assigned.ok).toBe(true)
+    const topics = listWikiTopics(db)
+    const topic = topics.find((t) => t.id === src.id)
+    expect(topic?.domainTitle).toBe('Platform Engineering')
+    const domains = listKnowledgeDomains(db)
+    expect(domains.some((d) => d.title === 'Platform Engineering')).toBe(true)
+  })
+
   maybeIt('resolves clicked terms to existing pages', () => {
     db = new Database(':memory:')
     migrate(db)
@@ -134,5 +156,80 @@ describe('kbService structured wiki flow', () => {
     const resolved = resolveWikiTerm(db, { term: 'event sourcing', contextSourceId: src.id })
     expect(resolved.matched).toBe(true)
     expect(resolved.sourceId).toBe(src.id)
+  })
+
+  maybeIt('prevents duplicate ingest for the same file path', async () => {
+    db = new Database(':memory:')
+    migrate(db)
+    const dir = mkdtempSync(join(tmpdir(), 'kb-ingest-'))
+    const filePath = join(dir, 'duplicate-check.txt')
+    writeFileSync(filePath, 'duplicate test content', 'utf8')
+    try {
+      await ingestFile(db, filePath)
+      await expect(ingestFile(db, filePath)).rejects.toThrow(/already in your wiki library/i)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  maybeIt('marks auto cleanup metadata when runtime is unavailable', async () => {
+    db = new Database(':memory:')
+    migrate(db)
+    const dir = mkdtempSync(join(tmpdir(), 'kb-cleanup-auto-'))
+    const filePath = join(dir, 'auto-cleanup.txt')
+    writeFileSync(filePath, 'Messy   spacing\n\n\n-Item one\n-Item two', 'utf8')
+    try {
+      const src = await ingestFile(db, filePath)
+      const doc = getDocumentRecord(db, src.id)
+      expect(doc).not.toBeNull()
+      expect(doc?.diagnostics.cleanupMode).toBe('heuristic')
+      expect(doc?.diagnostics.cleanupPromptVersion).toMatch(/2026-05-10/)
+      expect(doc?.diagnostics.cleanupFallbackReason).toBe('runtime_unavailable')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  maybeIt('stores original raw import text for re-processing', async () => {
+    db = new Database(':memory:')
+    migrate(db)
+    const dir = mkdtempSync(join(tmpdir(), 'kb-raw-source-'))
+    const filePath = join(dir, 'raw-source.txt')
+    const original = 'Author: Jane\n\n## Intro\n-Item one\nLine\twith   spacing'
+    writeFileSync(filePath, original, 'utf8')
+    try {
+      const src = await ingestFile(db, filePath)
+      const doc = getDocumentRecord(db, src.id)
+      expect(doc).not.toBeNull()
+      expect(doc?.sourceRawText).toBe(original)
+      expect((doc?.rawText ?? '')).not.toBe('')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  maybeIt('cleans up an existing article with llm mode and updates diagnostics', async () => {
+    db = new Database(':memory:')
+    migrate(db)
+    const src = ingestText(db, 'Cleanup Candidate', 'file://cleanup.md', '## Intro\nBad   spacing and list\n-Item one')
+    const runtime: RuntimeAdapter = {
+      kind: 'ollama',
+      async start() {},
+      async stop() {},
+      getStatus() {
+        return { running: true, kind: 'ollama', modelPath: 'mock-model' } as any
+      },
+      async chat() {
+        return '<clean_markdown>\n## Intro\nBad spacing and list\n- Item one\n</clean_markdown>'
+      }
+    }
+    const result = await cleanupWikiArticle(db, src.id, runtime)
+    expect(result.ok).toBe(true)
+    expect(result.mode).toBe('llm')
+    const payload = buildWikiPagePayload(db, src.id)
+    expect(payload.body).toContain('- Item one')
+    const doc = getDocumentRecord(db, src.id)
+    expect(doc?.diagnostics.cleanupMode).toBe('llm')
+    expect(doc?.diagnostics.cleanupPromptVersion).toBe(result.promptVersion)
   })
 })

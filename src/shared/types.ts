@@ -158,6 +158,9 @@ export interface KbImportDiagnostic {
   parserWarnings: string[]
   truncated: boolean
   cleanupEdits: number
+  cleanupMode?: 'llm' | 'heuristic'
+  cleanupPromptVersion?: string
+  cleanupFallbackReason?: string
 }
 
 export interface KbImportConfidence {
@@ -181,6 +184,8 @@ export interface KbIngestJobSummary {
 
 export interface KbDocumentRecord {
   sourceId: string
+  /** Original extracted/imported content before cleanup and distillation (for re-import/reprocess). */
+  sourceRawText: string
   rawText: string
   distilledBody: string
   confidenceScore: number
@@ -222,6 +227,22 @@ export interface WikiTopic {
   title: string
   chunkCount: number
   kind: WikiSourceKind
+  domainId?: string
+  domainTitle?: string
+}
+
+export interface KbDomainOption {
+  id: string
+  slug: string
+  title: string
+  sourceCount: number
+}
+
+export interface KbSourceDomainUpdateResult {
+  ok: boolean
+  sourceId: string
+  domainId: string
+  domainTitle: string
 }
 
 /** One ranked KB hit per source for wiki / library search (snippet from best-matching chunk). */
@@ -351,6 +372,23 @@ export interface WikiReanalyzeResult {
   promptVersion: string
   error?: string
 }
+
+export interface WikiArticleCleanupResult {
+  ok: boolean
+  sourceId: string
+  mode: 'llm' | 'heuristic'
+  promptVersion: string
+  fallbackReason?: string
+  cleanupEdits: number
+  chunkCount: number
+  modelId?: string
+}
+
+export type WikiArticleCleanupProgress =
+  | { kind: 'started'; sourceId: string }
+  | { kind: 'progress'; sourceId: string; stage: string; label: string; progress: number }
+  | { kind: 'done'; sourceId: string; summary: WikiArticleCleanupResult }
+  | { kind: 'error'; sourceId: string; message: string }
 
 export type WikiReanalyzeProgress =
   | { kind: 'started'; totalSources: number }

@@ -607,6 +607,12 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       );
       CREATE INDEX IF NOT EXISTS idx_kb_domain_retrieval_units_domain ON kb_domain_retrieval_units(domain_id, updated_at DESC);
     `
+  },
+  {
+    version: 21,
+    sql: `
+      ALTER TABLE kb_documents ADD COLUMN raw_source_text TEXT NOT NULL DEFAULT '';
+    `
   }
 ]
 

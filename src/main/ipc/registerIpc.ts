@@ -75,6 +75,7 @@ import type {
   KbIngestFileProgress,
   RuntimeLoadProgress,
   WikiExtractArticleRequest,
+  WikiArticleCleanupProgress,
   WikiReanalyzeProgress
 } from '@shared/types'
 import { is } from '@electron-toolkit/utils'
@@ -1588,7 +1589,7 @@ export function registerIpc(ctx: IpcContext): void {
     const fp = r.filePaths[0]
     emit({ kind: 'selected', filePath: fp })
     try {
-      return await kbService.ingestFile(db, fp, undefined, (p) => emit(p))
+      return await kbService.ingestFile(db, fp, undefined, (p) => emit(p), getRuntime() ?? null)
     } catch (e) {
       emit({ kind: 'error', message: e instanceof Error ? e.message : String(e) })
       throw e
@@ -1613,6 +1614,17 @@ export function registerIpc(ctx: IpcContext): void {
       parsed.data.domainIds?.length ? parsed.data.domainIds.includes(hit.domainId ?? '') : true
     )
   })
+  ipcMain.handle(IPC.KB_DOMAINS_LIST, (_e, limit?: number) => kbService.listKnowledgeDomains(db, Number(limit) || 120))
+  ipcMain.handle(IPC.KB_SOURCE_SET_DOMAIN, (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        sourceId: z.string().min(1),
+        domainTitle: z.string().min(1).max(120)
+      })
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid source domain request payload')
+    return kbService.setSourceDomain(db, parsed.data)
+  })
   ipcMain.handle(IPC.KB_SEARCH_HITS, (_e, query: string, limit?: number) =>
     kbService.searchKbHits(db, query, limit ?? 16)
   )
@@ -1621,6 +1633,38 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle(IPC.KB_WIKI_PAGE, (_e, sourceId: string) =>
     kbService.buildWikiPagePayload(db, sourceId)
   )
+  ipcMain.handle(IPC.KB_WIKI_CLEANUP_ARTICLE, async (event, raw: unknown) => {
+    const parsed = z
+      .object({
+        sourceId: z.string().min(1)
+      })
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid wiki cleanup request payload')
+    const emit = (payload: WikiArticleCleanupProgress): void => {
+      event.sender.send(IPC.KB_WIKI_CLEANUP_PROGRESS, payload)
+    }
+    emit({ kind: 'started', sourceId: parsed.data.sourceId })
+    try {
+      const summary = await kbService.cleanupWikiArticle(db, parsed.data.sourceId, getRuntime() ?? null, (progress) => {
+        emit({
+          kind: 'progress',
+          sourceId: parsed.data.sourceId,
+          stage: progress.stage,
+          label: progress.label,
+          progress: progress.progress
+        })
+      })
+      emit({ kind: 'done', sourceId: parsed.data.sourceId, summary })
+      return summary
+    } catch (error) {
+      emit({
+        kind: 'error',
+        sourceId: parsed.data.sourceId,
+        message: error instanceof Error ? error.message : String(error)
+      })
+      throw error
+    }
+  })
   ipcMain.handle(IPC.KB_WIKI_PASSAGES, (_e, sourceId: string) =>
     kbService.listWikiPassages(db, String(sourceId ?? '').trim())
   )

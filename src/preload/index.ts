@@ -18,6 +18,8 @@ import type {
   EvidenceCard,
   IntegrationModelActivityEvent,
   KbSearchHit,
+  KbDomainOption,
+  KbSourceDomainUpdateResult,
   KbIngestJobSummary,
   PluginIntegrationReport,
   OntologyEntityDetails,
@@ -32,6 +34,8 @@ import type {
   KbIngestFileProgress,
   WikiChatHighlightTerm,
   WikiExtractArticleResult,
+  WikiArticleCleanupResult,
+  WikiArticleCleanupProgress,
   WikiKeywordCandidate,
   WikiPassageSummary,
   WikiExportZipResult,
@@ -253,10 +257,21 @@ contextBridge.exposeInMainWorld('api', {
   kbSearch: (query: string, limit?: number) => invoke(IPC.KB_SEARCH, query, limit),
   kbSearchRetrieval: (p: { query: string; limit?: number; domainIds?: string[] }) =>
     invoke<KbSearchHit[]>(IPC.KB_SEARCH_RETRIEVAL, p),
+  kbDomainsList: (limit?: number) => invoke<KbDomainOption[]>(IPC.KB_DOMAINS_LIST, limit),
+  kbSourceSetDomain: (p: { sourceId: string; domainTitle: string }) =>
+    invoke<KbSourceDomainUpdateResult>(IPC.KB_SOURCE_SET_DOMAIN, p),
   kbSearchHits: (query: string, limit?: number) => invoke<KbSearchHit[]>(IPC.KB_SEARCH_HITS, query, limit),
   kbChunks: (sourceId: string) => invoke(IPC.KB_CHUNKS, sourceId),
   kbWikiTopics: () => invoke<WikiTopic[]>(IPC.KB_WIKI_TOPICS),
   kbWikiPage: (sourceId: string) => invoke<WikiPagePayload>(IPC.KB_WIKI_PAGE, sourceId),
+  kbWikiCleanupArticle: (sourceId: string) =>
+    invoke<WikiArticleCleanupResult>(IPC.KB_WIKI_CLEANUP_ARTICLE, { sourceId }),
+  onWikiArticleCleanupProgress: (callback: (payload: WikiArticleCleanupProgress) => void) => {
+    const channel = IPC.KB_WIKI_CLEANUP_PROGRESS
+    const listener = (_e: IpcRendererEvent, payload: WikiArticleCleanupProgress) => callback(payload)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
   kbWikiPassages: (sourceId: string) => invoke<WikiPassageSummary[]>(IPC.KB_WIKI_PASSAGES, sourceId),
   kbWikiKeywords: (p: { sourceId: string; chunkIds?: string[]; limit?: number }) =>
     invoke<WikiKeywordCandidate[]>(IPC.KB_WIKI_KEYWORDS, p),

@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
   type ReactElement
@@ -25,6 +26,7 @@ import type {
   DeepLearnExplorePath,
   EvidenceCard,
   IntegrationModelActivityEvent,
+  KbDomainOption,
   KbIngestFileProgress,
   HfModelDetail,
   HfModelSummary,
@@ -1213,16 +1215,18 @@ export default function App(): React.ReactElement {
   const [setupTourOnStartup, setSetupTourOnStartup] = useState(true)
   const [animatedBackdropEnabled, setAnimatedBackdropEnabled] = useState(true)
   const [uiRole, setUiRole] = useState<UiRole>(DEFAULT_UI_ROLE)
+  const uiRoleResolved = useMemo(() => parseUiRoleOrDefault(uiRole), [uiRole])
+  const isBuilderAdminRole = uiRoleResolved === 'builder_admin'
   const [workspaceDensity, setWorkspaceDensity] = useState<WorkspaceDensity>('standard')
   const [releaseFeatureSet, setReleaseFeatureSet] = useState<Record<string, boolean>>(defaultReleaseFeatureSet())
   const [presentationModeEnabled, setPresentationModeEnabled] = useState(true)
   const [showAdvancedSurfaces, setShowAdvancedSurfaces] = useState(false)
   const [settingsShowAdvanced, setSettingsShowAdvanced] = useState(false)
   const [showElectronDevMainView, setShowElectronDevMainView] = useState(false)
-  const roleLayoutResolved = useMemo(() => roleLayout(parseUiRoleOrDefault(uiRole)), [uiRole])
+  const roleLayoutResolved = useMemo(() => roleLayout(uiRoleResolved), [uiRoleResolved])
   const devShellChrome = useMemo(
-    () => devShellChromeVisible(parseUiRoleOrDefault(uiRole), showElectronDevMainView),
-    [uiRole, showElectronDevMainView]
+    () => devShellChromeVisible(uiRoleResolved, showElectronDevMainView),
+    [uiRoleResolved, showElectronDevMainView]
   )
   const advancedSurfacesVisible = !presentationModeEnabled || showAdvancedSurfaces
   const visibleRoleTasks = useMemo(
@@ -1491,6 +1495,12 @@ export default function App(): React.ReactElement {
   const [wikiPassageFilterDraft, setWikiPassageFilterDraft] = useState('')
   const [wikiExtractKeywordDraft, setWikiExtractKeywordDraft] = useState('')
   const [wikiExtractBusy, setWikiExtractBusy] = useState(false)
+  const [wikiCleanupBusy, setWikiCleanupBusy] = useState(false)
+  const [wikiDomainOptions, setWikiDomainOptions] = useState<KbDomainOption[]>([])
+  const [wikiDomainDraft, setWikiDomainDraft] = useState('')
+  const [wikiDomainSaving, setWikiDomainSaving] = useState(false)
+  const [wikiCleanupProgress, setWikiCleanupProgress] = useState(0)
+  const [wikiCleanupLabel, setWikiCleanupLabel] = useState('Preparing cleanup…')
   const [wikiExtractStatus, setWikiExtractStatus] = useState<string | null>(null)
   const [wikiSelectedId, setWikiSelectedId] = useState<string | null>(null)
   const [wikiSubview, setWikiSubview] = useState<WikiSubview>('article')
@@ -2142,6 +2152,11 @@ export default function App(): React.ReactElement {
   const loadWiki = useCallback(async () => {
     setWikiTopics(await window.api.kbWikiTopics())
     try {
+      setWikiDomainOptions(await window.api.kbDomainsList(200))
+    } catch {
+      setWikiDomainOptions([])
+    }
+    try {
       setWikiHighlightTerms(await window.api.kbWikiHighlightTerms())
     } catch {
       setWikiHighlightTerms([])
@@ -2450,6 +2465,33 @@ export default function App(): React.ReactElement {
       }
     })
   }, [])
+
+  useEffect(() => {
+    if (typeof window.api.onWikiArticleCleanupProgress !== 'function') return
+    return window.api.onWikiArticleCleanupProgress((payload) => {
+      if (!wikiSelectedId || payload.sourceId !== wikiSelectedId) return
+      if (payload.kind === 'started') {
+        setWikiCleanupBusy(true)
+        setWikiCleanupProgress(2)
+        setWikiCleanupLabel('Preparing cleanup…')
+        return
+      }
+      if (payload.kind === 'progress') {
+        setWikiCleanupProgress(Math.max(0, Math.min(100, payload.progress)))
+        setWikiCleanupLabel(payload.label || 'Cleaning article…')
+        return
+      }
+      if (payload.kind === 'done') {
+        setWikiCleanupProgress(100)
+        setWikiCleanupLabel('Cleanup complete')
+        setWikiCleanupBusy(false)
+        return
+      }
+      if (payload.kind === 'error') {
+        setWikiCleanupBusy(false)
+      }
+    })
+  }, [wikiSelectedId])
 
   const refreshRuntimeStatus = useCallback(async () => {
     const s = await window.api.runtimeStatus()
@@ -5453,6 +5495,25 @@ export default function App(): React.ReactElement {
     await runRagWithQuery(ragQuery)
   }
 
+  async function runWikiSearchAsChat(queryOverride?: string): Promise<void> {
+    const q = (queryOverride ?? wikiSearchQuery).trim()
+    if (!q || chatSending) return
+    setMainView('chat')
+    setDrawer(null)
+    setRagLayerEnabled(true)
+    setRagQuery(q)
+    await runRagWithQuery(q)
+    await sendChat({ text: q })
+  }
+
+  function onWikiSearchKeyDown(e: ReactKeyboardEvent<HTMLInputElement>): void {
+    if (e.key !== 'Enter') return
+    const q = wikiSearchQuery.trim()
+    if (!q) return
+    e.preventDefault()
+    void runWikiSearchAsChat(q)
+  }
+
   async function applyRagSuggestion(hit: KbSearchHit): Promise<void> {
     setRagQuery(hit.sourceTitle)
     setRagSuggestFocused(false)
@@ -5563,6 +5624,58 @@ export default function App(): React.ReactElement {
       setWikiExtractStatus(msg)
     } finally {
       setWikiExtractBusy(false)
+    }
+  }
+
+  async function runWikiArticleCleanup(): Promise<void> {
+    if (!wikiSelectedId || wikiCleanupBusy) return
+    if (typeof window.api.kbWikiCleanupArticle !== 'function') {
+      setErr('Wiki article cleanup is unavailable. Rebuild the app so preload includes kbWikiCleanupArticle.')
+      return
+    }
+    setWikiCleanupBusy(true)
+    setWikiCleanupProgress(2)
+    setWikiCleanupLabel('Preparing cleanup…')
+    setErr(null)
+    setWikiExtractStatus(null)
+    try {
+      const result = await window.api.kbWikiCleanupArticle(wikiSelectedId)
+      await loadWiki()
+      await openWikiPage(wikiSelectedId)
+      const modeLabel = result.mode === 'llm' ? 'LLM' : 'heuristic'
+      const fallback = result.fallbackReason ? ` (${result.fallbackReason.replace(/_/g, ' ')})` : ''
+      setWikiExtractStatus(`Article cleanup complete via ${modeLabel}${fallback}.`)
+    } catch (e) {
+      const msg = String(e)
+      setErr(msg)
+      setWikiExtractStatus(msg)
+    } finally {
+      setWikiCleanupBusy(false)
+    }
+  }
+
+  async function applyWikiDomainOverride(): Promise<void> {
+    if (!wikiSelectedId || wikiDomainSaving) return
+    const selected = wikiTopics.find((x) => x.id === wikiSelectedId)
+    if (!selected || selected.kind !== 'document') return
+    const domainTitle = wikiDomainDraft.replace(/\s+/g, ' ').trim()
+    if (!domainTitle) {
+      setWikiExtractStatus('Enter a domain name before applying.')
+      return
+    }
+    setWikiDomainSaving(true)
+    setErr(null)
+    try {
+      const res = await window.api.kbSourceSetDomain({ sourceId: wikiSelectedId, domainTitle })
+      await loadWiki()
+      await openWikiPage(wikiSelectedId)
+      setWikiExtractStatus(`Assigned domain: ${res.domainTitle}.`)
+    } catch (e) {
+      const msg = String(e)
+      setErr(msg)
+      setWikiExtractStatus(msg)
+    } finally {
+      setWikiDomainSaving(false)
     }
   }
 
@@ -5760,9 +5873,11 @@ export default function App(): React.ReactElement {
         onClick: () => openKnowledgeLibrary()
       },
       { id: 'train', label: 'Train', icon: 'fa-flask', onClick: () => openTrainSurface() },
-      { id: 'readiness', label: 'Readiness', icon: 'fa-rocket', onClick: () => setMainView('releasePlanner') }
+      ...(isBuilderAdminRole
+        ? [{ id: 'readiness', label: 'Readiness', icon: 'fa-rocket', onClick: () => setMainView('releasePlanner') }]
+        : [])
     ],
-    [openTrainSurface, openKnowledgeLibrary]
+    [isBuilderAdminRole, openTrainSurface, openKnowledgeLibrary]
   )
   const integrationPortLive = (() => {
     const n = parseInt(integrationPortDraft.trim(), 10)
@@ -5772,6 +5887,40 @@ export default function App(): React.ReactElement {
   const wikiSearchTrimmed = wikiSearchQuery.trim()
   const wikiHasSearch = wikiSearchTrimmed.length > 0
   const wikiSearchQLower = wikiSearchTrimmed.toLowerCase()
+  const wikiUploadPercent = useMemo(() => {
+    const p = wikiUploadProgress
+    if (!p) return null
+    if (p.kind === 'stage') return typeof p.progress === 'number' ? Math.round(p.progress * 100) : 0
+    if (p.kind === 'selected') return 2
+    if (p.kind === 'reading') return 12
+    if (p.kind === 'chunking') return 46
+    if (p.kind === 'indexing') {
+      const ratio = p.total > 0 ? p.inserted / p.total : 0
+      return Math.round(55 + Math.min(0.35, Math.max(0, ratio)) * 100)
+    }
+    if (p.kind === 'analysis') return 94
+    if (p.kind === 'done') return 100
+    return null
+  }, [wikiUploadProgress])
+  const wikiUploadStatusText = useMemo(() => {
+    const p = wikiUploadProgress
+    if (!p) return null
+    if (p.kind === 'selected') return `Selected: ${p.filePath}`
+    if (p.kind === 'stage') return p.stageLabel
+    if (p.kind === 'reading') return `Reading ${p.format.toUpperCase()} file…`
+    if (p.kind === 'chunking') {
+      return wikiUploadFormat === 'pdf'
+        ? `Preparing ${p.chunkCount} chunk${p.chunkCount === 1 ? '' : 's'} and generating passage titles…`
+        : `Preparing ${p.chunkCount} chunk${p.chunkCount === 1 ? '' : 's'}…`
+    }
+    if (p.kind === 'indexing') return `Indexing chunks: ${p.inserted}/${p.total}`
+    if (p.kind === 'analysis') {
+      return `Context analysis complete: ${p.domainsDetected} domain${p.domainsDetected === 1 ? '' : 's'} detected.`
+    }
+    if (p.kind === 'done') return `Upload complete: ${p.title} (${p.chunkCount} chunks indexed).`
+    if (p.kind === 'cancelled') return 'Upload cancelled.'
+    return `Upload failed: ${p.message}`
+  }, [wikiUploadProgress, wikiUploadFormat])
   const wikiTitleMatchTopics = useMemo(() => {
     if (!wikiHasSearch) return wikiTopics
     return wikiTopics.filter((t) => t.title.toLowerCase().includes(wikiSearchQLower))
@@ -5841,6 +5990,16 @@ export default function App(): React.ReactElement {
     ragSuggestFocused && ragSuggestionRows.length > 0 && !ragLoading
 
   const wikiBrowseByKind = useMemo(() => groupWikiTopicsByKind(wikiTopics), [wikiTopics])
+  const wikiDocumentDomains = useMemo(() => {
+    const docs = wikiBrowseByKind.get('document') ?? []
+    const by = new Map<string, WikiTopic[]>()
+    for (const t of docs) {
+      const key = (t.domainTitle?.trim() || 'Uncategorized').trim()
+      if (!by.has(key)) by.set(key, [])
+      by.get(key)!.push(t)
+    }
+    return [...by.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+  }, [wikiBrowseByKind])
   const wikiTitleMatchByKind = useMemo(
     () => groupWikiTopicsByKind(wikiTitleMatchTopics),
     [wikiTitleMatchTopics]
@@ -5852,7 +6011,21 @@ export default function App(): React.ReactElement {
   const wikiSelectedKindLabel = useMemo(() => {
     if (!wikiSelectedId) return null
     const t = wikiTopics.find((x) => x.id === wikiSelectedId)
-    return t ? WIKI_KIND_LABELS[t.kind] : null
+    if (!t) return null
+    if (t.kind === 'document' && t.domainTitle?.trim()) return t.domainTitle.trim()
+    return WIKI_KIND_LABELS[t.kind]
+  }, [wikiSelectedId, wikiTopics])
+  useEffect(() => {
+    if (!wikiSelectedId) {
+      setWikiDomainDraft('')
+      return
+    }
+    const selected = wikiTopics.find((x) => x.id === wikiSelectedId)
+    if (!selected || selected.kind !== 'document') {
+      setWikiDomainDraft('')
+      return
+    }
+    setWikiDomainDraft(selected.domainTitle?.trim() || '')
   }, [wikiSelectedId, wikiTopics])
 
   const backdropCtxPercent = useMemo(() => {
@@ -7600,323 +7773,12 @@ export default function App(): React.ReactElement {
                     >
                       {wikiUploadBusy ? 'Uploading…' : '+ Add document'}
                     </button>
-                    <div className="dms-quick-panel">
-                      <p className="dms-panel-title">Import from DMS</p>
-                      <div className="dms-inline-fields dms-inline-fields--row">
-                        <select
-                          className="dms-select"
-                          value={dmsSelectedProvider}
-                          onChange={(e) => setDmsSelectedProvider(e.target.value as DmsProvider)}
-                        >
-                          {(['google-drive', 'onedrive', 'sharepoint'] as DmsProvider[]).map((p) => (
-                            <option key={p} value={p}>
-                              {DMS_PROVIDER_LABELS[p]}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          onClick={() => setDmsConnectFormOpen((v) => !v)}
-                        >
-                          {dmsConnectFormOpen ? 'Hide connection details' : 'Connect new'}
-                        </button>
-                      </div>
-                      {dmsConnectFormOpen ? (
-                        <>
-                          <div className="dms-connect-methods" role="radiogroup" aria-label="DMS connection method">
-                            <button
-                              type="button"
-                              className={`btn-secondary dms-method-btn ${dmsConnectMethod === 'oauth2' ? 'active' : ''}`}
-                              onClick={() => setDmsConnectMethod('oauth2')}
-                              aria-pressed={dmsConnectMethod === 'oauth2'}
-                            >
-                              OAuth2
-                            </button>
-                            <button
-                              type="button"
-                              className={`btn-secondary dms-method-btn ${dmsConnectMethod === 'token' ? 'active' : ''}`}
-                              onClick={() => setDmsConnectMethod('token')}
-                              aria-pressed={dmsConnectMethod === 'token'}
-                            >
-                              Access token
-                            </button>
-                          </div>
-                          <div className="dms-inline-fields">
-                            <input
-                              type="text"
-                              className="dms-input"
-                              placeholder="Connection name (optional, advanced)"
-                              value={dmsConnectDisplayName}
-                              onChange={(e) => setDmsConnectDisplayName(e.target.value)}
-                            />
-                          </div>
-                          {dmsConnectMethod === 'token' ? (
-                        <div className="dms-inline-fields">
-                          <input
-                            type="password"
-                            className="dms-input"
-                            placeholder="Access token"
-                            value={dmsAccessTokenDraft}
-                            onChange={(e) => setDmsAccessTokenDraft(e.target.value)}
-                          />
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            disabled={dmsConnecting}
-                            onClick={() => void connectDmsWithToken()}
-                          >
-                            {dmsConnecting ? 'Connecting…' : 'Connect with token'}
-                          </button>
-                        </div>
-                          ) : (
-                            <div className="dms-inline-fields">
-                              <input
-                                type="text"
-                                className="dms-input"
-                                placeholder="OAuth client ID (required)"
-                                value={dmsOauthClientIdDraft}
-                                onChange={(e) => setDmsOauthClientIdDraft(e.target.value)}
-                              />
-                              <button
-                                type="button"
-                                className="btn-secondary"
-                                disabled={dmsConnecting}
-                                onClick={() => void startDmsOAuthConnect()}
-                              >
-                                {dmsConnecting ? 'Starting…' : 'Start OAuth2'}
-                              </button>
-                              <input
-                                type="text"
-                                className="dms-input"
-                                placeholder="Paste callback URL"
-                                value={dmsOauthCallbackUrlDraft}
-                                onChange={(e) => setDmsOauthCallbackUrlDraft(e.target.value)}
-                              />
-                              <button
-                                type="button"
-                                className="btn-secondary"
-                                disabled={dmsConnecting}
-                                onClick={() => void completeDmsOAuthConnect()}
-                              >
-                                {dmsConnecting ? 'Completing…' : 'Complete OAuth2'}
-                              </button>
-                              <details className="dms-oauth-advanced">
-                                <summary>Advanced OAuth options</summary>
-                                <div className="dms-inline-fields">
-                                  <input
-                                    type="password"
-                                    className="dms-input"
-                                    placeholder="OAuth client secret (optional)"
-                                    value={dmsOauthClientSecretDraft}
-                                    onChange={(e) => setDmsOauthClientSecretDraft(e.target.value)}
-                                  />
-                                  <input
-                                    type="text"
-                                    className="dms-input"
-                                    placeholder={`Redirect URI (default: ${DMS_DEFAULT_OAUTH_REDIRECT_URI})`}
-                                    value={dmsOauthRedirectUriDraft}
-                                    onChange={(e) => setDmsOauthRedirectUriDraft(e.target.value)}
-                                  />
-                                  <input
-                                    type="text"
-                                    className="dms-input"
-                                    placeholder="Scopes (comma/newline separated, optional)"
-                                    value={dmsOauthScopesDraft}
-                                    onChange={(e) => setDmsOauthScopesDraft(e.target.value)}
-                                  />
-                                  {(dmsSelectedProvider === 'onedrive' || dmsSelectedProvider === 'sharepoint') ? (
-                                    <input
-                                      type="text"
-                                      className="dms-input"
-                                      placeholder="Tenant ID (optional)"
-                                      value={dmsOauthTenantIdDraft}
-                                      onChange={(e) => setDmsOauthTenantIdDraft(e.target.value)}
-                                    />
-                                  ) : null}
-                                  {dmsSelectedProvider === 'sharepoint' ? (
-                                    <input
-                                      type="text"
-                                      className="dms-input"
-                                      placeholder="SharePoint site ID (optional)"
-                                      value={dmsOauthSiteIdDraft}
-                                      onChange={(e) => setDmsOauthSiteIdDraft(e.target.value)}
-                                    />
-                                  ) : null}
-                                  <input
-                                    type="text"
-                                    className="dms-input"
-                                    placeholder="Authorization code (manual fallback)"
-                                    value={dmsOauthCodeDraft}
-                                    onChange={(e) => setDmsOauthCodeDraft(e.target.value)}
-                                  />
-                                  <input
-                                    type="text"
-                                    className="dms-input"
-                                    placeholder="OAuth state (manual fallback)"
-                                    value={dmsOauthStateDraft}
-                                    onChange={(e) => setDmsOauthStateDraft(e.target.value)}
-                                  />
-                                </div>
-                              </details>
-                            </div>
-                          )}
-                        </>
-                      ) : null}
-                      {dmsConnections.length > 0 && (
-                        <div className="dms-inline-fields">
-                          <select
-                            className="dms-select"
-                            value={dmsSelectedConnectionId ?? ''}
-                            onChange={(e) => {
-                              const next = e.target.value || null
-                              setDmsSelectedConnectionId(next)
-                              setDmsFolderOptions([])
-                              setDmsSelectedFolderId('')
-                            }}
-                          >
-                            {dmsConnections.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.displayName} ({DMS_PROVIDER_LABELS[c.provider]})
-                              </option>
-                            ))}
-                          </select>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            disabled={!dmsSelectedConnectionId || dmsFoldersBusyForConnectionId != null}
-                            onClick={() => {
-                              if (!dmsSelectedConnectionId) return
-                              void loadDmsFolders(dmsSelectedConnectionId)
-                            }}
-                          >
-                            {dmsFoldersBusyForConnectionId ? 'Loading folders…' : 'Load folders'}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn-secondary"
-                            disabled={!dmsSelectedConnectionId}
-                            onClick={() => {
-                              if (!dmsSelectedConnectionId) return
-                              void disconnectDmsConnection(dmsSelectedConnectionId)
-                            }}
-                          >
-                            Disconnect
-                          </button>
-                        </div>
-                      )}
-                      {dmsFolderOptions.length > 0 && (
-                        <div className="dms-inline-fields">
-                          <select
-                            className="dms-select"
-                            value={dmsSelectedFolderId}
-                            onChange={(e) => setDmsSelectedFolderId(e.target.value)}
-                          >
-                            {dmsFolderOptions.map((f) => (
-                              <option key={f.id} value={f.id}>
-                                {f.path}
-                              </option>
-                            ))}
-                          </select>
-                          <button type="button" className="btn-secondary" onClick={() => void registerDmsFolderImport()}>
-                            Add folder source
-                          </button>
-                        </div>
-                      )}
-                      {dmsImportRoots.length > 0 && (
-                        <div className="dms-import-roots">
-                          {dmsImportRoots.map((root) => (
-                            <div key={root.id} className="dms-root-row">
-                              <span className="dms-root-title">{root.displayName}</span>
-                              <button
-                                type="button"
-                                className="btn-secondary"
-                                disabled={dmsSyncBusyRootId === root.id}
-                                onClick={() => void runDmsManualSync(root.id)}
-                              >
-                                {dmsSyncBusyRootId === root.id ? 'Syncing…' : 'Sync now'}
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {dmsSyncStatusLine ? <p className="dms-status-line">{dmsSyncStatusLine}</p> : null}
-                      {dmsSyncProgress?.kind === 'file' ? (
-                        <p className="dms-status-line dms-status-line--subtle">
-                          Processed {dmsSyncProgress.processed}/{dmsSyncProgress.totalDiscovered} files
-                        </p>
-                      ) : null}
-                    </div>
-                    <button
-                      type="button"
-                      className="btn-secondary btn-wiki-export"
-                      disabled={wikiExportBusy}
-                      onClick={() => void exportWikiZipToDisk()}
-                    >
-                      {wikiExportBusy ? 'Exporting…' : 'Export wiki (ZIP)'}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={wikiReanalyzeBusy}
-                      onClick={() => void runWikiReanalysisAll()}
-                      title="Reanalyze all wiki entries with the currently loaded model"
-                    >
-                      {wikiReanalyzeBusy ? 'Reanalyzing…' : 'Reanalyze all (model)'}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary btn-wiki-kgraph"
-                      onClick={() => void openKnowledgeGraph()}
-                      title="Open the knowledge graph view and refresh its data"
-                    >
-                      <i className="fa-solid fa-diagram-project" aria-hidden style={{ marginRight: 6, opacity: 0.8 }} />
-                      Knowledge graph
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary btn-wiki-reset"
-                      disabled={settingsMaintenanceBusy !== false}
-                      title="Opens confirmation — removes every library entry and all chat prompt domains"
-                      onClick={() => setSettingsConfirmKind('wikiReset')}
-                    >
-                      <i className="fa-solid fa-book-skull" aria-hidden style={{ marginRight: 6, opacity: 0.85 }} />
-                      Reset wiki &amp; domains…
-                    </button>
                   </div>
-                  {(wikiReanalyzeProgress || wikiReanalyzeResult) && (
-                    <p className="muted" style={{ marginTop: 8 }}>
-                      {wikiReanalyzeProgress?.kind === 'source'
-                        ? `Reanalyzing ${wikiReanalyzeProgress.index}/${wikiReanalyzeProgress.totalSources}: ${wikiReanalyzeProgress.title}`
-                        : wikiReanalyzeProgress?.kind === 'merging'
-                          ? `Merging into ${wikiReanalyzeProgress.totalKeywords} canonical keyword entries…`
-                          : null}
-                      {wikiReanalyzeResult
-                        ? ` Last run: ${wikiReanalyzeResult.processedSources} sources -> ${wikiReanalyzeResult.processedEntries} entries (${wikiReanalyzeResult.mergedEntries} merges, ${wikiReanalyzeResult.skippedSources} fallbacks).`
-                        : null}
-                    </p>
-                  )}
                   {wikiUploadProgress && (
                     <p className="muted" style={{ marginTop: 8 }}>
-                      {wikiUploadProgress.kind === 'selected'
-                        ? `Selected: ${wikiUploadProgress.filePath}`
-                        : wikiUploadProgress.kind === 'stage'
-                          ? `${wikiUploadProgress.stageLabel}${typeof wikiUploadProgress.progress === 'number' ? ` (${Math.round(wikiUploadProgress.progress * 100)}%)` : ''}`
-                        : wikiUploadProgress.kind === 'reading'
-                          ? `Reading ${wikiUploadProgress.format.toUpperCase()} file…`
-                          : wikiUploadProgress.kind === 'chunking'
-                            ? wikiUploadFormat === 'pdf'
-                              ? `Preparing ${wikiUploadProgress.chunkCount} chunk${wikiUploadProgress.chunkCount === 1 ? '' : 's'} and generating passage titles…`
-                              : `Preparing ${wikiUploadProgress.chunkCount} chunk${wikiUploadProgress.chunkCount === 1 ? '' : 's'}…`
-                            : wikiUploadProgress.kind === 'indexing'
-                              ? `Indexing chunks: ${wikiUploadProgress.inserted}/${wikiUploadProgress.total}`
-                              : wikiUploadProgress.kind === 'analysis'
-                                ? `Context analysis complete: ${wikiUploadProgress.domainsDetected} domain${wikiUploadProgress.domainsDetected === 1 ? '' : 's'} detected.`
-                              : wikiUploadProgress.kind === 'done'
-                                ? `Upload complete: ${wikiUploadProgress.title} (${wikiUploadProgress.chunkCount} chunks indexed).`
-                                : wikiUploadProgress.kind === 'cancelled'
-                                  ? 'Upload cancelled.'
-                                  : `Upload failed: ${wikiUploadProgress.message}`}
+                      {typeof wikiUploadPercent === 'number'
+                        ? `${Math.max(0, Math.min(100, wikiUploadPercent))}% · ${wikiUploadStatusText ?? ''}`
+                        : (wikiUploadStatusText ?? '')}
                     </p>
                   )}
                 </div>
@@ -7927,26 +7789,58 @@ export default function App(): React.ReactElement {
                     </p>
                   )}
                   {wikiTopics.length > 0 && !wikiHasSearch &&
-                    WIKI_KIND_ORDER.map((kind) => {
-                      const list = wikiBrowseByKind.get(kind) ?? []
-                      if (list.length === 0) return null
-                      return (
-                        <div key={kind} className="wiki-topic-group">
-                          <p className="wiki-topic-group-label" id={`wiki-group-${kind}`}>
-                            {WIKI_KIND_LABELS[kind]}
-                          </p>
-                          <div className="wiki-topic-group-list" role="group" aria-labelledby={`wiki-group-${kind}`}>
-                            <WikiLibraryKindRows
-                              kind={kind}
-                              topics={list}
-                              wikiSelectedId={wikiSelectedId}
-                              onOpenPage={(id) => void openWikiPage(id)}
-                              onRequestRemove={(id, title) => setWikiDeletePending({ id, title })}
-                            />
-                          </div>
-                        </div>
-                      )
-                    })}
+                    <div className="wiki-library-tree" role="tree" aria-label="Library navigation tree">
+                      {WIKI_KIND_ORDER.map((kind) => {
+                        const list = wikiBrowseByKind.get(kind) ?? []
+                        if (list.length === 0) return null
+                        if (kind === 'document') {
+                          return (
+                            <details key={kind} className="wiki-tree-kind" open>
+                              <summary className="wiki-tree-kind-summary" role="treeitem" aria-level={1} aria-expanded>
+                                <span className="wiki-topic-group-label wiki-topic-group-label--tree">Domains</span>
+                                <span className="wiki-topic-meta">{list.length} items</span>
+                              </summary>
+                              <div className="wiki-topic-group-list wiki-tree-kind-children" role="group">
+                                {wikiDocumentDomains.map(([domainTitle, domainTopics]) => (
+                                  <details key={domainTitle} className="wiki-tree-domain" open>
+                                    <summary className="wiki-tree-domain-summary" role="treeitem" aria-level={2} aria-expanded>
+                                      <span>{domainTitle}</span>
+                                      <span className="wiki-topic-meta">{domainTopics.length}</span>
+                                    </summary>
+                                    <div className="wiki-topic-group-list wiki-tree-domain-children" role="group">
+                                      <WikiLibraryKindRows
+                                        kind={kind}
+                                        topics={domainTopics}
+                                        wikiSelectedId={wikiSelectedId}
+                                        onOpenPage={(id) => void openWikiPage(id)}
+                                        onRequestRemove={(id, title) => setWikiDeletePending({ id, title })}
+                                      />
+                                    </div>
+                                  </details>
+                                ))}
+                              </div>
+                            </details>
+                          )
+                        }
+                        return (
+                          <details key={kind} className="wiki-tree-kind" open>
+                            <summary className="wiki-tree-kind-summary" role="treeitem" aria-level={1} aria-expanded>
+                              <span className="wiki-topic-group-label wiki-topic-group-label--tree">{WIKI_KIND_LABELS[kind]}</span>
+                              <span className="wiki-topic-meta">{list.length} items</span>
+                            </summary>
+                            <div className="wiki-topic-group-list wiki-tree-kind-children" role="group">
+                              <WikiLibraryKindRows
+                                kind={kind}
+                                topics={list}
+                                wikiSelectedId={wikiSelectedId}
+                                onOpenPage={(id) => void openWikiPage(id)}
+                                onRequestRemove={(id, title) => setWikiDeletePending({ id, title })}
+                              />
+                            </div>
+                          </details>
+                        )
+                      })}
+                    </div>}
                   {wikiTopics.length > 0 && wikiHasSearch && (
                     <>
                       {wikiTitleMatchTopics.length > 0 && (
@@ -8069,6 +7963,7 @@ export default function App(): React.ReactElement {
                         placeholder="Search titles and content…"
                         value={wikiSearchQuery}
                         onChange={(e) => setWikiSearchQuery(e.target.value)}
+                        onKeyDown={onWikiSearchKeyDown}
                         autoComplete="off"
                         spellCheck={false}
                         aria-busy={wikiHasSearch && wikiSearchBusy}
@@ -8080,6 +7975,21 @@ export default function App(): React.ReactElement {
               <article className={`wiki-article${wikiTitle.trim() ? '' : ' wiki-article--no-selection'}`}>
                 {wikiTitle ? (
                   <>
+                    {wikiCleanupBusy ? (
+                      <div className="wiki-article-cleanup-banner" role="status" aria-live="polite">
+                        <div
+                          className="wiki-cleanup-progress-circle"
+                          style={
+                            {
+                              '--cleanup-progress': `${Math.max(0, Math.min(100, Math.round(wikiCleanupProgress)))}%`
+                            } as CSSProperties & Record<'--cleanup-progress', string>
+                          }
+                        >
+                          <span>{Math.max(0, Math.min(100, Math.round(wikiCleanupProgress)))}%</span>
+                        </div>
+                        <p>{wikiCleanupLabel}</p>
+                      </div>
+                    ) : null}
                     <div className="wiki-article-inner">
                       <header className="wiki-article-header">
                         <div className="wiki-article-title-row">
@@ -8101,6 +8011,42 @@ export default function App(): React.ReactElement {
                               <span className="wiki-source-kind-pill wiki-source-kind-pill--article">
                                 {wikiSelectedKindLabel}
                               </span>
+                            ) : null}
+                            {wikiSelectedId && wikiTopics.find((x) => x.id === wikiSelectedId)?.kind === 'document' ? (
+                              <div className="wiki-domain-assign">
+                                <input
+                                  className="input wiki-domain-assign-input"
+                                  type="text"
+                                  placeholder="Domain"
+                                  list="wiki-domain-options"
+                                  value={wikiDomainDraft}
+                                  onChange={(e) => setWikiDomainDraft(e.target.value)}
+                                  disabled={wikiDomainSaving}
+                                />
+                                <datalist id="wiki-domain-options">
+                                  {wikiDomainOptions.map((d) => (
+                                    <option key={d.id} value={d.title} />
+                                  ))}
+                                </datalist>
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  onClick={() => void applyWikiDomainOverride()}
+                                  disabled={wikiDomainSaving || wikiDomainDraft.trim().length === 0}
+                                >
+                                  {wikiDomainSaving ? 'Saving…' : 'Set domain'}
+                                </button>
+                              </div>
+                            ) : null}
+                            {wikiSelectedId ? (
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                onClick={() => void runWikiArticleCleanup()}
+                                disabled={wikiCleanupBusy}
+                              >
+                                {wikiCleanupBusy ? 'Cleaning…' : 'Clean up article'}
+                              </button>
                             ) : null}
                             {wikiSelectedId ? (
                               <WikiEntryRemoveButton

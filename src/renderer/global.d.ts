@@ -18,6 +18,8 @@ import type {
   HardwareSummary,
   KbIngestJobSummary,
   KbIngestFileProgress,
+  KbDomainOption,
+  KbSourceDomainUpdateResult,
   KbSearchHit,
   IntegrationModelActivityEvent,
   KnowledgeGraphPayload,
@@ -34,6 +36,8 @@ import type {
   TrainingManifest,
   WikiChatHighlightTerm,
   WikiExtractArticleResult,
+  WikiArticleCleanupResult,
+  WikiArticleCleanupProgress,
   SaveIntellijPluginZipResult,
   WikiExportZipResult,
   WikiKeywordCandidate,
@@ -267,10 +271,14 @@ type Api = {
   kbSources: () => Promise<unknown[]>
   kbSearch: (query: string, limit?: number) => Promise<string[]>
   kbSearchRetrieval: (p: { query: string; limit?: number; domainIds?: string[] }) => Promise<KbSearchHit[]>
+  kbDomainsList: (limit?: number) => Promise<KbDomainOption[]>
+  kbSourceSetDomain: (p: { sourceId: string; domainTitle: string }) => Promise<KbSourceDomainUpdateResult>
   kbSearchHits: (query: string, limit?: number) => Promise<KbSearchHit[]>
   kbChunks: (sourceId: string) => Promise<unknown[]>
   kbWikiTopics: () => Promise<WikiTopic[]>
   kbWikiPage: (sourceId: string) => Promise<WikiPagePayload>
+  kbWikiCleanupArticle: (sourceId: string) => Promise<WikiArticleCleanupResult>
+  onWikiArticleCleanupProgress: (callback: (payload: WikiArticleCleanupProgress) => void) => () => void
   kbWikiPassages: (sourceId: string) => Promise<WikiPassageSummary[]>
   kbWikiKeywords: (p: {
     sourceId: string
