@@ -3,7 +3,7 @@ import type { AppMainView, ToolDrawerId } from './uiRole'
 /** Shell view an update belongs to; use `global` to always show (unless deduped). */
 export type ViewToastOrigin = AppMainView | 'global'
 
-export type ViewToastVariant = 'info' | 'success' | 'warning'
+export type ViewToastVariant = 'info' | 'success' | 'warning' | 'error'
 
 export type ViewToastInput = {
   origin: ViewToastOrigin

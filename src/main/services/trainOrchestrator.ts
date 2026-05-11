@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto'
-import { spawn } from 'child_process'
+import type { ChildProcessWithoutNullStreams } from 'child_process'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs'
 import { basename, join, resolve } from 'path'
 import type Database from 'better-sqlite3'
@@ -7,8 +7,13 @@ import type { TrainJob } from '@shared/types'
 import { logLine } from '../logger'
 import { exportKbSourcesToTrainingJsonl } from './trainKbExport'
 import { buildManifestFromApproved, recordDomainModelVersion } from './trainingWorkflowStore'
+import {
+  probeAxolotlModelSupport,
+  spawnBundledAxolotlTrain,
+  type AxolotlModelProbeResult
+} from './axolotlRuntime'
 
-const running = new Map<string, ReturnType<typeof spawn>>()
+const running = new Map<string, ChildProcessWithoutNullStreams>()
 
 function findGgufFilesRecursive(dir: string): string[] {
   const out: string[] = []
@@ -129,7 +134,6 @@ export interface StartTrainJobOpts {
   datasetPath?: string
   /** When set, export KB chunks to JSONL inside the job output dir */
   kbSourceIds?: string[]
-  pythonPath?: string
   /** Shown in the UI and used in finetunes/*.gguf filename */
   displayName?: string
   /** Optional domain profile id for scoped manifests/models. */
@@ -137,10 +141,24 @@ export interface StartTrainJobOpts {
   modelsDir: string
 }
 
+export type TrainStartValidationResult = AxolotlModelProbeResult
+
+export function validateTrainStart(baseModelPath: string): TrainStartValidationResult {
+  const base = baseModelPath.trim()
+  if (!base) {
+    return {
+      supported: false,
+      reason: 'Base model path is required.',
+      details: 'Choose a local model path before training.',
+      backend: 'axolotl'
+    }
+  }
+  return probeAxolotlModelSupport(base)
+}
+
 export function startTrainJob(
   db: Database.Database,
   userData: string,
-  scriptPath: string,
   opts: StartTrainJobOpts
 ): TrainJob {
   const id = randomUUID()
@@ -167,6 +185,15 @@ export function startTrainJob(
       }
     } else {
       throw new Error('Select knowledge sources or set a dataset JSONL path.')
+    }
+    const modelProbe = validateTrainStart(opts.baseModelPath)
+    if (!modelProbe.supported) {
+      const details = modelProbe.details?.trim()
+      throw new Error(
+        details
+          ? `Model is not supported by bundled Axolotl: ${modelProbe.reason} (${details})`
+          : `Model is not supported by bundled Axolotl: ${modelProbe.reason}`
+      )
     }
     try {
       manifestId = randomUUID()
@@ -203,9 +230,6 @@ export function startTrainJob(
      VALUES (?, 'queued', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)`
   ).run(id, opts.baseModelPath, outputDir, t, kbJson, displayName, datasetPathResolved, domainId, manifestId)
 
-  const script = scriptPath
-  const py = opts.pythonPath ?? 'python'
-
   const job: TrainJob = {
     id,
     status: 'queued',
@@ -219,25 +243,29 @@ export function startTrainJob(
     manifestId: manifestId ?? undefined
   }
 
-  if (!existsSync(script)) {
-    db.prepare(`UPDATE train_jobs SET status = ?, message = ? WHERE id = ?`).run(
-      'error',
-      'train_lora.py not found; add training/train_lora.py',
-      id
-    )
-    job.status = 'error'
-    job.message = 'train_lora.py not found'
-    return job
-  }
-
   db.prepare(`UPDATE train_jobs SET status = ?, started_at = ? WHERE id = ?`).run('running', Date.now(), id)
   job.status = 'running'
 
-  const proc = spawn(
-    py,
-    [script, '--base_model', opts.baseModelPath, '--dataset', datasetPathResolved, '--output', outputDir],
-    { stdio: ['ignore', 'pipe', 'pipe'] }
-  )
+  let proc: ChildProcessWithoutNullStreams
+  try {
+    proc = spawnBundledAxolotlTrain({
+      baseModelPath: opts.baseModelPath,
+      datasetPath: datasetPathResolved,
+      outputDir,
+      displayName
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    db.prepare(`UPDATE train_jobs SET status = ?, message = ?, finished_at = ? WHERE id = ?`).run(
+      'error',
+      msg.slice(-4000),
+      Date.now(),
+      id
+    )
+    job.status = 'error'
+    job.message = msg
+    return job
+  }
   running.set(id, proc)
   let out = ''
   proc.stdout?.on('data', (d) => {

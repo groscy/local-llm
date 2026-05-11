@@ -57,6 +57,37 @@ describeIfSqlite('ontology service', () => {
     expect(details.outgoing.length + details.incoming.length).toBeGreaterThan(0)
   })
 
+  it('applies lod tier defaults and edge density clamp', () => {
+    const db = makeDb()
+    const ontology = createOntologyService(db)
+    ontology.ingestText({
+      text: [
+        'Renderer uses React.',
+        'Renderer uses Canvas.',
+        'Renderer uses WebGL.',
+        'Renderer uses IPC.',
+        'Ontology tracks entities.',
+        'Ontology tracks triples.',
+        'Graph has nodes.',
+        'Graph has edges.',
+        'Layout uses force simulation.',
+        'Layout uses worker.'
+      ].join(' '),
+      sourceType: 'test',
+      sourceRef: 'spec:lod'
+    })
+    const detail = ontology.querySubgraph({ query: 'renderer', lodTier: 'detail', limitTriples: 140 })
+    const overview = ontology.querySubgraph({
+      query: 'renderer',
+      lodTier: 'overview',
+      limitTriples: 140,
+      maxEdgeDensity: 0.2
+    })
+    expect(detail.edges.length).toBeGreaterThan(0)
+    expect(overview.edges.length).toBeGreaterThan(0)
+    expect(overview.edges.length).toBeLessThanOrEqual(detail.edges.length)
+  })
+
   it('builds bounded ontology prompt context', () => {
     const db = makeDb()
     const ontology = createOntologyService(db)
