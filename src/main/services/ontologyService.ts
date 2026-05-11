@@ -384,9 +384,21 @@ export function createOntologyService(db: Database.Database): OntologyService {
     },
 
     querySubgraph(request?: OntologyQueryRequest): OntologySubgraphPayload {
-      const limitEntities = Math.max(5, Math.min(300, Math.floor(request?.limitEntities ?? 90)))
-      const limitTriples = Math.max(10, Math.min(900, Math.floor(request?.limitTriples ?? 260)))
-      const maxHops = Math.max(1, Math.min(3, Math.floor(request?.maxHops ?? 2)))
+      const lodTier = request?.lodTier ?? 'detail'
+      const defaultsByTier: Record<'overview' | 'mid' | 'detail', { entities: number; triples: number; hops: number }> = {
+        overview: { entities: 64, triples: 140, hops: 1 },
+        mid: { entities: 110, triples: 260, hops: 2 },
+        detail: { entities: 150, triples: 420, hops: 3 }
+      }
+      const tierDefaults = defaultsByTier[lodTier]
+      const limitEntities = Math.max(5, Math.min(300, Math.floor(request?.limitEntities ?? tierDefaults.entities)))
+      const limitTriplesRaw = Math.max(10, Math.min(900, Math.floor(request?.limitTriples ?? tierDefaults.triples)))
+      const maxHops = Math.max(1, Math.min(3, Math.floor(request?.maxHops ?? tierDefaults.hops)))
+      const maxEdgeDensity =
+        typeof request?.maxEdgeDensity === 'number' && Number.isFinite(request.maxEdgeDensity)
+          ? Math.max(0.05, Math.min(1, request.maxEdgeDensity))
+          : 1
+      const limitTriples = Math.max(10, Math.floor(limitTriplesRaw * maxEdgeDensity))
       const typeFilters = (request?.typeFilters ?? []).filter((v) => typeof v === 'string' && v.trim().length > 0)
       const predicateFilters = (request?.predicateFilters ?? []).filter(
         (v) => typeof v === 'string' && v.trim().length > 0
@@ -395,9 +407,13 @@ export function createOntologyService(db: Database.Database): OntologyService {
         typeof request?.recentOnlyMs === 'number' && request.recentOnlyMs > 0 ? request.recentOnlyMs : undefined
       const recentCutoff = recentOnlyMs ? Date.now() - recentOnlyMs : undefined
 
+      const focusSeed = request?.focusNodeId?.trim()
       let frontier = request?.query?.trim()
         ? seedEntitiesFromQuery(request.query, limitEntities, typeFilters)
         : listRecentEntitySeeds(limitEntities)
+      if (focusSeed) {
+        frontier = [focusSeed, ...frontier.filter((iri) => iri !== focusSeed)].slice(0, limitEntities)
+      }
       if (frontier.length === 0) return { nodes: [], edges: [], truncated: false }
 
       const allIris = new Set<string>(frontier)
