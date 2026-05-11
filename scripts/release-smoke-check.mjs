@@ -51,7 +51,10 @@ function assertArtifacts(platform, files) {
       { label: '.deb', matcher: (p) => p.endsWith('.deb') },
       { label: '.AppImage', matcher: (p) => p.endsWith('.AppImage') },
       { label: '.zip', matcher: (p) => p.endsWith('.zip') },
-      { label: '.pkg.tar.*', matcher: (p) => p.includes('.pkg.tar.') }
+      {
+        label: '.pkg.tar.* or .pacman',
+        matcher: (p) => p.includes('.pkg.tar.') || p.endsWith('.pacman')
+      }
     ],
     windows: [
       { label: '.exe', matcher: (p) => p.endsWith('.exe') },
