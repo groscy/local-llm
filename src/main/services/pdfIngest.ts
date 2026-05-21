@@ -1,10 +1,5 @@
 import { PDFParse } from 'pdf-parse'
 
-/** Cap CPU/time for very long PDFs; remaining pages are skipped. */
-const PDF_MAX_PAGES = 250
-/** Hard cap on stored text length after extraction. */
-const PDF_MAX_CHARS = 900_000
-
 export type PdfExtractDiagnostics = {
   parserWarnings: string[]
   truncated: boolean
@@ -14,6 +9,12 @@ export type PdfExtractDiagnostics = {
 export type PdfExtractResult = {
   text: string
   diagnostics: PdfExtractDiagnostics
+}
+
+export type PdfPageProgress = {
+  processedPages: number
+  totalPages: number
+  pagesLeft: number
 }
 
 function cleanupPdfText(input: string): { text: string; edits: number } {
@@ -40,26 +41,39 @@ function cleanupPdfText(input: string): { text: string; edits: number } {
 /**
  * Extract plain text from a PDF buffer for knowledge-base ingestion (chunking + FTS + wiki).
  */
-export async function extractPdfTextWithDiagnostics(buffer: Buffer): Promise<PdfExtractResult> {
+export async function extractPdfTextWithDiagnostics(
+  buffer: Buffer,
+  onPageProgress?: (progress: PdfPageProgress) => void
+): Promise<PdfExtractResult> {
   const data = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
   const parser = new PDFParse({ data })
   const warnings: string[] = []
   let truncated = false
   try {
-    const result = await parser.getText({
-      first: PDF_MAX_PAGES,
+    const meta = await parser.getText({
+      first: 1,
+      last: 1,
       pageJoiner: '\n\n',
       lineEnforce: true
     })
-    if (typeof result.total === 'number' && result.total > PDF_MAX_PAGES) {
-      warnings.push(`Only the first ${PDF_MAX_PAGES} pages were parsed.`)
+    const totalDetected = typeof meta.total === 'number' && Number.isFinite(meta.total) ? Math.max(1, Math.floor(meta.total)) : 1
+    const totalPages = totalDetected
+
+    const pages: string[] = [meta.text ?? '']
+    onPageProgress?.({ processedPages: 1, totalPages, pagesLeft: Math.max(0, totalPages - 1) })
+
+    for (let page = 2; page <= totalPages; page++) {
+      const one = await parser.getText({
+        first: page,
+        last: page,
+        pageJoiner: '\n\n',
+        lineEnforce: true
+      })
+      pages.push(one.text ?? '')
+      onPageProgress?.({ processedPages: page, totalPages, pagesLeft: totalPages - page })
     }
-    let text = result.text ?? ''
-    if (text.length > PDF_MAX_CHARS) {
-      truncated = true
-      warnings.push(`Text was truncated at ${PDF_MAX_CHARS} characters.`)
-      text = `${text.slice(0, PDF_MAX_CHARS)}\n\n[… PDF text truncated for size …]`
-    }
+
+    const text = pages.join('\n\n').trim()
     const cleaned = cleanupPdfText(text)
     return {
       text: cleaned.text,

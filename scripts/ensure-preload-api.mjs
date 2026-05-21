@@ -18,7 +18,15 @@ function needsRebuild() {
       !s.includes('ollamaListTags') ||
       !s.includes('runtime:ollamaTags') ||
       !s.includes('ollamaPullModel') ||
-      !s.includes('runtime:ollamaPull')
+      !s.includes('runtime:ollamaPull') ||
+      !s.includes('claudeBridgeStart') ||
+      !s.includes('integration:claudeBridgeStart') ||
+      !s.includes('kbKeywordGraph') ||
+      !s.includes('kbKeywordGraphNeighbors') ||
+      !s.includes('kbKeywordGraphSearch') ||
+      !s.includes('kb:keywordGraph') ||
+      !s.includes('kb:keywordGraphNeighbors') ||
+      !s.includes('kb:keywordGraphSearch')
     )
   } catch {
     return true

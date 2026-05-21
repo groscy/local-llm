@@ -117,6 +117,14 @@ export const IPC = {
   KB_EXPORT_WIKI_ZIP: 'kb:exportWikiZip',
   /** Structural graph: sources → chunks, wiki pages → chunks, optional related sources. */
   KB_KNOWLEDGE_GRAPH: 'kb:knowledgeGraph',
+  /** Semantic graph: noun entities, verb relations, adjective descriptors, and scope overlaps. */
+  KB_SEMANTIC_GRAPH: 'kb:semanticGraph',
+  /** Keyword-first graph with canonical entities and typed relations. */
+  KB_KEYWORD_GRAPH: 'kb:keywordGraph',
+  /** Bounded neighborhood expansion around one keyword node. */
+  KB_KEYWORD_GRAPH_NEIGHBORS: 'kb:keywordGraphNeighbors',
+  /** Fuzzy keyword lookup for graph search/focus. */
+  KB_KEYWORD_GRAPH_SEARCH: 'kb:keywordGraphSearch',
   /** Deterministic cluster / hub / refinement analysis over the current graph; optional markdown ingest. */
   KB_GRAPH_ANALYSIS_RUN: 'kb:graphAnalysisRun',
   /** After a chat turn: run a short local model pass to extract wiki notes and ingest (optional). */
@@ -177,6 +185,13 @@ export const IPC = {
   INTEGRATION_MODEL_ACTIVITY: 'integration:modelActivity',
   /** Renderer → main: last N reports (for initial load). */
   INTEGRATION_PLUGIN_REPORTS_LIST: 'integration:pluginReportsList',
+  /** Renderer → main: launch local Claude bridge wrapper process. */
+  CLAUDE_BRIDGE_START: 'integration:claudeBridgeStart',
+  /** Renderer → main: memory capture summary for Claude integration. */
+  CLAUDE_MEMORY_STATUS: 'integration:claudeMemoryStatus',
+  CLAUDE_MEMORY_SESSIONS: 'integration:claudeMemorySessions',
+  CLAUDE_MEMORY_SESSION_EVENTS: 'integration:claudeMemorySessionEvents',
+  CLAUDE_MEMORY_EXPORT_JSONL: 'integration:claudeMemoryExportJsonl',
   /** Renderer → main: GET http://127.0.0.1:{port}/health from the main process (loopback self-test). */
   INTEGRATION_BRIDGE_SELF_TEST: 'integration:bridgeSelfTest',
 

@@ -8,6 +8,7 @@ import {
   type MessageBoxOptions
 } from 'electron'
 import { randomUUID } from 'crypto'
+import { spawnSync } from 'child_process'
 import { basename, join, resolve } from 'path'
 
 function llamaPathsDiffer(a: string, b: string): boolean {
@@ -148,6 +149,7 @@ import { clearAllAppCaches, deleteAllChildrenInDirectory } from '../services/dat
 import { migrateChatProfileSettings, migrateRoleSetupIfNeeded, resetElectronStoreToFactory } from '../storeDefaults'
 import { configureIntegrationServer } from '../services/integrationServer'
 import { createOntologyService } from '../services/ontologyService'
+import { createGraphQueryService } from '../services/graphQueryService'
 import { ensureDemoSeeded } from '../services/demoSeed'
 import { runIntegrationChatPipeline } from '../services/integrationChatPipeline'
 import { getPluginReportHistory } from '../services/pluginIntegrationHub'
@@ -172,6 +174,12 @@ import {
   upsertDomainProfile,
   updateEvidenceCardStatus
 } from '../services/trainingWorkflowStore'
+import {
+  exportClaudeMemorySessionsToTrainingJsonl,
+  getClaudeMemoryCaptureStats,
+  listClaudeMemoryEvents,
+  listClaudeMemorySessions
+} from '../services/claudeMemoryStore'
 import {
   addFormalProfile,
   addManualCodebase,
@@ -269,6 +277,9 @@ const configSchema = z.object({
   integrationListenEnabled: z.boolean().optional(),
   integrationPort: z.number().int().min(1024).max(65535).optional(),
   integrationToken: z.string().max(256).optional(),
+  claudeMemoryCaptureEnabled: z.boolean().optional(),
+  claudeMemoryMaxEventBytes: z.number().int().min(2048).max(8_000_000).optional(),
+  claudeMemoryRetentionDays: z.number().int().min(0).max(3650).optional(),
   ideJourneyChecklist: z
     .object({
       backendReady: z.boolean().optional(),
@@ -399,9 +410,16 @@ export function registerIpc(ctx: IpcContext): void {
     }
   }
   const ontology = createOntologyService(db)
+  const graphQueryService = createGraphQueryService(db)
+  try {
+    ontology.backfillSemanticGraph()
+  } catch (e) {
+    logLine('warn', 'semantic_backfill_failed', { error: e instanceof Error ? e.message : String(e) })
+  }
   void ensureDemoSeeded({ db, store, ontology })
 
   ipcMain.handle(IPC.GET_PATHS, () => ({
+    appPath: app.getAppPath(),
     userData,
     logs: join(userData, 'logs'),
     modelsDefault: modelsDir(),
@@ -1584,16 +1602,19 @@ export function registerIpc(ctx: IpcContext): void {
     })
     if (r.canceled || !r.filePaths[0]) {
       emit({ kind: 'cancelled' })
-      return null
+      return { started: false, cancelled: true }
     }
     const fp = r.filePaths[0]
+    const jobId = randomUUID()
     emit({ kind: 'selected', filePath: fp })
-    try {
-      return await kbService.ingestFile(db, fp, undefined, (p) => emit(p), getRuntime() ?? null)
-    } catch (e) {
-      emit({ kind: 'error', message: e instanceof Error ? e.message : String(e) })
-      throw e
-    }
+    void (async () => {
+      try {
+        await kbService.ingestFile(db, fp, undefined, (p) => emit(p), getRuntime() ?? null, jobId)
+      } catch (e) {
+        emit({ kind: 'error', message: e instanceof Error ? e.message : String(e) })
+      }
+    })()
+    return { started: true, jobId, filePath: fp }
   })
   ipcMain.handle(IPC.KB_INGEST_JOBS, (_e, limit?: number) => kbService.listIngestJobs(db, Number(limit) || 40))
 
@@ -1725,7 +1746,45 @@ export function registerIpc(ctx: IpcContext): void {
     await kbService.exportWikiZip(db, filePath)
     return { ok: true as const, path: filePath }
   })
-  ipcMain.handle(IPC.KB_KNOWLEDGE_GRAPH, () => kbService.getKnowledgeGraph(db))
+  ipcMain.handle(IPC.KB_KNOWLEDGE_GRAPH, () => graphQueryService.getStructuralGraph())
+  ipcMain.handle(IPC.KB_SEMANTIC_GRAPH, () => graphQueryService.getSemanticGraph())
+  ipcMain.handle(IPC.KB_KEYWORD_GRAPH, (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        query: z.string().max(500).optional(),
+        relationTypes: z.array(z.string().max(96)).max(40).optional(),
+        minConfidence: z.number().min(0).max(1).optional(),
+        limitNodes: z.number().int().min(20).max(1000).optional(),
+        limitEdges: z.number().int().min(20).max(5000).optional(),
+        cursor: z.string().min(1).max(500).optional()
+      })
+      .optional()
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid keyword graph query payload')
+    return graphQueryService.getKeywordGraph(parsed.data)
+  })
+  ipcMain.handle(IPC.KB_KEYWORD_GRAPH_NEIGHBORS, (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        nodeId: z.string().min(1).max(200),
+        hops: z.number().int().min(1).max(3).optional(),
+        limitNodes: z.number().int().min(10).max(600).optional(),
+        limitEdges: z.number().int().min(10).max(2500).optional()
+      })
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid keyword graph neighbor payload')
+    return graphQueryService.getKeywordGraphNeighbors(parsed.data)
+  })
+  ipcMain.handle(IPC.KB_KEYWORD_GRAPH_SEARCH, (_e, raw: unknown) => {
+    const parsed = z
+      .object({
+        query: z.string().min(1).max(200),
+        limit: z.number().int().min(1).max(80).optional()
+      })
+      .safeParse(raw)
+    if (!parsed.success) throw new Error('Invalid keyword graph search payload')
+    return graphQueryService.searchKeywordGraphNodes(parsed.data.query, parsed.data.limit)
+  })
 
   ipcMain.handle(IPC.KB_GRAPH_ANALYSIS_RUN, (_e, raw: unknown) => {
     const ingest =
@@ -1733,7 +1792,7 @@ export function registerIpc(ctx: IpcContext): void {
       typeof raw === 'object' &&
       (raw as { ingestReport?: unknown }).ingestReport === true
     try {
-      const payload = kbService.getKnowledgeGraph(db)
+      const payload = graphQueryService.getStructuralGraph()
       const result = analyzeKnowledgeGraph(payload)
       const markdown = knowledgeGraphAnalysisToMarkdown(payload, result)
       let ingestedSourceId: string | undefined
@@ -1992,6 +2051,7 @@ export function registerIpc(ctx: IpcContext): void {
       baseModelPath?: string
       datasetPath?: string
       kbSourceIds?: string[]
+      claudeSessionIds?: string[]
       displayName?: string
       domainId?: string
     }
@@ -2000,10 +2060,14 @@ export function registerIpc(ctx: IpcContext): void {
     const kbSourceIds = Array.isArray(p.kbSourceIds)
       ? p.kbSourceIds.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
       : undefined
+    const claudeSessionIds = Array.isArray(p.claudeSessionIds)
+      ? p.claudeSessionIds.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+      : undefined
     return trainOrchestrator.startTrainJob(db, userData, {
       baseModelPath: base,
       datasetPath: typeof p.datasetPath === 'string' && p.datasetPath.trim() ? p.datasetPath.trim() : undefined,
       kbSourceIds,
+      claudeSessionIds,
       displayName: typeof p.displayName === 'string' ? p.displayName : undefined,
       domainId: typeof p.domainId === 'string' && p.domainId.trim() ? p.domainId.trim() : undefined,
       modelsDir: modelsDir()
@@ -2098,6 +2162,105 @@ export function registerIpc(ctx: IpcContext): void {
 
   /** Persist HF token with safeStorage */
   ipcMain.handle(IPC.INTEGRATION_PLUGIN_REPORTS_LIST, () => getPluginReportHistory())
+  ipcMain.handle(IPC.CLAUDE_BRIDGE_START, (_e, raw?: unknown) => {
+    const p = z
+      .object({
+        serverName: z.string().min(1).max(64).optional()
+      })
+      .safeParse(raw ?? {})
+    if (!p.success) return { ok: false, error: 'Invalid bridge launch payload' }
+
+    const scriptPath = join(app.getAppPath(), 'scripts', 'claude-bridge-mcp.ps1')
+    if (!existsSync(scriptPath)) {
+      return { ok: false, error: `Bridge launcher not found at ${scriptPath}` }
+    }
+    const rawPort = store.get('integrationPort')
+    const port =
+      typeof rawPort === 'number' && Number.isFinite(rawPort)
+        ? Math.min(65535, Math.max(1024, Math.floor(rawPort)))
+        : 17373
+    const tokenRaw = store.get('integrationToken')
+    const token = typeof tokenRaw === 'string' ? tokenRaw.trim() : ''
+    const serverName = p.data.serverName?.trim() || 'my-bridge'
+    const stdioArgs = [
+      'mcp',
+      'add',
+      '--transport',
+      'stdio',
+      serverName,
+      '--',
+      'powershell',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      scriptPath,
+      '-Url',
+      `http://127.0.0.1:${port}`,
+      ...(token ? ['-Token', token] : [])
+    ]
+
+    try {
+      spawnSync('claude', ['mcp', 'remove', serverName], {
+        cwd: app.getAppPath(),
+        shell: process.platform === 'win32',
+        stdio: 'ignore'
+      })
+      const add = spawnSync(
+        'claude',
+        stdioArgs,
+        {
+          cwd: app.getAppPath(),
+          shell: process.platform === 'win32',
+          encoding: 'utf8'
+        }
+      )
+      if (add.status !== 0) {
+        const detail = [add.stdout, add.stderr].filter(Boolean).join('\n').trim()
+        return { ok: false, error: detail || `claude mcp add failed (exit ${add.status ?? 'unknown'})` }
+      }
+      return {
+        ok: true,
+        detail: `Configured Claude MCP server "${serverName}".`,
+        command: `claude mcp add --transport stdio ${serverName} -- powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${scriptPath}" -Url http://127.0.0.1:${port}${token ? ' -Token YOUR_TOKEN' : ''}`
+      }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+  ipcMain.handle(IPC.CLAUDE_MEMORY_STATUS, () => getClaudeMemoryCaptureStats(db))
+  ipcMain.handle(IPC.CLAUDE_MEMORY_SESSIONS, (_e, raw?: unknown) => {
+    const p = z
+      .object({
+        limit: z.number().int().min(1).max(300).optional(),
+        offset: z.number().int().min(0).max(200_000).optional()
+      })
+      .safeParse(raw ?? {})
+    if (!p.success) return listClaudeMemorySessions(db, { limit: 100, offset: 0 })
+    return listClaudeMemorySessions(db, { limit: p.data.limit, offset: p.data.offset })
+  })
+  ipcMain.handle(IPC.CLAUDE_MEMORY_SESSION_EVENTS, (_e, raw: unknown) => {
+    const p = z
+      .object({
+        sessionId: z.string().min(1).max(128),
+        limit: z.number().int().min(1).max(2000).optional(),
+        offset: z.number().int().min(0).max(500_000).optional()
+      })
+      .safeParse(raw)
+    if (!p.success) throw new Error('Invalid Claude memory event query')
+    return listClaudeMemoryEvents(db, p.data.sessionId, { limit: p.data.limit, offset: p.data.offset })
+  })
+  ipcMain.handle(IPC.CLAUDE_MEMORY_EXPORT_JSONL, (_e, raw: unknown) => {
+    const p = z
+      .object({
+        sessionIds: z.array(z.string().min(1)).min(1).max(200),
+        destPath: z.string().min(1).max(8192)
+      })
+      .safeParse(raw)
+    if (!p.success) throw new Error('Invalid Claude memory export payload')
+    return exportClaudeMemorySessionsToTrainingJsonl(db, p.data.sessionIds, p.data.destPath)
+  })
 
   ipcMain.handle(IPC.INTEGRATION_BRIDGE_SELF_TEST, async (_e, raw?: unknown): Promise<IntegrationBridgeSelfTestResult> => {
     const smokeChat =

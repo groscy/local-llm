@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import type { IdeJourneyChecklist, IntegrationBridgeSelfTestResult } from '@shared/ideJourney'
-import type { PluginIntegrationReport } from '@shared/types'
+import type { ClaudeMemoryCaptureStats, PluginIntegrationReport } from '@shared/types'
 import { IDE_SETUP_BRIDGE_RAG_NOTE, IDE_SETUP_OTHER_EDITORS } from '@shared/ideSetupQuickReference'
 
 const USER_GUIDE_IDE_ANCHOR =
@@ -83,6 +83,7 @@ export function IdeDeveloperJourneyView({
   const [bridgeTestBusy, setBridgeTestBusy] = useState(false)
   const [smokeBusy, setSmokeBusy] = useState(false)
   const [selfTestResult, setSelfTestResult] = useState<IntegrationBridgeSelfTestResult | null>(null)
+  const [memoryStats, setMemoryStats] = useState<ClaudeMemoryCaptureStats | null>(null)
   const prevRuntimeRunning = useRef(runtimeRunning)
   const [showBackendHint, setShowBackendHint] = useState(false)
 
@@ -91,6 +92,24 @@ export function IdeDeveloperJourneyView({
     const id = window.setInterval(() => void onRefreshRuntime(), 5000)
     return () => window.clearInterval(id)
   }, [onRefreshRuntime])
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async (): Promise<void> => {
+      try {
+        const stats = await window.api.claudeMemoryStatus()
+        if (!cancelled) setMemoryStats(stats)
+      } catch {
+        if (!cancelled) setMemoryStats(null)
+      }
+    }
+    void load()
+    const id = window.setInterval(() => void load(), 5000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [])
 
   useEffect(() => {
     if (!prevRuntimeRunning.current && runtimeRunning) {
@@ -144,6 +163,37 @@ ${tokenConfigured ? `  -H "Authorization: Bearer YOUR_TOKEN" \\\n` : ''}  -d '{"
 
   const recentReports = [...pluginReports].reverse().slice(0, 12)
   const hasChatCompleted = pluginReports.some((r) => r.kind === 'chat_completed')
+  const lastPluginSeenAt = pluginReports.length > 0 ? pluginReports[pluginReports.length - 1]?.receivedAt : null
+  const selfTestBridgeOk = selfTestResult?.steps.find((s) => s.id === 'health')?.ok ?? null
+
+  const connectionNodes: Array<{ id: string; label: string; detail: string; state: 'ok' | 'warn' | 'neutral' }> = [
+    {
+      id: 'ide-plugin',
+      label: 'IDE plugin',
+      detail: lastPluginSeenAt
+        ? `Last report ${new Date(lastPluginSeenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+        : 'No reports yet',
+      state: lastPluginSeenAt ? 'ok' : 'warn'
+    },
+    {
+      id: 'bridge',
+      label: 'Bridge',
+      detail: bridgeEnabled ? `127.0.0.1:${bridgePort}` : 'Disabled',
+      state: bridgeEnabled ? 'ok' : 'warn'
+    },
+    {
+      id: 'runtime',
+      label: 'Runtime',
+      detail: runtimeRunning ? `Running (${runtimeKind || '?'})` : 'Stopped',
+      state: runtimeRunning ? 'ok' : 'warn'
+    },
+    {
+      id: 'memory',
+      label: 'Memory store',
+      detail: memoryStats ? `${memoryStats.events} events · ${memoryStats.sessions} sessions` : 'Unavailable',
+      state: memoryStats && memoryStats.events > 0 ? 'ok' : memoryStats ? 'neutral' : 'warn'
+    }
+  ]
 
   return (
     <div className="ide-journey ide-journey-layout">
@@ -225,6 +275,30 @@ ${tokenConfigured ? `  -H "Authorization: Bearer YOUR_TOKEN" \\\n` : ''}  -d '{"
                 </div>
               </li>
             </ul>
+            <div className="ide-journey-connection-map" role="region" aria-label="Connection state map">
+              <div className="ide-journey-connection-head">
+                <strong>Connection state</strong>
+                <span className="muted">
+                  {selfTestBridgeOk == null
+                    ? 'Run bridge test for transport diagnostics'
+                    : selfTestBridgeOk
+                      ? 'Bridge transport verified'
+                      : 'Bridge transport failed'}
+                </span>
+              </div>
+              <div className="ide-journey-connection-line">
+                {connectionNodes.map((node, idx) => (
+                  <div
+                    key={node.id}
+                    className={`ide-journey-connection-node state-${node.state}${idx < connectionNodes.length - 1 ? ' has-link' : ''}`}
+                  >
+                    <div className="node-dot" aria-hidden />
+                    <div className="node-label">{node.label}</div>
+                    <div className="node-detail muted">{node.detail}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </section>
 
           <section className="ide-journey-card" id="ide-journey-actions" aria-labelledby="ide-journey-actions-heading">

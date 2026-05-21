@@ -31,6 +31,7 @@ import type {
   HfModelDetail,
   HfModelSummary,
   KbSearchHit,
+  KbChunk,
   KbImportConfidence,
   KnowledgeGraphPayload,
   OntologyEntityDetails,
@@ -39,15 +40,18 @@ import type {
   OntologySubgraphPayload,
   MetricsSnapshot,
   PluginIntegrationReport,
+  ClaudeMemoryCaptureStats,
   RuntimeLoadProgress,
   RuntimeStatus,
   WikiChatHighlightTerm,
   WikiKeywordCandidate,
   WikiGlossaryEntry,
   WikiPassageSummary,
+  WikiPageMetadata,
   WikiReanalyzeProgress,
   WikiReanalyzeResult,
   WikiRelatedSource,
+  WikiRawReferencePayload,
   WikiTopic,
   WikiSourceKind,
   PromptDomainRow,
@@ -151,7 +155,7 @@ import { touchPresenceSessionHidden } from './presenceSession'
 import { MetricsTimeSeries } from './MetricsTimeSeries'
 import { IssuesPinnedWidget } from './IssuesPinnedWidget'
 import { MetricsPinnedWidget } from './MetricsPinnedWidget'
-import { KnowledgeGraphView } from './KnowledgeGraphView'
+import { KeywordGraphSigmaView } from './knowledgeGraph/KeywordGraphSigmaView'
 import { OntologyView } from './OntologyView'
 import { HfModelBrowserDrawer } from './components/HfModelBrowserDrawer'
 import { buildWikiTocGroupsFromRoot, WikiArticleTocNav, type WikiTocGroup } from './WikiArticleToc'
@@ -1233,9 +1237,10 @@ export default function App(): React.ReactElement {
     () =>
       roleLayoutResolved.taskNav.filter((task) => {
         if (!task.mainView) return true
+        if (task.mainView === 'electronDev') return devShellChrome
         return advancedSurfacesVisible || !isAdvancedMainView(task.mainView)
       }),
-    [roleLayoutResolved.taskNav, advancedSurfacesVisible]
+    [roleLayoutResolved.taskNav, advancedSurfacesVisible, devShellChrome]
   )
   const visibleToolDrawers = useMemo(
     () => (advancedSurfacesVisible ? roleLayoutResolved.toolDrawers : roleLayoutResolved.toolDrawers.filter((id) => id !== 'hf')),
@@ -1485,7 +1490,13 @@ export default function App(): React.ReactElement {
   const [promptDomainSuffixDrafts, setPromptDomainSuffixDrafts] = useState<Record<string, string>>({})
   const [wikiHighlightTerms, setWikiHighlightTerms] = useState<WikiChatHighlightTerm[]>([])
   const [wikiBody, setWikiBody] = useState('')
+  const [wikiSummaryMarkdown, setWikiSummaryMarkdown] = useState('')
   const [wikiImportConfidence, setWikiImportConfidence] = useState<KbImportConfidence | null>(null)
+  const [wikiMetadata, setWikiMetadata] = useState<WikiPageMetadata | null>(null)
+  const [wikiRawReference, setWikiRawReference] = useState<WikiRawReferencePayload | null>(null)
+  const [wikiRawChunks, setWikiRawChunks] = useState<KbChunk[]>([])
+  const [wikiRawExpanded, setWikiRawExpanded] = useState(false)
+  const [wikiEvidenceTraceIds, setWikiEvidenceTraceIds] = useState<string[]>([])
   const [wikiTitle, setWikiTitle] = useState('')
   const [wikiGlossary, setWikiGlossary] = useState<WikiGlossaryEntry[]>([])
   const [wikiRelated, setWikiRelated] = useState<WikiRelatedSource[]>([])
@@ -1544,6 +1555,12 @@ export default function App(): React.ReactElement {
   const wikiSearchSeqRef = useRef(0)
   const wikiMainSearchInputRef = useRef<HTMLInputElement>(null)
   const [kgPayload, setKgPayload] = useState<KnowledgeGraphPayload | null>(null)
+  const [kgComparisonMode, setKgComparisonMode] = useState<'keyword' | 'analysis'>('keyword')
+  const [kgKeywordMetrics, setKgKeywordMetrics] = useState<{ nodes: number; edges: number; truncated: boolean }>({
+    nodes: 0,
+    edges: 0,
+    truncated: false
+  })
   const [kgLoading, setKgLoading] = useState(false)
   const [kgAnalysisBusy, setKgAnalysisBusy] = useState(false)
   const [kgAnalysisError, setKgAnalysisError] = useState<string | null>(null)
@@ -1957,6 +1974,7 @@ export default function App(): React.ReactElement {
   const activityChatTokensRef = useRef<ActivityChatTokens | null>(null)
   const [activityTokenHistory, setActivityTokenHistory] = useState<ActivityTokenHistoryPoint[]>([])
   const [integrationPluginReports, setIntegrationPluginReports] = useState<PluginIntegrationReport[]>([])
+  const [claudeMemoryStats, setClaudeMemoryStats] = useState<ClaudeMemoryCaptureStats | null>(null)
   const [idePromptMonitor, setIdePromptMonitor] = useState<IdePromptMonitorState>({
     modelState: 'idle',
     requestId: null,
@@ -2452,8 +2470,23 @@ export default function App(): React.ReactElement {
         setWikiUploadBusy(false)
         setWikiUploadFormat(null)
       }
+      if (payload.kind === 'done') {
+        void loadWiki()
+        notifyWhenBackground({
+          origin: 'wiki',
+          variant: 'success',
+          title: 'Wiki updated',
+          message: 'A new document was added to your library.',
+          action: {
+            label: 'Open wiki',
+            onClick: () => {
+              openKnowledgeLibrary()
+            }
+          }
+        })
+      }
     })
-  }, [])
+  }, [loadWiki, notifyWhenBackground, openKnowledgeLibrary])
 
   useEffect(() => {
     if (typeof window.api.onWikiReanalyzeProgress !== 'function') return
@@ -3320,10 +3353,11 @@ export default function App(): React.ReactElement {
 
   useEffect(() => {
     if (advancedSurfacesVisible) return
+    if (mainView === 'electronDev' && devShellChrome) return
     if (!isAdvancedMainView(mainView)) return
     setMainView(layoutDefaultMainArea(roleLayoutResolved))
     setDrawer(null)
-  }, [advancedSurfacesVisible, mainView, roleLayoutResolved])
+  }, [advancedSurfacesVisible, mainView, roleLayoutResolved, devShellChrome])
 
   useEffect(() => {
     const allowed = visibleSettingsNavItems.map((x) => x.id)
@@ -3456,6 +3490,24 @@ export default function App(): React.ReactElement {
       })
     })
     return off
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async (): Promise<void> => {
+      try {
+        const stats = await window.api.claudeMemoryStatus()
+        if (!cancelled) setClaudeMemoryStats(stats)
+      } catch {
+        if (!cancelled) setClaudeMemoryStats(null)
+      }
+    }
+    void load()
+    const id = window.setInterval(() => void load(), 5000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
   }, [])
 
   useEffect(() => {
@@ -5546,6 +5598,18 @@ export default function App(): React.ReactElement {
     }
   }
 
+  function openWikiGraphContext(opts: {
+    sourceId: string
+    graphNodeIds?: string[]
+    evidenceTraceIds?: string[]
+    sectionOrd?: number | null
+    sectionAnchor?: string | null
+  }): void {
+    setMainView('wiki')
+    setWikiSubview('knowledgeGraph')
+    void loadKnowledgeGraph()
+  }
+
   async function openWikiPage(sourceId: string, opts?: { sectionOrd?: number | null }): Promise<void> {
     setWikiSubview('article')
     setWikiSelectedId(sourceId)
@@ -5553,8 +5617,12 @@ export default function App(): React.ReactElement {
       typeof opts?.sectionOrd === 'number' && Number.isFinite(opts.sectionOrd) ? Math.max(0, opts.sectionOrd) : null
     const p = await window.api.kbWikiPage(sourceId)
     setWikiTitle(p.title)
+    setWikiSummaryMarkdown(p.summaryMarkdown || p.body)
     setWikiBody(p.body)
-    setWikiImportConfidence(p.confidence ?? null)
+    setWikiMetadata(p.metadata ?? null)
+    setWikiImportConfidence(p.metadata?.confidence ?? p.confidence ?? null)
+    setWikiRawReference(p.rawReference ?? null)
+    setWikiEvidenceTraceIds(p.evidenceTraceIds ?? [])
     setWikiGlossary(p.glossary)
     setWikiRelated(p.relatedSources)
     setWikiPassages(p.passages ?? [])
@@ -5564,6 +5632,12 @@ export default function App(): React.ReactElement {
     setWikiPassageFilterDraft('')
     setWikiExtractKeywordDraft(p.suggestedKeywords?.[0]?.keyword ?? p.title.split(/\s+/).slice(0, 3).join(' '))
     setWikiExtractStatus(null)
+    setWikiRawExpanded(false)
+    try {
+      setWikiRawChunks(await window.api.kbChunks(sourceId))
+    } catch {
+      setWikiRawChunks([])
+    }
   }
 
   async function navigateChatKeywordToWiki(sourceId: string): Promise<void> {
@@ -5745,20 +5819,10 @@ export default function App(): React.ReactElement {
     setWikiUploadProgress(null)
     setWikiUploadFormat(null)
     try {
-      await window.api.kbIngestFile()
-      await loadWiki()
-      notifyWhenBackground({
-        origin: 'wiki',
-        variant: 'success',
-        title: 'Wiki updated',
-        message: 'A new document was added to your library.',
-        action: {
-          label: 'Open wiki',
-          onClick: () => {
-            openKnowledgeLibrary()
-          }
-        }
-      })
+      const started = await window.api.kbIngestFile()
+      if (!started.started) {
+        setWikiUploadBusy(false)
+      }
     } catch (e) {
       setWikiUploadBusy(false)
       setErr(String(e))
@@ -5893,7 +5957,17 @@ export default function App(): React.ReactElement {
     if (p.kind === 'stage') return typeof p.progress === 'number' ? Math.round(p.progress * 100) : 0
     if (p.kind === 'selected') return 2
     if (p.kind === 'reading') return 12
-    if (p.kind === 'chunking') return 46
+    if (p.kind === 'pdf_page_progress') {
+      if (p.totalPages <= 0) return 14
+      const ratio = Math.max(0, Math.min(1, p.processedPages / p.totalPages))
+      return Math.round(14 + ratio * 32)
+    }
+    if (p.kind === 'chunking') {
+      if (p.step === 'segmenting') return 40
+      if (p.step === 'title_generation') return 46
+      if (p.step === 'finalizing') return 52
+      return 46
+    }
     if (p.kind === 'indexing') {
       const ratio = p.total > 0 ? p.inserted / p.total : 0
       return Math.round(55 + Math.min(0.35, Math.max(0, ratio)) * 100)
@@ -5908,10 +5982,35 @@ export default function App(): React.ReactElement {
     if (p.kind === 'selected') return `Selected: ${p.filePath}`
     if (p.kind === 'stage') return p.stageLabel
     if (p.kind === 'reading') return `Reading ${p.format.toUpperCase()} file…`
+    if (p.kind === 'pdf_page_progress') {
+      const processed = Math.max(0, Math.min(p.totalPages, p.processedPages))
+      const left = Math.max(0, p.pagesLeft)
+      if (p.totalPages > 0 && left === 0 && processed >= p.totalPages) {
+        return 'PDF pages processed. Preparing chunks…'
+      }
+      return `Processing PDF pages: ${processed}/${p.totalPages} processed, ${left} left.`
+    }
     if (p.kind === 'chunking') {
-      return wikiUploadFormat === 'pdf'
-        ? `Preparing ${p.chunkCount} chunk${p.chunkCount === 1 ? '' : 's'} and generating passage titles…`
-        : `Preparing ${p.chunkCount} chunk${p.chunkCount === 1 ? '' : 's'}…`
+      const sectionText =
+        typeof p.sectionCount === 'number'
+          ? `${p.sectionCount} section${p.sectionCount === 1 ? '' : 's'}`
+          : 'document sections'
+      const charText =
+        typeof p.normalizedCharCount === 'number'
+          ? `${p.normalizedCharCount.toLocaleString()} normalized chars`
+          : null
+      if (p.step === 'segmenting') {
+        return `Segmenting ${sectionText} into chunks${charText ? ` (${charText})` : ''}…`
+      }
+      if (p.step === 'title_generation') {
+        return wikiUploadFormat === 'pdf'
+          ? `Generated ${p.chunkCount} chunk${p.chunkCount === 1 ? '' : 's'} from ${sectionText}; creating passage titles…`
+          : `Generated ${p.chunkCount} chunk${p.chunkCount === 1 ? '' : 's'} from ${sectionText}; preparing index records…`
+      }
+      if (p.step === 'finalizing') {
+        return `Finalizing ${p.chunkCount} chunk${p.chunkCount === 1 ? '' : 's'} for indexing and analysis…`
+      }
+      return `Preparing ${p.chunkCount} chunk${p.chunkCount === 1 ? '' : 's'}…`
     }
     if (p.kind === 'indexing') return `Indexing chunks: ${p.inserted}/${p.total}`
     if (p.kind === 'analysis') {
@@ -6148,7 +6247,7 @@ export default function App(): React.ReactElement {
       return
     }
     if (!task.mainView) return
-    if (!advancedSurfacesVisible && isAdvancedMainView(task.mainView)) return
+    if (!advancedSurfacesVisible && isAdvancedMainView(task.mainView) && task.mainView !== 'electronDev') return
     if (task.mainView === 'train') {
       openTrainSurface()
       return
@@ -6186,6 +6285,11 @@ export default function App(): React.ReactElement {
           resourceLoadPercent={backdropSnap?.systemLoadPercent}
           bridgeStatusPositive={integrationListenEnabled}
           runtimeStatusPositive={Boolean(runtimeStatus?.running)}
+          claudeBridgeStatusPositive={
+            integrationListenEnabled &&
+            typeof claudeMemoryStats?.lastIngestAt === 'number' &&
+            Date.now() - claudeMemoryStats.lastIngestAt < 5 * 60 * 1000
+          }
           ctxPercent={backdropCtxPercent}
           personality={modelProfile.vibe}
           wakeIntensity={wakeBackdropIntensity}
@@ -6244,7 +6348,7 @@ export default function App(): React.ReactElement {
               </button>
             )
           })}
-          {advancedSurfacesVisible && devShellChrome && !visibleRoleTasks.some((task) => task.mainView === 'electronDev') ? (
+          {devShellChrome && !visibleRoleTasks.some((task) => task.mainView === 'electronDev') ? (
             <button
               type="button"
               className={`nav-btn ${mainView === 'electronDev' ? 'active' : ''}`}
@@ -7754,12 +7858,14 @@ export default function App(): React.ReactElement {
                 <div className="wiki-nav-header">
                   <h3>Library</h3>
                   <input
+                    ref={wikiMainSearchInputRef}
                     id="wiki-library-search"
                     type="search"
                     className="wiki-search-input"
                     placeholder="Search titles and content…"
                     value={wikiSearchQuery}
                     onChange={(e) => setWikiSearchQuery(e.target.value)}
+                    onKeyDown={onWikiSearchKeyDown}
                     autoComplete="off"
                     spellCheck={false}
                     aria-busy={wikiHasSearch && wikiSearchBusy}
@@ -7775,11 +7881,21 @@ export default function App(): React.ReactElement {
                     </button>
                   </div>
                   {wikiUploadProgress && (
-                    <p className="muted" style={{ marginTop: 8 }}>
-                      {typeof wikiUploadPercent === 'number'
-                        ? `${Math.max(0, Math.min(100, wikiUploadPercent))}% · ${wikiUploadStatusText ?? ''}`
-                        : (wikiUploadStatusText ?? '')}
-                    </p>
+                    <div className="wiki-upload-progress" role="status" aria-live="polite">
+                      {typeof wikiUploadPercent === 'number' ? (
+                        <div className="wiki-upload-progress-track" aria-hidden="true">
+                          <div
+                            className="wiki-upload-progress-fill"
+                            style={{ width: `${Math.max(0, Math.min(100, wikiUploadPercent))}%` }}
+                          />
+                        </div>
+                      ) : null}
+                      <p className="muted wiki-upload-progress-text">
+                        {typeof wikiUploadPercent === 'number'
+                          ? `${Math.max(0, Math.min(100, wikiUploadPercent))}% · ${wikiUploadStatusText ?? ''}`
+                          : (wikiUploadStatusText ?? '')}
+                      </p>
+                    </div>
                   )}
                 </div>
                 <div className="wiki-topic-list">
@@ -7949,28 +8065,6 @@ export default function App(): React.ReactElement {
                     Knowledge graph
                   </button>
                 </div>
-                {wikiSubview === 'article' && !wikiTitle.trim() ? (
-                  <div className="wiki-main-search-region">
-                    <div className="wiki-main-search-bar">
-                      <label htmlFor="wiki-main-search" className="wiki-main-search-label visually-hidden">
-                        Search library
-                      </label>
-                      <input
-                        ref={wikiMainSearchInputRef}
-                        id="wiki-main-search"
-                        type="search"
-                        className="wiki-search-input wiki-search-input--main"
-                        placeholder="Search titles and content…"
-                        value={wikiSearchQuery}
-                        onChange={(e) => setWikiSearchQuery(e.target.value)}
-                        onKeyDown={onWikiSearchKeyDown}
-                        autoComplete="off"
-                        spellCheck={false}
-                        aria-busy={wikiHasSearch && wikiSearchBusy}
-                      />
-                    </div>
-                  </div>
-                ) : null}
               {wikiSubview === 'article' ? (
               <article className={`wiki-article${wikiTitle.trim() ? '' : ' wiki-article--no-selection'}`}>
                 {wikiTitle ? (
@@ -7981,11 +8075,18 @@ export default function App(): React.ReactElement {
                           className="wiki-cleanup-progress-circle"
                           style={
                             {
-                              '--cleanup-progress': `${Math.max(0, Math.min(100, Math.round(wikiCleanupProgress)))}%`
-                            } as CSSProperties & Record<'--cleanup-progress', string>
+                              '--cleanup-progress': `${Math.max(0, Math.min(100, Math.round(wikiCleanupProgress)))}%`,
+                              '--cleanup-progress-tail-start': `${Math.max(0, Math.min(100, wikiCleanupProgress - 14))}%`,
+                              '--cleanup-progress-tail-mid': `${Math.max(0, Math.min(100, wikiCleanupProgress - 5))}%`,
+                              '--cleanup-progress-value': String(Math.max(0, Math.min(100, wikiCleanupProgress)))
+                            } as CSSProperties &
+                              Record<
+                                '--cleanup-progress' | '--cleanup-progress-tail-start' | '--cleanup-progress-tail-mid' | '--cleanup-progress-value',
+                                string
+                              >
                           }
                         >
-                          <span>{Math.max(0, Math.min(100, Math.round(wikiCleanupProgress)))}%</span>
+                          <span className="wiki-cleanup-progress-dot" aria-hidden="true" />
                         </div>
                         <p>{wikiCleanupLabel}</p>
                       </div>
@@ -8042,6 +8143,21 @@ export default function App(): React.ReactElement {
                               <button
                                 type="button"
                                 className="btn-secondary"
+                                onClick={() =>
+                                  openWikiGraphContext({
+                                    sourceId: wikiSelectedId,
+                                    graphNodeIds: [wikiSelectedId, ...(wikiMetadata ? [wikiMetadata.sourceId] : [])],
+                                    evidenceTraceIds: wikiEvidenceTraceIds
+                                  })
+                                }
+                              >
+                                Open in graph
+                              </button>
+                            ) : null}
+                            {wikiSelectedId ? (
+                              <button
+                                type="button"
+                                className="btn-secondary"
                                 onClick={() => void runWikiArticleCleanup()}
                                 disabled={wikiCleanupBusy}
                               >
@@ -8058,18 +8174,126 @@ export default function App(): React.ReactElement {
                             ) : null}
                           </div>
                         </div>
+                        {wikiMetadata ? (
+                          <div className="wiki-article-metadata-card">
+                            <h2 className="wiki-article-meta-heading">Article metadata</h2>
+                            <div className="wiki-article-metadata-grid">
+                              <div className="wiki-article-meta-item">
+                                <span>Source</span>
+                                <strong>{wikiMetadata.sourceTitle || wikiTitle}</strong>
+                              </div>
+                              <div className="wiki-article-meta-item">
+                                <span>Imported</span>
+                                <strong>
+                                  {wikiMetadata.importedAt ? formatChatTimestamp(wikiMetadata.importedAt) : 'Unknown'}
+                                </strong>
+                              </div>
+                              <div className="wiki-article-meta-item">
+                                <span>Domain</span>
+                                <strong>{wikiMetadata.domainTitle || 'Unassigned'}</strong>
+                              </div>
+                              <div className="wiki-article-meta-item">
+                                <span>Chunks</span>
+                                <strong>{wikiMetadata.chunkCount}</strong>
+                              </div>
+                              <div className="wiki-article-meta-item">
+                                <span>Summary mode</span>
+                                <strong>{wikiMetadata.promptVersion ? 'LLM canonical' : 'Deterministic fallback'}</strong>
+                              </div>
+                              <div className="wiki-article-meta-item">
+                                <span>Evidence traces</span>
+                                <strong>{wikiEvidenceTraceIds.length}</strong>
+                              </div>
+                            </div>
+                          </div>
+                        ) : null}
                       </header>
 
-                      <div className="wiki-article-main mw-parser-output">
-                        <WikiArticleTocNav groups={wikiTocGroups} />
-                        <ChatRichContent
-                          content={wikiBody}
-                          className="wiki-rich-body"
-                          wikiHighlightTerms={wikiHighlightTerms}
-                          onWikiKeywordNavigate={(id, phrase) => void handleWikiTermClick(id, phrase)}
-                          onRichDomReady={onWikiRichDomReady}
-                        />
+                      <div className="wiki-article-main">
+                        <div className="wiki-article-content mw-parser-output">
+                          <ChatRichContent
+                            content={wikiSummaryMarkdown || wikiBody}
+                            className="wiki-rich-body"
+                            wikiHighlightTerms={wikiHighlightTerms}
+                            onWikiKeywordNavigate={(id, phrase) => void handleWikiTermClick(id, phrase)}
+                            onRichDomReady={onWikiRichDomReady}
+                          />
+                        </div>
+                        <aside className="wiki-article-side-nav" aria-label="Article navigation">
+                          <WikiArticleTocNav groups={wikiTocGroups} />
+                        </aside>
                       </div>
+
+                      {wikiRawReference ? (
+                        <section className="wiki-raw-reference wiki-article-end-section" aria-label="Raw source reference">
+                          <div className="wiki-raw-reference-header">
+                            <h2 className="wiki-section-heading">Raw source reference</h2>
+                            <button
+                              type="button"
+                              className="btn-secondary btn-sm"
+                              onClick={() => setWikiRawExpanded((v) => !v)}
+                            >
+                              {wikiRawExpanded ? 'Collapse raw data' : 'Expand raw data'}
+                            </button>
+                          </div>
+                          <p className="wiki-related-lead">
+                            Original imported content for verification and evidence tracing.
+                          </p>
+                          <div className="wiki-raw-reference-stats">
+                            <span>{wikiRawReference.totalChunkCount} chunks indexed</span>
+                            <span>{wikiRawReference.sourceTextLength} characters imported</span>
+                          </div>
+                          {wikiRawReference.sourceTextPreview ? (
+                            <pre className="wiki-raw-reference-preview">{wikiRawReference.sourceTextPreview}</pre>
+                          ) : null}
+                          {wikiRawExpanded ? (
+                            <div className="wiki-raw-reference-chunks">
+                              {(wikiRawChunks.length > 0
+                                ? wikiRawChunks.slice(0, 40).map((chunk) => ({
+                                    chunkId: chunk.id,
+                                    ord: chunk.ord,
+                                    anchor: chunk.anchor ?? '',
+                                    title:
+                                      chunk.passageTitle ||
+                                      chunk.heading ||
+                                      `Passage ${Math.max(1, Number(chunk.ord) + 1)}`,
+                                    snippet: chunk.text
+                                  }))
+                                : wikiRawReference.chunks
+                              ).map((chunk) => (
+                                <details key={chunk.chunkId} className="wiki-raw-reference-chunk">
+                                  <summary>
+                                    <span>{chunk.title}</span>
+                                    <span className="wiki-raw-reference-summary-right">
+                                      <code>{chunk.anchor || chunk.chunkId}</code>
+                                      {wikiSelectedId ? (
+                                        <button
+                                          type="button"
+                                          className="btn-secondary btn-sm"
+                                          onClick={(e) => {
+                                            e.preventDefault()
+                                            e.stopPropagation()
+                                            openWikiGraphContext({
+                                              sourceId: wikiSelectedId,
+                                              graphNodeIds: [chunk.chunkId, wikiSelectedId],
+                                              sectionOrd: chunk.ord ?? null,
+                                              sectionAnchor: chunk.anchor ?? null,
+                                              evidenceTraceIds: wikiEvidenceTraceIds
+                                            })
+                                          }}
+                                        >
+                                          Graph focus
+                                        </button>
+                                      ) : null}
+                                    </span>
+                                  </summary>
+                                  <pre>{chunk.snippet}</pre>
+                                </details>
+                              ))}
+                            </div>
+                          ) : null}
+                        </section>
+                      ) : null}
 
                       {wikiSelectedId ? (
                         <section className="wiki-postprocess-panel wiki-article-end-section" aria-label="Manual post process">
@@ -8274,26 +8498,49 @@ export default function App(): React.ReactElement {
               </article>
               ) : (
                 <div className="main-knowledge-graph-shell wiki-knowledge-graph-subview">
-                  <KnowledgeGraphView
-                    hideToolbarTitle
-                    data={kgPayload}
-                    loading={kgLoading}
-                    onRefresh={() => void loadKnowledgeGraph()}
-                    graphAnalysis={{
-                      busy: kgAnalysisBusy,
-                      error: kgAnalysisError,
-                      summary: kgAnalysisSummary,
-                      markdown: kgAnalysisMarkdown,
-                      ingestedId: kgAnalysisIngestedId,
-                      result: kgAnalysisResult
-                    }}
-                    onRunGraphAnalysis={(o) => void runKnowledgeGraphAnalysis(o)}
-                    onPickDestination={(d) => {
-                      setMainView('wiki')
-                      setWikiSubview('article')
-                      void openWikiPage(d.sourceId, { sectionOrd: d.sectionOrd ?? null })
-                    }}
-                  />
+                  <div className="kg-compare-toggle" role="tablist" aria-label="Graph workspace sections">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={kgComparisonMode === 'keyword'}
+                      className={`btn-secondary ${kgComparisonMode === 'keyword' ? 'is-active' : ''}`}
+                      onClick={() => setKgComparisonMode('keyword')}
+                    >
+                      Graph
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={kgComparisonMode === 'analysis'}
+                      className={`btn-secondary ${kgComparisonMode === 'analysis' ? 'is-active' : ''}`}
+                      onClick={() => setKgComparisonMode('analysis')}
+                    >
+                      Analysis
+                    </button>
+                    <button type="button" className="btn-secondary" onClick={() => void loadKnowledgeGraph()}>
+                      Refresh baseline
+                    </button>
+                  </div>
+                  <div className={`kg-workspace ${kgComparisonMode === 'analysis' ? 'kg-workspace--analysis' : ''}`}>
+                    <section className="kg-workspace-graph">
+                      <KeywordGraphSigmaView onMetricsChange={setKgKeywordMetrics} />
+                    </section>
+                    <aside className="kg-workspace-side" aria-live="polite">
+                      <div className="kg-compare-metrics-card">
+                        <h3 className="kg-compare-title">Graph quality</h3>
+                        <ul className="kg-compare-metrics-list">
+                          <li>Keyword nodes: {kgKeywordMetrics.nodes}</li>
+                          <li>Legacy nodes: {kgPayload?.nodes.length ?? 0}</li>
+                          <li>Nodes delta: {kgKeywordMetrics.nodes - (kgPayload?.nodes.length ?? 0)}</li>
+                          <li>Keyword edges: {kgKeywordMetrics.edges}</li>
+                          <li>Legacy edges: {kgPayload?.edges.length ?? 0}</li>
+                          <li>Edges delta: {kgKeywordMetrics.edges - (kgPayload?.edges.length ?? 0)}</li>
+                          <li>Keyword truncated: {kgKeywordMetrics.truncated ? 'yes' : 'no'}</li>
+                          <li>Legacy loading: {kgLoading ? 'yes' : 'no'}</li>
+                        </ul>
+                      </div>
+                    </aside>
+                  </div>
                 </div>
               )}
               </div>
@@ -8358,10 +8605,24 @@ export default function App(): React.ReactElement {
 
           {mainView === 'electronDev' && devShellChrome ? (
             <ElectronDevDashboard
+              appPath={paths?.appPath ?? null}
               userDataPath={paths?.userData ?? null}
               logsPath={paths?.logs ?? null}
               onOpenTrain={openTrainSurface}
               onOpenSettingsGeneral={() => openSettings('general')}
+              onStartClaudeBridge={async () => {
+                if (!integrationListenEnabled) {
+                  setIntegrationListenEnabled(true)
+                  const cfg = await window.api.setConfig({ integrationListenEnabled: true })
+                  if (!cfg.ok) {
+                    setIntegrationListenEnabled(false)
+                    return { ok: false, error: cfg.error ?? 'Could not enable integration bridge' }
+                  }
+                }
+                return window.api.claudeBridgeStart({
+                  serverName: 'my-bridge'
+                })
+              }}
               onBridgeListenChange={(enabled) => {
                 setIntegrationListenEnabled(enabled)
                 void window.api.setConfig({ integrationListenEnabled: enabled }).then((r) => {
@@ -9145,7 +9406,9 @@ export default function App(): React.ReactElement {
                                 onClick={() => {
                                   setUiRole(id)
                                   const nextDensity = roleLayout(id).defaultDensity
+                                  const targetMainView = layoutDefaultMainArea(roleLayout(id))
                                   setWorkspaceDensity(nextDensity)
+                                  setMainView(targetMainView)
                                   void window.api.setConfig({ uiRole: id, workspaceDensity: nextDensity }).then((r) => {
                                     if (!r.ok) setErr(r.error ?? 'Could not save role')
                                   })

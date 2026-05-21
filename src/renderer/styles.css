@@ -459,14 +459,20 @@ html {
   --mp-sat-a-y: 0px;
   --mp-sat-b-x: 0px;
   --mp-sat-b-y: 0px;
+  --mp-sat-c-x: 0px;
+  --mp-sat-c-y: 0px;
   --mp-sat-a-pulse: 0.9;
   --mp-sat-b-pulse: 0.9;
+  --mp-sat-c-pulse: 0.9;
   --mp-sat-a-width: 112px;
   --mp-sat-a-height: 67px;
   --mp-sat-b-width: 58px;
   --mp-sat-b-height: 88px;
+  --mp-sat-c-width: 132px;
+  --mp-sat-c-height: 90px;
   --mp-sat-a-rotate-deg: 17deg;
   --mp-sat-b-rotate-deg: -29deg;
+  --mp-sat-c-rotate-deg: 46deg;
 }
 
 .model-presence-vignette {
@@ -579,6 +585,14 @@ html {
   transform: rotate(var(--mp-sat-b-rotate-deg));
 }
 
+.model-presence-orbit-line--claude {
+  width: var(--mp-sat-c-width);
+  height: var(--mp-sat-c-height);
+  transform: rotate(var(--mp-sat-c-rotate-deg));
+  border-color: color-mix(in srgb, var(--accent) 52%, transparent);
+  opacity: 0.46;
+}
+
 .model-presence-satellite::after {
   content: '';
   position: absolute;
@@ -599,6 +613,13 @@ html {
   width: 8px;
   height: 8px;
   transform: translate(var(--mp-sat-b-x), var(--mp-sat-b-y)) scale(var(--mp-sat-b-pulse));
+}
+
+.model-presence-satellite--claude {
+  width: 9px;
+  height: 9px;
+  transform: translate(var(--mp-sat-c-x), var(--mp-sat-c-y)) scale(var(--mp-sat-c-pulse));
+  background: color-mix(in srgb, hsl(var(--mp-hue) var(--mp-sat) 88% / 0.95) 65%, var(--accent) 35%);
 }
 
 @keyframes model-presence-satellite-ripple {
@@ -1411,6 +1432,7 @@ html {
 .main-column {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   position: relative;
@@ -4183,6 +4205,105 @@ html {
   margin-left: auto;
 }
 
+.electron-dev-live-status-icon-btn {
+  width: 38px;
+  height: 34px;
+  min-width: 38px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.electron-dev-live-status-icon-btn .fa-solid {
+  font-size: 14px;
+}
+
+.electron-dev-live-status-icon-btn.is-active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 20%, var(--surface-elevated));
+  color: color-mix(in srgb, var(--accent) 72%, white);
+}
+
+.electron-dev-live-status-icon-btn.is-inactive {
+  opacity: 0.9;
+}
+
+.electron-dev-connection-map {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+
+.electron-dev-connection-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.electron-dev-connection-line {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.electron-dev-connection-node {
+  position: relative;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 85%, transparent);
+  background: color-mix(in srgb, var(--surface-elevated) 90%, var(--bg-deep) 10%);
+}
+
+.electron-dev-connection-node.has-link::after {
+  content: '';
+  position: absolute;
+  right: -9px;
+  top: 16px;
+  width: 8px;
+  height: 2px;
+  background: var(--border-subtle, rgba(255, 255, 255, 0.25));
+}
+
+.electron-dev-connection-node .node-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-bottom: 6px;
+  background: var(--text-secondary);
+  opacity: 0.75;
+}
+
+.electron-dev-connection-node .node-label {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.electron-dev-connection-node .node-detail {
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.electron-dev-connection-node.state-ok .node-dot {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.electron-dev-connection-node.state-warn .node-dot {
+  background: var(--danger, #ef5350);
+  opacity: 1;
+}
+
+.electron-dev-connection-node.state-neutral .node-dot {
+  background: var(--text-secondary);
+}
+
 .electron-dev-model-monitor {
   width: 100%;
   margin-top: 12px;
@@ -4260,6 +4381,14 @@ html {
 }
 
 @media (max-width: 720px) {
+  .electron-dev-connection-line {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .electron-dev-connection-node.has-link::after {
+    display: none;
+  }
+
   .electron-dev-live-status-actions {
     margin-left: 0;
     width: 100%;
@@ -4267,7 +4396,7 @@ html {
 
   .electron-dev-live-status-actions .btn-primary,
   .electron-dev-live-status-actions .btn-secondary {
-    width: 100%;
+    width: auto;
   }
 }
 
@@ -4289,6 +4418,52 @@ html {
   border-radius: 9px;
   border: 1px solid var(--border-subtle);
   background: var(--surface-elevated);
+}
+
+.electron-dev-panel--claude-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.electron-dev-setup-steps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.electron-dev-setup-snippet {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 84%, transparent);
+}
+
+.electron-dev-setup-snippet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.electron-dev-setup-pre {
+  margin: 0;
+  padding: 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.electron-dev-setup-tip {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .electron-dev-panel-title {
@@ -6228,6 +6403,11 @@ html {
 .wiki-knowledge-graph-subview {
   flex: 1 1 auto;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+  overflow: hidden;
 }
 
 .wiki-graph-section {
@@ -6269,6 +6449,7 @@ html {
     max-height: min(220px, 32vh);
     min-height: 0;
     overflow: hidden;
+    position: static;
   }
 }
 
@@ -6282,6 +6463,7 @@ html {
   .wiki-nav {
     max-height: none;
     flex-shrink: 0;
+    position: static;
   }
 
   .wiki-topic-list {
@@ -6351,13 +6533,11 @@ html {
   .wiki-main > .wiki-article {
     flex: 1 1 auto;
     min-height: 180px;
-    max-height: 55vh;
   }
 
   .wiki-graph-section {
     flex: 1 1 auto;
     min-height: 0;
-    max-height: 50vh;
     padding-left: 16px;
     padding-right: 16px;
   }
@@ -6374,6 +6554,10 @@ html {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
 }
 
 .wiki-nav-header {
@@ -6979,12 +7163,16 @@ html {
   overflow-y: auto;
   padding: 0;
   max-width: none;
+  position: relative;
   background: color-mix(in srgb, var(--surface) 97%, transparent);
 }
 
 .wiki-article-inner {
+  --wiki-content-max: 74rem;
+  --wiki-nav-width: 340px;
+  --wiki-nav-gap: 28px;
   box-sizing: border-box;
-  max-width: 56rem;
+  max-width: calc(var(--wiki-content-max) + var(--wiki-nav-width) + var(--wiki-nav-gap));
   margin: 0 auto;
   padding: 22px 20px 48px;
   position: relative;
@@ -6999,50 +7187,149 @@ html {
 
 .wiki-article-header {
   margin-bottom: 2px;
+  max-width: var(--wiki-content-max);
+}
+
+.wiki-article-metadata-card {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 90%, var(--wiki-accent));
+}
+
+.wiki-article-meta-heading {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.wiki-article-metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px 12px;
+}
+
+.wiki-article-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.wiki-article-meta-item > span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+}
+
+.wiki-article-meta-item > strong {
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-word;
 }
 
 .wiki-article-cleanup-banner {
-  position: sticky;
-  top: 0;
-  z-index: 12;
+  position: absolute;
+  inset: 0;
+  z-index: 24;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  margin: 0 auto;
-  padding: 10px 14px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
-  background: color-mix(in srgb, var(--surface) 94%, transparent);
-  backdrop-filter: blur(1.5px);
+  gap: 10px;
+  padding: 22px;
+  background:
+    radial-gradient(120% 65% at 50% 8%, color-mix(in srgb, var(--wiki-accent) 24%, transparent), transparent 64%),
+    color-mix(in srgb, var(--surface) 58%, transparent);
+  backdrop-filter: blur(7px) saturate(1.08);
 }
 
 .wiki-cleanup-progress-circle {
-  --circle-size: 74px;
+  --circle-size: 78px;
+  --ring-width: 6px;
+  --ring-center-offset: calc((var(--circle-size) / -2) + (var(--ring-width) / 2));
   width: var(--circle-size);
   height: var(--circle-size);
   border-radius: 999px;
-  display: grid;
-  place-items: center;
-  font-weight: 700;
-  color: var(--text);
-  background: conic-gradient(var(--accent, var(--wiki-accent)) var(--cleanup-progress), var(--surface-hover) 0);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--border) 80%, transparent);
+  position: relative;
+  box-sizing: border-box;
+  background: transparent;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--border) 62%, transparent),
+    0 8px 24px color-mix(in srgb, black 18%, transparent);
 }
 
-.wiki-cleanup-progress-circle > span {
-  width: calc(var(--circle-size) - 22px);
-  height: calc(var(--circle-size) - 22px);
+.wiki-cleanup-progress-circle::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--border) 70%, var(--surface-hover));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-width)), #000 0);
+  mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-width)), #000 0);
+}
+
+.wiki-cleanup-progress-circle::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    conic-gradient(
+      from -90deg,
+      transparent 0,
+      transparent var(--cleanup-progress-tail-start, 0%),
+      color-mix(in srgb, var(--accent, var(--wiki-accent)) 18%, transparent) var(--cleanup-progress-tail-start, 0%),
+      color-mix(in srgb, var(--accent, var(--wiki-accent)) 70%, transparent) var(--cleanup-progress-tail-mid, 0%),
+      var(--accent, var(--wiki-accent)) var(--cleanup-progress, 0%),
+      transparent var(--cleanup-progress, 0%),
+      transparent 100%
+    );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-width)), #000 0);
+  mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-width)), #000 0);
+  animation: wiki-cleanup-tail-pulse 1.25s ease-in-out infinite;
+  z-index: 1;
+}
+
+.wiki-cleanup-progress-dot {
+  --dot-size: 10px;
+  position: absolute;
+  width: var(--dot-size);
+  height: var(--dot-size);
   border-radius: 999px;
-  display: grid;
-  place-items: center;
-  background: var(--surface);
-  font-size: 1rem;
+  top: 50%;
+  left: 50%;
+  background: var(--accent, var(--wiki-accent));
+  z-index: 2;
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--surface) 78%, transparent),
+    0 0 16px color-mix(in srgb, var(--accent, var(--wiki-accent)) 78%, transparent);
+  transform:
+    rotate(calc(var(--cleanup-progress-value, 0) * 3.6deg - 90deg))
+    translateY(var(--ring-center-offset));
+}
+
+@keyframes wiki-cleanup-tail-pulse {
+  0%,
+  100% {
+    opacity: 0.62;
+    filter: drop-shadow(0 0 2px color-mix(in srgb, var(--accent, var(--wiki-accent)) 45%, transparent));
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 8px color-mix(in srgb, var(--accent, var(--wiki-accent)) 76%, transparent));
+  }
 }
 
 .wiki-article-cleanup-banner p {
   margin: 0;
-  font-size: 0.92rem;
+  text-align: center;
+  font-size: 0.94rem;
+  font-weight: 500;
   color: var(--text-secondary);
+  text-shadow: 0 1px 0 color-mix(in srgb, var(--surface) 72%, transparent);
 }
 
 .wiki-article-title {
@@ -7077,21 +7364,44 @@ html {
 }
 
 .wiki-article-main {
-  display: flow-root;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 28px;
+  align-items: start;
   margin-top: 4px;
 }
 
+.wiki-article-content {
+  min-width: 0;
+  max-width: var(--wiki-content-max);
+}
+
+.wiki-article-side-nav {
+  position: sticky;
+  top: 14px;
+  align-self: start;
+  max-height: calc(100vh - 90px);
+  overflow: auto;
+  justify-self: end;
+  width: 100%;
+}
+
 .wiki-toc {
-  float: right;
-  clear: right;
-  width: min(288px, 100%);
-  margin: 0 0 16px 20px;
+  width: 100%;
+  margin: 0;
   padding: 8px 12px 11px;
   border: 1px solid color-mix(in srgb, var(--border-strong) 85%, transparent);
   background: color-mix(in srgb, var(--surface) 88%, var(--wiki-accent));
   font-size: 13px;
   line-height: 1.45;
   border-radius: 2px;
+  position: static;
+  max-height: none;
+  overflow: visible;
+}
+
+.wiki-article-main .wiki-rich-body {
+  min-width: 0;
 }
 
 .wiki-toc-title {
@@ -7129,10 +7439,24 @@ html {
 }
 
 @media (max-width: 640px) {
+  .wiki-article-main {
+    display: block;
+  }
+  .wiki-article-header,
+  .wiki-article-content,
+  .wiki-article-end-section {
+    max-width: none;
+  }
+  .wiki-article-side-nav {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
   .wiki-toc {
-    float: none;
+    position: static;
     width: 100%;
     margin: 0 0 18px;
+    max-height: none;
   }
 }
 
@@ -7149,6 +7473,82 @@ html {
   margin-top: 2rem;
   padding-top: 1.1rem;
   border-top: 1px solid var(--border);
+  max-width: var(--wiki-content-max);
+}
+
+.wiki-raw-reference-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.wiki-raw-reference-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 10px 0 8px;
+}
+
+.wiki-raw-reference-preview {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 92%, var(--sidebar-secondary-bg));
+  color: var(--text-secondary);
+  max-height: 170px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.wiki-raw-reference-chunks {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wiki-raw-reference-chunk {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+}
+
+.wiki-raw-reference-chunk summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.wiki-raw-reference-chunk summary code {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.wiki-raw-reference-summary-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wiki-raw-reference-chunk pre {
+  margin: 0;
+  padding: 0 10px 10px;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 
 .wiki-article .wiki-lead:not(.wiki-article-hatnote) {
@@ -7707,6 +8107,21 @@ html {
   line-height: 1.35;
 }
 
+.kg-map-chip-mode {
+  font-size: 10px;
+  line-height: 1.2;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  color: color-mix(in srgb, var(--text) 84%, var(--wiki-accent));
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.kg-map-chip-mode--preset {
+  border-color: color-mix(in srgb, var(--wiki-accent) 50%, var(--border));
+  color: var(--wiki-accent);
+}
+
 .kg-map-chip-sampled {
   font-size: 10px;
   padding: 1px 6px;
@@ -8004,10 +8419,16 @@ html {
 
 .kg-webgl-label {
   position: absolute;
-  font-size: 10px;
+  font-size: 11px;
   color: color-mix(in srgb, var(--text) 84%, var(--wiki-accent));
   white-space: nowrap;
   text-shadow: 0 1px 0 color-mix(in srgb, var(--bg-deep) 70%, transparent);
+}
+
+.kg-webgl-label--aggregate {
+  font-size: 12px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--warning) 72%, var(--text));
 }
 
 .kg-webgl-label--dim {
@@ -8113,12 +8534,32 @@ html {
   stroke-width: 0.95;
 }
 
+.kg-graph-svg--lod-atlas.kg-graph-svg--obsidian .kg-edge--tier-faint:not(.kg-edge--hi) {
+  opacity: 0.13;
+}
+
+.kg-graph-svg--lod-atlas.kg-graph-svg--obsidian .kg-label-below--chunk {
+  opacity: 0.22;
+}
+
+.kg-graph-svg--lod-region.kg-graph-svg--obsidian .kg-edge--tier-mid:not(.kg-edge--hi) {
+  opacity: 0.4;
+}
+
+.kg-graph-svg--lod-neighborhood.kg-graph-svg--obsidian .kg-edge--tier-faint:not(.kg-edge--hi) {
+  opacity: 0.24;
+}
+
+.kg-graph-svg--lod-inspection.kg-graph-svg--obsidian .kg-edge--tier-mid:not(.kg-edge--hi) {
+  opacity: 0.38;
+}
+
 .kg-graph-svg--obsidian .kg-node-dot {
   stroke-width: 1.25;
 }
 
 .kg-graph-svg--obsidian .kg-label-below {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 500;
   letter-spacing: 0.01em;
   fill: color-mix(in srgb, var(--text-secondary) 88%, var(--text-tertiary));
@@ -8127,13 +8568,13 @@ html {
 }
 
 .kg-graph-svg--obsidian .kg-label-below--source {
-  font-size: 10px;
+  font-size: 11.5px;
   font-weight: 600;
   fill: color-mix(in srgb, var(--text) 82%, var(--wiki-accent));
 }
 
 .kg-graph-svg--obsidian .kg-label-below--chunk {
-  font-size: 8.5px;
+  font-size: 9.5px;
   max-width: 72px;
 }
 
@@ -8359,6 +8800,22 @@ html {
   stroke: color-mix(in srgb, var(--wiki-accent) 72%, var(--border));
 }
 
+.kg-graph-svg .kg-node--aggregate .kg-shape {
+  fill: color-mix(in srgb, var(--warning) 24%, var(--surface));
+  stroke: color-mix(in srgb, var(--warning) 70%, var(--border-strong));
+  stroke-width: 2;
+}
+
+.kg-graph-svg--obsidian .kg-node--aggregate .kg-node-dot {
+  fill: color-mix(in srgb, var(--warning) 45%, var(--bg-deep) 7%);
+  stroke: color-mix(in srgb, var(--warning) 78%, var(--border-strong));
+}
+
+.kg-graph-svg .kg-node--aggregate .kg-label-below--source {
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .kg-graph-svg .kg-node--chunk .kg-shape {
   fill: color-mix(in srgb, var(--surface) 92%, var(--text));
   stroke: color-mix(in srgb, var(--border-strong) 55%, var(--text-tertiary));
@@ -8455,6 +8912,11 @@ html {
 .kg-legend-swatch.kg-node--source {
   background: color-mix(in srgb, var(--wiki-accent) 38%, var(--surface));
   border-color: color-mix(in srgb, var(--wiki-accent) 65%, var(--border));
+}
+
+.kg-legend-swatch.kg-node--aggregate {
+  background: color-mix(in srgb, var(--warning) 46%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 70%, var(--border-strong));
 }
 
 .kg-legend-swatch.kg-node--chunk {
@@ -8554,6 +9016,158 @@ html {
   border: 1px solid var(--border);
   max-height: 240px;
   overflow: auto;
+}
+
+.kg-sem-drawer {
+  margin-top: 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent) 8%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: min(360px, 48vh);
+  overflow: auto;
+}
+
+.kg-graph-and-drawer {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.kg-graph-and-drawer--open {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.kg-graph-column {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+@media (max-width: 1120px) {
+  .kg-graph-and-drawer--open {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.kg-sem-drawer-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.kg-sem-drawer-kicker {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.kg-sem-drawer-title {
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+
+.kg-sem-drawer-close {
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  width: 24px;
+  height: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.kg-sem-legend-mini {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.kg-sem-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.2;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface) 90%, var(--text-tertiary) 10%);
+}
+
+.kg-sem-chip--noun {
+  background: color-mix(in srgb, var(--surface) 78%, #4f86ff 22%);
+}
+
+.kg-sem-chip--verb {
+  background: color-mix(in srgb, var(--surface) 78%, #65c999 22%);
+}
+
+.kg-sem-chip--adj {
+  background: color-mix(in srgb, var(--surface) 78%, #e0b65b 22%);
+}
+
+.kg-sem-chip--scope {
+  background: color-mix(in srgb, var(--surface) 78%, #c07ae6 22%);
+}
+
+.kg-sem-drawer-scopes {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.kg-sem-drawer-empty {
+  margin: 0;
+  font-size: 12px;
+}
+
+.kg-sem-drawer-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.kg-sem-drawer-item {
+  margin: 0;
+  padding: 8px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 94%, var(--accent) 6%);
+}
+
+.kg-sem-drawer-line {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.kg-sem-drawer-snippet {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-primary);
 }
 
 /* Tool panels: centered floating dialog (was bottom sheet) */
@@ -9844,6 +10458,33 @@ select.select optgroup {
   font-size: 12px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
+}
+
+.wiki-upload-progress {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.wiki-upload-progress-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--panel-border) 64%, transparent);
+}
+
+.wiki-upload-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 86%, #fff 14%), var(--accent));
+  transition: width 140ms ease-out;
+}
+
+.wiki-upload-progress-text,
+.wiki-upload-progress-pages {
+  margin: 0;
 }
 
 .runtime-download-row-title {
@@ -12698,6 +13339,84 @@ select.select optgroup {
   background: var(--text-tertiary, rgba(255, 255, 255, 0.35));
 }
 
+.ide-journey-connection-map {
+  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  padding-top: 12px;
+}
+
+.ide-journey-connection-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.ide-journey-connection-line {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ide-journey-connection-node {
+  position: relative;
+  padding: 10px 10px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--nested-panel-bg, rgba(0, 0, 0, 0.2)) 92%, black 8%);
+}
+
+.ide-journey-connection-node.has-link::after {
+  content: '';
+  position: absolute;
+  right: -9px;
+  top: 19px;
+  width: 8px;
+  height: 2px;
+  background: var(--border-subtle, rgba(255, 255, 255, 0.25));
+}
+
+.ide-journey-connection-node .node-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-bottom: 6px;
+  background: var(--text-tertiary, rgba(255, 255, 255, 0.35));
+}
+
+.ide-journey-connection-node .node-label {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.ide-journey-connection-node .node-detail {
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ide-journey-connection-node.state-ok .node-dot {
+  background: var(--success-bright, #4caf50);
+}
+
+.ide-journey-connection-node.state-warn .node-dot {
+  background: var(--danger-bright, #ef5350);
+}
+
+.ide-journey-connection-node.state-neutral .node-dot {
+  background: var(--text-tertiary, rgba(255, 255, 255, 0.45));
+}
+
+@media (max-width: 980px) {
+  .ide-journey-connection-line {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ide-journey-connection-node.has-link::after {
+    display: none;
+  }
+}
+
 .ide-journey-card-actions {
   display: flex;
   flex-wrap: wrap;
@@ -12804,10 +13523,13 @@ select.select optgroup {
   position: relative;
 }
 
-.ontology-graph .kg-panel,
-.ontology-graph .kg-svg-wrap.kg-svg-wrap--viewport,
-.ontology-graph .kg-graph-stage {
+.ontology-sigma-canvas {
+  width: 100%;
   height: 100%;
+  min-height: 320px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: linear-gradient(160deg, rgba(12, 18, 36, 0.92), rgba(19, 23, 39, 0.94));
 }
 
 .ontology-details {
@@ -12885,5 +13607,161 @@ select.select optgroup {
     transform: translateX(-50%);
     top: auto;
     max-height: 46%;
+  }
+}
+
+.kg-sigma-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 10px;
+  height: 100%;
+}
+
+.kg-sigma-toolbar {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 88%, rgba(10, 14, 32, 0.25));
+}
+
+.kg-sigma-toolbar-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.kg-sigma-toolbar-row .input {
+  flex: 1;
+}
+
+.kg-sigma-search-hits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kg-sigma-search-hit {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  color: inherit;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.kg-sigma-search-hit small {
+  opacity: 0.8;
+}
+
+.kg-sigma-range {
+  display: grid;
+  gap: 4px;
+}
+
+.kg-sigma-relations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kg-sigma-relation-pill {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.kg-sigma-meta {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.kg-sigma-error {
+  margin: 0;
+  color: var(--danger, #f87171);
+}
+
+.kg-sigma-canvas {
+  min-height: 0;
+  flex: 1 1 auto;
+  border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+  border-radius: 12px;
+  overflow: hidden;
+  background: linear-gradient(160deg, rgba(12, 18, 36, 0.92), rgba(19, 23, 39, 0.94));
+}
+
+.kg-compare-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.kg-workspace {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 12px;
+}
+
+.kg-workspace-graph {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.kg-workspace-side {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: none;
+}
+
+.kg-workspace--analysis .kg-workspace-side {
+  display: block;
+}
+
+.kg-compare-toggle .btn-secondary.is-active {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent) inset;
+}
+
+.kg-compare-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.kg-compare-metrics-card {
+  border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+  border-radius: 10px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--panel) 90%, rgba(8, 12, 24, 0.24));
+}
+
+.kg-compare-metrics-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+@media (max-width: 1280px) {
+  .kg-workspace {
+    grid-template-columns: 1fr;
+  }
+  .kg-workspace-side {
+    display: block;
+    order: -1;
   }
 }

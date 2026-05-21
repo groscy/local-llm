@@ -10,9 +10,20 @@ import { upsertCodebaseFromPluginReport } from './codebaseFormalStore'
 import { appendLearningEvent } from './trainingWorkflowStore'
 import type { OntologyService } from './ontologyService'
 import { logLine } from '../logger'
-import type { IntegrationModelActivityEvent } from '@shared/types'
+import type { ClaudeMemoryEventEnvelope, IntegrationModelActivityEvent } from '@shared/types'
 import { runIntegrationChatPipeline } from './integrationChatPipeline'
 import { IntegrationJobQueue } from './integrationJobQueue'
+import {
+  appendClaudeDeadLetter,
+  appendClaudeMemoryEvents,
+  endClaudeMemorySession,
+  exportClaudeMemorySessionsToTrainingJsonl,
+  getClaudeMemoryCaptureStats,
+  listClaudeMemoryEvents,
+  listClaudeMemorySessions,
+  pruneClaudeMemoryByAge,
+  startClaudeMemorySession
+} from './claudeMemoryStore'
 
 const DEFAULT_PORT = 17373
 
@@ -100,6 +111,57 @@ const jobSubmitSchema = z.object({
 
 type IntegrationJobPayload = z.infer<typeof jobSubmitSchema>
 
+const claudeEventSchema = z.object({
+  eventId: z.string().min(1).max(128),
+  sessionId: z.string().min(1).max(128),
+  turnId: z.string().min(1).max(128).optional(),
+  sequence: z.number().int().min(0).max(1_000_000_000),
+  eventType: z.enum([
+    'session_started',
+    'session_ended',
+    'user_message',
+    'assistant_message',
+    'tool_call',
+    'tool_result',
+    'file_edit',
+    'shell_command',
+    'diagnostic',
+    'metadata'
+  ]),
+  timestamp: z.number().int().min(0),
+  projectPath: z.string().max(4096).optional(),
+  model: z.string().max(200).optional(),
+  toolName: z.string().max(200).optional(),
+  tokenUsage: z
+    .object({
+      promptTokens: z.number().int().min(0).max(20_000_000).optional(),
+      completionTokens: z.number().int().min(0).max(20_000_000).optional()
+    })
+    .optional(),
+  sourceClientVersion: z.string().max(120).optional(),
+  payload: z.record(z.unknown()).default({})
+})
+
+const claudeSessionStartSchema = z.object({
+  sessionId: z.string().min(1).max(128),
+  source: z.string().max(120).default('claude-code'),
+  projectPath: z.string().max(4096).optional(),
+  startedAt: z.number().int().min(0).optional(),
+  metadata: z.record(z.unknown()).optional()
+})
+
+const claudeSessionEndSchema = z.object({
+  sessionId: z.string().min(1).max(128),
+  endedAt: z.number().int().min(0).optional(),
+  metadata: z.record(z.unknown()).optional()
+})
+
+const claudeEventsBodySchema = z.object({
+  source: z.string().max(120).default('claude-code'),
+  sessionId: z.string().min(1).max(128),
+  events: z.array(claudeEventSchema).min(1).max(500)
+})
+
 type IntegrationEditOperation = 'add' | 'update' | 'delete'
 
 type IntegrationJobResult = {
@@ -161,6 +223,23 @@ function parseJobRoute(url: string): { id: string; action: 'status' | 'result' |
   const cancel = url.match(/^\/v1\/jobs\/([0-9a-fA-F-]+)\/cancel$/)
   if (cancel?.[1]) return { id: cancel[1], action: 'cancel' }
   return null
+}
+
+function parseClaudeSessionEventsRoute(url: string): string | null {
+  const m = url.match(/^\/v1\/claude\/sessions\/([^/]+)\/events$/)
+  if (!m?.[1]) return null
+  try {
+    return decodeURIComponent(m[1])
+  } catch {
+    return m[1]
+  }
+}
+
+function parsePositiveInt(value: string | null, fallback: number, max: number): number {
+  if (!value) return fallback
+  const n = Number(value)
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(0, Math.min(max, Math.floor(n)))
 }
 
 export function stopIntegrationServer(): void {
@@ -273,6 +352,28 @@ export function configureIntegrationServer(ctx: {
           name: 'local-llm-desktop',
           runtimeRunning: Boolean(st?.running),
           runtimeKind: st?.kind ?? 'none'
+        })
+        return
+      }
+
+      if (method === 'GET' && url === '/v1/claude/health') {
+        if (!authOkForProtectedRoutes(store, req)) {
+          sendJson(res, 401, { error: 'Unauthorized' })
+          return
+        }
+        const rt = getRuntime()
+        const st = rt?.getStatus()
+        const db = getDb?.() ?? null
+        const stats = db ? getClaudeMemoryCaptureStats(db) : null
+        sendJson(res, 200, {
+          ok: true,
+          integration: 'claude-direct',
+          runtimeRunning: Boolean(st?.running),
+          runtimeKind: st?.kind ?? 'none',
+          captureEnabled: store.get('claudeMemoryCaptureEnabled') !== false,
+          sessions: stats?.sessions ?? 0,
+          events: stats?.events ?? 0,
+          lastIngestAt: stats?.lastIngestAt ?? null
         })
         return
       }
@@ -506,6 +607,199 @@ export function configureIntegrationServer(ctx: {
         }
         upsertCodebaseFromPluginReport(store, full)
         sendJson(res, 200, { ok: true })
+        return
+      }
+
+      if (method === 'POST' && url === '/v1/claude/session/start') {
+        if (!authOkForProtectedRoutes(store, req)) {
+          sendJson(res, 401, { error: 'Unauthorized' })
+          return
+        }
+        const db = getDb?.()
+        if (!db) {
+          sendJson(res, 503, { error: 'Database unavailable' })
+          return
+        }
+        let body: unknown
+        try {
+          body = await readJsonBody(req)
+        } catch {
+          sendJson(res, 400, { error: 'Invalid JSON body' })
+          return
+        }
+        const parsed = claudeSessionStartSchema.safeParse(body)
+        if (!parsed.success) {
+          appendClaudeDeadLetter(db, { source: 'claude-code', reason: 'session_start_invalid_body', body })
+          sendJson(res, 400, { error: 'Invalid body: expected { sessionId, source?, projectPath?, startedAt?, metadata? }' })
+          return
+        }
+        const row = startClaudeMemorySession(db, parsed.data)
+        sendJson(res, 200, { ok: true, session: row })
+        return
+      }
+
+      if (method === 'POST' && url === '/v1/claude/session/end') {
+        if (!authOkForProtectedRoutes(store, req)) {
+          sendJson(res, 401, { error: 'Unauthorized' })
+          return
+        }
+        const db = getDb?.()
+        if (!db) {
+          sendJson(res, 503, { error: 'Database unavailable' })
+          return
+        }
+        let body: unknown
+        try {
+          body = await readJsonBody(req)
+        } catch {
+          sendJson(res, 400, { error: 'Invalid JSON body' })
+          return
+        }
+        const parsed = claudeSessionEndSchema.safeParse(body)
+        if (!parsed.success) {
+          appendClaudeDeadLetter(db, { source: 'claude-code', reason: 'session_end_invalid_body', body })
+          sendJson(res, 400, { error: 'Invalid body: expected { sessionId, endedAt?, metadata? }' })
+          return
+        }
+        const ok = endClaudeMemorySession(db, parsed.data)
+        sendJson(res, 200, { ok })
+        return
+      }
+
+      if (method === 'POST' && url === '/v1/claude/events') {
+        if (!authOkForProtectedRoutes(store, req)) {
+          sendJson(res, 401, { error: 'Unauthorized' })
+          return
+        }
+        const db = getDb?.()
+        if (!db) {
+          sendJson(res, 503, { error: 'Database unavailable' })
+          return
+        }
+        if (store.get('claudeMemoryCaptureEnabled') === false) {
+          sendJson(res, 200, { accepted: 0, duplicates: 0, derivedUnits: 0, disabled: true })
+          return
+        }
+        let body: unknown
+        try {
+          body = await readJsonBody(req)
+        } catch {
+          appendClaudeDeadLetter(db, { source: 'claude-code', reason: 'events_invalid_json' })
+          sendJson(res, 400, { error: 'Invalid JSON body' })
+          return
+        }
+        const parsed = claudeEventsBodySchema.safeParse(body)
+        if (!parsed.success) {
+          appendClaudeDeadLetter(db, { source: 'claude-code', reason: 'events_invalid_body', body })
+          sendJson(res, 400, { error: 'Invalid body: expected { sessionId, source?, events[] }' })
+          return
+        }
+        const maxPayloadBytesRaw = store.get('claudeMemoryMaxEventBytes')
+        const maxPayloadBytes =
+          typeof maxPayloadBytesRaw === 'number' && Number.isFinite(maxPayloadBytesRaw)
+            ? Math.max(2048, Math.min(8_000_000, Math.floor(maxPayloadBytesRaw)))
+            : undefined
+        const retentionDaysRaw = store.get('claudeMemoryRetentionDays')
+        const retentionDays =
+          typeof retentionDaysRaw === 'number' && Number.isFinite(retentionDaysRaw) ? retentionDaysRaw : 0
+        if (retentionDays > 0) {
+          try {
+            pruneClaudeMemoryByAge(db, retentionDays)
+          } catch {
+            /* best effort pruning */
+          }
+        }
+        const outcome = appendClaudeMemoryEvents(db, {
+          source: parsed.data.source,
+          sessionId: parsed.data.sessionId,
+          events: parsed.data.events as ClaudeMemoryEventEnvelope[],
+          maxPayloadBytes
+        })
+        sendJson(res, 202, { ok: true, ...outcome })
+        return
+      }
+
+      if (method === 'GET' && url.startsWith('/v1/claude/sessions')) {
+        if (!authOkForProtectedRoutes(store, req)) {
+          sendJson(res, 401, { error: 'Unauthorized' })
+          return
+        }
+        const db = getDb?.()
+        if (!db) {
+          sendJson(res, 503, { error: 'Database unavailable' })
+          return
+        }
+        if (url === '/v1/claude/sessions' || url.startsWith('/v1/claude/sessions?')) {
+          const u = new URL(`http://127.0.0.1${url}`)
+          const limit = parsePositiveInt(u.searchParams.get('limit'), 100, 300)
+          const offset = parsePositiveInt(u.searchParams.get('offset'), 0, 200_000)
+          const sessions = listClaudeMemorySessions(db, { limit, offset })
+          sendJson(res, 200, { sessions, limit, offset })
+          return
+        }
+        const sessionId = parseClaudeSessionEventsRoute(url.split('?')[0] ?? '')
+        if (!sessionId) {
+          sendJson(res, 404, { error: 'Not found' })
+          return
+        }
+        const u = new URL(`http://127.0.0.1${url}`)
+        const limit = parsePositiveInt(u.searchParams.get('limit'), 300, 2000)
+        const offset = parsePositiveInt(u.searchParams.get('offset'), 0, 500_000)
+        const events = listClaudeMemoryEvents(db, sessionId, { limit, offset })
+        sendJson(res, 200, { sessionId, events, limit, offset })
+        return
+      }
+
+      if (method === 'GET' && url === '/v1/claude/memory/stats') {
+        if (!authOkForProtectedRoutes(store, req)) {
+          sendJson(res, 401, { error: 'Unauthorized' })
+          return
+        }
+        const db = getDb?.()
+        if (!db) {
+          sendJson(res, 503, { error: 'Database unavailable' })
+          return
+        }
+        sendJson(res, 200, { ...getClaudeMemoryCaptureStats(db) })
+        return
+      }
+
+      if (method === 'POST' && url === '/v1/claude/memory/export-jsonl') {
+        if (!authOkForProtectedRoutes(store, req)) {
+          sendJson(res, 401, { error: 'Unauthorized' })
+          return
+        }
+        const db = getDb?.()
+        if (!db) {
+          sendJson(res, 503, { error: 'Database unavailable' })
+          return
+        }
+        let body: unknown
+        try {
+          body = await readJsonBody(req)
+        } catch {
+          appendClaudeDeadLetter(db, { source: 'claude-code', reason: 'export_invalid_json' })
+          sendJson(res, 400, { error: 'Invalid JSON body' })
+          return
+        }
+        const parsed = z
+          .object({
+            sessionIds: z.array(z.string().min(1)).min(1).max(200),
+            destPath: z.string().min(1).max(8192)
+          })
+          .safeParse(body)
+        if (!parsed.success) {
+          appendClaudeDeadLetter(db, { source: 'claude-code', reason: 'export_invalid_body', body })
+          sendJson(res, 400, { error: 'Invalid body: expected { sessionIds, destPath }' })
+          return
+        }
+        try {
+          const out = exportClaudeMemorySessionsToTrainingJsonl(db, parsed.data.sessionIds, parsed.data.destPath)
+          sendJson(res, 200, { ok: true, ...out, path: parsed.data.destPath })
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e)
+          sendJson(res, 400, { ok: false, error: message })
+        }
         return
       }
 

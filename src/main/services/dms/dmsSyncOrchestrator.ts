@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto'
 import { basename, extname } from 'path'
 import type { DmsSyncProgress, DmsSyncRunResult } from '@shared/types'
 import { analyzeKnowledgeGraph, knowledgeGraphAnalysisToMarkdown } from '@shared/knowledgeGraphAnalysis'
-import { extractPdfPlainText } from '../pdfIngest'
+import { parseDocumentFromBytes } from '../documentParser'
 import * as kbService from '../kbService'
 import {
   DMS_MAX_FILE_BYTES_DEFAULT,
@@ -50,13 +50,32 @@ export function isSupportedFile(name: string, mimeType?: string): boolean {
   return mime.startsWith('text/') || mime === 'application/pdf' || mime === 'application/json'
 }
 
-async function fileBodyFromBytes(file: DiscoveredFile, bytes: Uint8Array): Promise<string> {
-  const ext = extname(file.name).toLowerCase()
-  const mime = (file.mimeType ?? '').toLowerCase()
-  if (ext === '.pdf' || mime === 'application/pdf') {
-    return await extractPdfPlainText(Buffer.from(bytes))
+async function fileBodyFromBytes(
+  file: DiscoveredFile,
+  bytes: Uint8Array
+): Promise<{ body: string; source: 'pdf' | 'text'; diagnostics?: Record<string, unknown> }> {
+  const parsed = await parseDocumentFromBytes({
+    fileName: file.name,
+    bytes,
+    mimeType: file.mimeType
+  })
+  const fallback = decodeText(bytes)
+  const body = parsed.normalizedText.trim() ? parsed.normalizedText : fallback
+  return {
+    body,
+    source: parsed.sourceKind,
+    diagnostics: {
+      parserWarnings: parsed.warnings,
+      truncated: parsed.parserDiagnostics?.truncated === true,
+      cleanupEdits: Number(parsed.parserDiagnostics?.cleanupEdits ?? 0),
+      parserEngine: parsed.parserEngine,
+      parserMode: parsed.parserMode,
+      parseDurationMs: parsed.parseDurationMs,
+      ocrApplied: parsed.ocrApplied,
+      ocrCoverage: parsed.ocrCoverage,
+      extractionVersion: parsed.extractionVersion
+    }
   }
-  return decodeText(bytes)
 }
 
 export function sourceUri(provider: string, externalFileId: string): string {
@@ -292,15 +311,21 @@ export async function runDmsRootSync(
         }
         try {
           const dl = await client.downloadFile(file.id)
-          const body = await fileBodyFromBytes(file, dl.bytes)
-          if (!body.trim()) {
+          const parsed = await fileBodyFromBytes(file, dl.bytes)
+          if (!parsed.body.trim()) {
             stats.skippedCount++
             failures.push(`Skipped (empty text): ${file.path}`)
             continue
           }
           const uri = sourceUri(connection.provider, file.id)
           const title = sourceTitleFromPath(file.path)
-          const source = kbService.ingestText(db, title, uri, body)
+          const source = kbService.ingestTextWithMetadata(db, {
+            title,
+            uri,
+            body: parsed.body,
+            source: parsed.source,
+            diagnostics: parsed.diagnostics
+          })
           upsertDmsImportItem(db, {
             rootId: input.root.id,
             externalFileId: file.id,

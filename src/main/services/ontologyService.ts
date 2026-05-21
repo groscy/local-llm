@@ -8,6 +8,11 @@ import type {
   OntologyStats,
   OntologySubgraphPayload
 } from '@shared/types'
+import {
+  ONTOLOGY_ADJECTIVE_PATTERNS,
+  ONTOLOGY_PREDICATE,
+  ONTOLOGY_RELATION_RULES
+} from './ontologyRuleRegistry'
 
 const DEFAULT_NAMESPACE_ROWS: Array<{ prefix: string; baseIri: string }> = [
   { prefix: 'app', baseIri: 'app://ontology/' },
@@ -15,13 +20,7 @@ const DEFAULT_NAMESPACE_ROWS: Array<{ prefix: string; baseIri: string }> = [
   { prefix: 'rdf', baseIri: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#' }
 ]
 
-const PREDICATE = {
-  relatedTo: 'app:relatedTo',
-  isA: 'app:isA',
-  dependsOn: 'app:dependsOn',
-  uses: 'app:uses',
-  contains: 'app:contains'
-} as const
+const PREDICATE = ONTOLOGY_PREDICATE
 
 const STOP_WORDS = new Set([
   'about',
@@ -112,41 +111,135 @@ function canonicalEntityLabel(raw: string): string {
   return cleaned.slice(0, 128)
 }
 
-function parseSentenceRelations(sentence: string): Array<{ a: string; p: string; b: string }> {
-  const s = sentence.replace(/\s+/g, ' ').trim()
-  if (!s) return []
-  const out: Array<{ a: string; p: string; b: string }> = []
-  const relationRules: Array<{ re: RegExp; p: string }> = [
-    { re: /\b(.{3,64}?)\s+(?:is|are)\s+(?:an?\s+|the\s+)?(.{3,64})$/i, p: PREDICATE.isA },
-    { re: /\b(.{3,64}?)\s+depends on\s+(.{3,64})$/i, p: PREDICATE.dependsOn },
-    { re: /\b(.{3,64}?)\s+uses\s+(.{3,64})$/i, p: PREDICATE.uses },
-    { re: /\b(.{3,64}?)\s+(?:contains|includes)\s+(.{3,64})$/i, p: PREDICATE.contains }
-  ]
-  for (const rule of relationRules) {
-    const m = s.match(rule.re)
-    if (!m) continue
-    const a = canonicalEntityLabel(m[1] ?? '')
-    const b = canonicalEntityLabel(m[2] ?? '')
-    if (a.length < 3 || b.length < 3 || a === b) continue
-    out.push({ a, p: rule.p, b })
+type SentenceSpan = { sentence: string; start: number; end: number }
+type NounCandidate = { label: string; start: number; end: number; confidenceReasons: string[] }
+type VerbRelationCandidate = {
+  subject: string
+  object: string
+  predicate: string
+  verb: string
+  ruleId: string
+  start: number
+  end: number
+  confidenceReasons: string[]
+}
+type AdjectiveDescriptorCandidate = {
+  target: string
+  adjective: string
+  ruleId: string
+  start: number
+  end: number
+  confidenceReasons: string[]
+}
+
+const RELATION_RULES = ONTOLOGY_RELATION_RULES
+const ADJECTIVE_PATTERNS = ONTOLOGY_ADJECTIVE_PATTERNS
+
+function splitSentencesWithOffsets(text: string): SentenceSpan[] {
+  const out: SentenceSpan[] = []
+  const re = /[^.!?\n]+[.!?]?/g
+  for (const m of text.matchAll(re)) {
+    const raw = m[0] ?? ''
+    const sentence = raw.replace(/\s+/g, ' ').trim()
+    if (sentence.length < 4) continue
+    const start = m.index ?? 0
+    out.push({ sentence, start, end: start + raw.length })
+    if (out.length >= 48) break
   }
   return out
 }
 
-function extractEntityCandidates(text: string): string[] {
-  const counts = new Map<string, number>()
-  const matches = text.match(/[A-Za-z][A-Za-z0-9_/-]{2,}/g) ?? []
-  for (const raw of matches) {
+function runNounPass(text: string): NounCandidate[] {
+  const counts = new Map<string, { count: number; firstStart: number; firstEnd: number; reasons: Set<string> }>()
+  const tokenRe = /[A-Za-z][A-Za-z0-9_/-]{2,}/g
+  for (const m of text.matchAll(tokenRe)) {
+    const raw = m[0] ?? ''
     const normalized = canonicalEntityLabel(raw)
     const slug = toSlug(normalized)
     if (slug.length < 3) continue
     if (STOP_WORDS.has(slug)) continue
-    counts.set(normalized, (counts.get(normalized) ?? 0) + 1)
+    const start = m.index ?? 0
+    const end = start + raw.length
+    if (!counts.has(normalized)) {
+      counts.set(normalized, {
+        count: 0,
+        firstStart: start,
+        firstEnd: end,
+        reasons: new Set(['noun_pass_token_match'])
+      })
+    }
+    const cur = counts.get(normalized)!
+    cur.count += 1
+    if (cur.count >= 2) cur.reasons.add('noun_pass_frequency_boost')
+    if (/^[A-Z]/.test(raw)) cur.reasons.add('noun_pass_titlecase_signal')
   }
   return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)
-    .slice(0, 18)
-    .map(([label]) => label)
+    .sort((a, b) => b[1].count - a[1].count || b[0].length - a[0].length)
+    .slice(0, 42)
+    .map(([label, meta]) => ({
+      label,
+      start: meta.firstStart,
+      end: meta.firstEnd,
+      confidenceReasons: [...meta.reasons]
+    }))
+}
+
+function runVerbRelationPass(sentences: SentenceSpan[]): VerbRelationCandidate[] {
+  const out: VerbRelationCandidate[] = []
+  for (const span of sentences) {
+    const s = span.sentence.replace(/\s+/g, ' ').trim()
+    if (!s) continue
+    for (const rule of RELATION_RULES) {
+      const m = s.match(rule.regex)
+      if (!m) continue
+      const subject = canonicalEntityLabel(m[1] ?? '')
+      const object = canonicalEntityLabel(m[2] ?? '')
+      if (subject.length < 3 || object.length < 3 || subject === object) continue
+      out.push({
+        subject,
+        object,
+        predicate: rule.predicate,
+        verb: rule.verb,
+        ruleId: rule.id,
+        start: span.start,
+        end: span.end,
+        confidenceReasons: ['verb_pass_rule_match', `verb_pass_${rule.id.replace('.', '_')}`]
+      })
+      if (out.length >= 64) return out
+    }
+  }
+  return out
+}
+
+function runAdjectiveDescriptorPass(sentences: SentenceSpan[]): AdjectiveDescriptorCandidate[] {
+  const out: AdjectiveDescriptorCandidate[] = []
+  const seen = new Set<string>()
+  for (const span of sentences) {
+    for (const pattern of ADJECTIVE_PATTERNS) {
+      pattern.regex.lastIndex = 0
+      for (const m of span.sentence.matchAll(pattern.regex)) {
+        const a = pattern.id === 'rule.adj_prefix' ? String(m[2] ?? '') : String(m[2] ?? '')
+        const targetRaw = pattern.id === 'rule.adj_prefix' ? String(m[3] ?? '') : String(m[1] ?? '')
+        const adjective = a.toLowerCase().trim()
+        const target = canonicalEntityLabel(targetRaw)
+        if (adjective.length < 3 || adjective.length > 32) continue
+        if (target.length < 3) continue
+        const key = `${target.toLowerCase()}\0${adjective}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        out.push({
+          target,
+          adjective,
+          ruleId: pattern.id,
+          start: span.start,
+          end: span.end,
+          confidenceReasons: ['adjective_pass_pattern_match', `adjective_pass_${pattern.id.replace('.', '_')}`]
+        })
+        if (out.length >= 80) return out
+      }
+    }
+  }
+  return out
 }
 
 function rowToEdge(row: TripleRow): OntologyEdge {
@@ -163,8 +256,19 @@ function rowToEdge(row: TripleRow): OntologyEdge {
   }
 }
 
+function tableExists(db: Database.Database, name: string): boolean {
+  const row = db
+    .prepare(`SELECT 1 as ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`)
+    .get(name) as { ok: number } | undefined
+  return Boolean(row?.ok)
+}
+
 export type OntologyService = {
   ingestText: (input: OntologyIngestInput) => { entities: number; triples: number }
+  backfillSemanticGraph: (opts?: { maxSources?: number; maxTriples?: number }) => {
+    sourcesProcessed: number
+    triplesProcessed: number
+  }
   getStats: () => OntologyStats
   querySubgraph: (request?: OntologyQueryRequest) => OntologySubgraphPayload
   entityDetails: (iri: string, limit?: number) => OntologyEntityDetails
@@ -173,6 +277,12 @@ export type OntologyService = {
 }
 
 export function createOntologyService(db: Database.Database): OntologyService {
+  const hasSemanticTables =
+    tableExists(db, 'semantic_entities') &&
+    tableExists(db, 'semantic_relations') &&
+    tableExists(db, 'semantic_descriptors') &&
+    tableExists(db, 'semantic_evidence_traces')
+
   const insertEntity = db.prepare(
     `INSERT INTO ontology_entities (id, iri, label, type, confidence, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -187,6 +297,61 @@ export function createOntologyService(db: Database.Database): OntologyService {
       (id, subject_iri, predicate_iri, object_iri, object_literal, source_type, source_ref, confidence, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
+  const insertSemanticEntity = hasSemanticTables
+    ? db.prepare(
+        `INSERT INTO semantic_entities (id, lemma, label, entity_type, canonical_id, alias_of, confidence, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(lemma, entity_type) DO UPDATE SET
+           label = excluded.label,
+           canonical_id = COALESCE(excluded.canonical_id, semantic_entities.canonical_id),
+           alias_of = COALESCE(excluded.alias_of, semantic_entities.alias_of),
+           confidence = ((semantic_entities.confidence * 0.8) + (excluded.confidence * 0.2)),
+           updated_at = excluded.updated_at`
+      )
+    : null
+  const selectSemanticEntityId = hasSemanticTables
+    ? db.prepare('SELECT id FROM semantic_entities WHERE lemma = ? AND entity_type = ? LIMIT 1')
+    : null
+  const insertSemanticRelation = hasSemanticTables
+    ? db.prepare(
+        `INSERT INTO semantic_relations (id, from_entity_id, to_entity_id, verb, confidence, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(from_entity_id, to_entity_id, verb) DO UPDATE SET
+           confidence = ((semantic_relations.confidence * 0.8) + (excluded.confidence * 0.2))`
+      )
+    : null
+  const selectSemanticRelationId = hasSemanticTables
+    ? db.prepare(
+        `SELECT id
+         FROM semantic_relations
+         WHERE from_entity_id = ? AND to_entity_id = ? AND verb = ?
+         LIMIT 1`
+      )
+    : null
+  const insertSemanticDescriptor = hasSemanticTables
+    ? db.prepare(
+        `INSERT OR IGNORE INTO semantic_descriptors
+          (id, target_type, target_id, adjective, confidence, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+    : null
+  const insertSemanticEvidence = hasSemanticTables
+    ? db.prepare(
+        `INSERT INTO semantic_evidence_traces
+          (id, source_type, source_ref, extraction_method, rule_id, span_start, span_end, span_text, span_page, span_anchor,
+           confidence, confidence_reasons_json, parser_warnings_json, fallback_reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+    : null
+  const linkEntityEvidence = hasSemanticTables
+    ? db.prepare('INSERT OR IGNORE INTO semantic_entity_evidence (entity_id, evidence_id) VALUES (?, ?)')
+    : null
+  const linkRelationEvidence = hasSemanticTables
+    ? db.prepare('INSERT OR IGNORE INTO semantic_relation_evidence (relation_id, evidence_id) VALUES (?, ?)')
+    : null
+  const linkDescriptorEvidence = hasSemanticTables
+    ? db.prepare('INSERT OR IGNORE INTO semantic_descriptor_evidence (descriptor_id, evidence_id) VALUES (?, ?)')
+    : null
   const selectEntity = db.prepare(
     'SELECT iri, label, type, confidence FROM ontology_entities WHERE iri = ?'
   )
@@ -258,6 +423,75 @@ export function createOntologyService(db: Database.Database): OntologyService {
     return out.changes > 0
   }
 
+  function upsertSemanticEntityId(labelRaw: string, entityType: string, confidence: number): string | null {
+    if (!hasSemanticTables || !insertSemanticEntity || !selectSemanticEntityId) return null
+    const label = canonicalEntityLabel(labelRaw)
+    const lemma = toSlug(label)
+    if (!lemma) return null
+    const canonicalId = `${entityType}:${lemma}`
+    const now = Date.now()
+    insertSemanticEntity.run(randomUUID(), lemma, label, entityType, canonicalId, null, clampConfidence(confidence), now, now)
+    const row = selectSemanticEntityId.get(lemma, entityType) as { id: string } | undefined
+    return row?.id ?? null
+  }
+
+  function upsertSemanticRelationId(args: {
+    fromEntityId: string
+    toEntityId: string
+    verb: string
+    confidence: number
+  }): string | null {
+    if (!hasSemanticTables || !insertSemanticRelation || !selectSemanticRelationId) return null
+    const now = Date.now()
+    insertSemanticRelation.run(
+      randomUUID(),
+      args.fromEntityId,
+      args.toEntityId,
+      args.verb.trim().slice(0, 96),
+      clampConfidence(args.confidence),
+      now
+    )
+    const row = selectSemanticRelationId.get(args.fromEntityId, args.toEntityId, args.verb.trim().slice(0, 96)) as
+      | { id: string }
+      | undefined
+    return row?.id ?? null
+  }
+
+  function writeEvidenceTrace(args: {
+    sourceType: string
+    sourceRef: string
+    extractionMethod: 'deterministic_rule' | 'heuristic' | 'llm_enrichment' | 'manual'
+    ruleId?: string
+    start?: number
+    end?: number
+    text?: string
+    confidence: number
+    confidenceReasons: string[]
+    parserWarnings?: string[]
+    fallbackReason?: string
+  }): string | null {
+    if (!hasSemanticTables || !insertSemanticEvidence) return null
+    const id = randomUUID()
+    insertSemanticEvidence.run(
+      id,
+      args.sourceType,
+      args.sourceRef,
+      args.extractionMethod,
+      args.ruleId ?? null,
+      args.start ?? null,
+      args.end ?? null,
+      args.text?.slice(0, 360) ?? null,
+      null,
+      null,
+      clampConfidence(args.confidence),
+      JSON.stringify(args.confidenceReasons ?? []),
+      JSON.stringify(args.parserWarnings ?? []),
+      args.fallbackReason ?? null,
+      Date.now()
+    )
+    return id
+  }
+
   function seedEntitiesFromQuery(query: string, limit: number, typeFilters: string[]): string[] {
     const q = query.trim().toLowerCase()
     const words = q.split(/\s+/).filter((w) => w.length > 1).slice(0, 6)
@@ -288,43 +522,128 @@ export function createOntologyService(db: Database.Database): OntologyService {
     return rows.map((r) => r.iri)
   }
 
+  function inferSourceTypeFromUri(uri: string): string {
+    const t = uri.trim().toLowerCase()
+    if (!t) return 'text'
+    if (t.startsWith('file://') && t.endsWith('.pdf')) return 'pdf'
+    if (t.startsWith('codebase-analysis:')) return 'codebase'
+    if (t.startsWith('chat:')) return 'chat'
+    if (t.startsWith('file://')) return 'text'
+    return 'other'
+  }
+
+  function labelFromIri(iri: string): string {
+    const tail = iri.split('/').pop() ?? iri.split(':').pop() ?? iri
+    return canonicalEntityLabel(tail.replace(/[-_]+/g, ' ')) || iri
+  }
+
+  function verbFromPredicate(predicateIri: string): string {
+    const tail = predicateIri.split('/').pop() ?? predicateIri.split(':').pop() ?? 'related'
+    return tail.replace(/[-_]+/g, ' ').trim().toLowerCase() || 'related'
+  }
+
   return {
     ingestText(input: OntologyIngestInput): { entities: number; triples: number } {
       const text = input.text.trim()
       if (!text) return { entities: 0, triples: 0 }
       const baseConfidence = clampConfidence(input.confidence)
       const entityType = input.entityType?.trim() || 'concept'
-      const entities = extractEntityCandidates(text)
+      const sentences = splitSentencesWithOffsets(text)
+      const nounCandidates = runNounPass(text)
+      const verbRelations = runVerbRelationPass(sentences)
+      const adjectiveDescriptors = runAdjectiveDescriptorPass(sentences)
       const iris: string[] = []
-      for (const label of entities) {
-        const iri = upsertEntity(label, entityType, baseConfidence)
+      const semanticEntityByLabel = new Map<string, string>()
+      for (const noun of nounCandidates) {
+        const iri = upsertEntity(noun.label, entityType, baseConfidence)
         if (iri) iris.push(iri)
+        const semanticEntityId = upsertSemanticEntityId(noun.label, entityType, baseConfidence)
+        if (semanticEntityId) {
+          semanticEntityByLabel.set(noun.label.toLowerCase(), semanticEntityId)
+          const evidenceId = writeEvidenceTrace({
+            sourceType: input.sourceType,
+            sourceRef: input.sourceRef,
+            extractionMethod: 'deterministic_rule',
+            ruleId: 'noun_pass.token_frequency',
+            start: noun.start,
+            end: noun.end,
+            text: text.slice(noun.start, Math.min(text.length, noun.end + 140)),
+            confidence: baseConfidence,
+            confidenceReasons: noun.confidenceReasons
+          })
+          if (evidenceId && linkEntityEvidence) linkEntityEvidence.run(semanticEntityId, evidenceId)
+        }
       }
 
       let triplesWritten = 0
-      const sentenceRelations = text
-        .split(/[.!?\n]+/)
-        .map((s) => s.trim())
-        .filter((s) => s.length > 4)
-        .slice(0, 14)
-      for (const sentence of sentenceRelations) {
-        const rels = parseSentenceRelations(sentence)
-        for (const rel of rels) {
-          const a = upsertEntity(rel.a, entityType, baseConfidence)
-          const b = upsertEntity(rel.b, entityType, baseConfidence)
-          if (!a || !b) continue
-          if (
-            writeTriple({
-              subjectIri: a,
-              predicateIri: rel.p,
-              objectIri: b,
-              sourceType: input.sourceType,
-              sourceRef: input.sourceRef,
-              confidence: baseConfidence
-            })
-          ) {
-            triplesWritten += 1
-          }
+      for (const rel of verbRelations) {
+        const a = upsertEntity(rel.subject, entityType, baseConfidence)
+        const b = upsertEntity(rel.object, entityType, baseConfidence)
+        if (!a || !b) continue
+        if (
+          writeTriple({
+            subjectIri: a,
+            predicateIri: rel.predicate,
+            objectIri: b,
+            sourceType: input.sourceType,
+            sourceRef: input.sourceRef,
+            confidence: baseConfidence
+          })
+        ) {
+          triplesWritten += 1
+        }
+        const fromSemanticId =
+          semanticEntityByLabel.get(rel.subject.toLowerCase()) ?? upsertSemanticEntityId(rel.subject, entityType, baseConfidence)
+        const toSemanticId =
+          semanticEntityByLabel.get(rel.object.toLowerCase()) ?? upsertSemanticEntityId(rel.object, entityType, baseConfidence)
+        if (fromSemanticId && toSemanticId) {
+          const relationId = upsertSemanticRelationId({
+            fromEntityId: fromSemanticId,
+            toEntityId: toSemanticId,
+            verb: rel.verb,
+            confidence: baseConfidence
+          })
+          const evidenceId = writeEvidenceTrace({
+            sourceType: input.sourceType,
+            sourceRef: input.sourceRef,
+            extractionMethod: 'deterministic_rule',
+            ruleId: rel.ruleId,
+            start: rel.start,
+            end: rel.end,
+            text: text.slice(rel.start, Math.min(text.length, rel.end + 120)),
+            confidence: baseConfidence,
+            confidenceReasons: rel.confidenceReasons
+          })
+          if (relationId && evidenceId && linkRelationEvidence) linkRelationEvidence.run(relationId, evidenceId)
+        }
+      }
+
+      if (hasSemanticTables && insertSemanticDescriptor) {
+        for (const desc of adjectiveDescriptors) {
+          const targetEntityId =
+            semanticEntityByLabel.get(desc.target.toLowerCase()) ?? upsertSemanticEntityId(desc.target, entityType, baseConfidence)
+          if (!targetEntityId) continue
+          const descriptorId = randomUUID()
+          insertSemanticDescriptor.run(
+            descriptorId,
+            'entity',
+            targetEntityId,
+            desc.adjective,
+            clampConfidence(baseConfidence * 0.92),
+            Date.now()
+          )
+          const evidenceId = writeEvidenceTrace({
+            sourceType: input.sourceType,
+            sourceRef: input.sourceRef,
+            extractionMethod: 'deterministic_rule',
+            ruleId: desc.ruleId,
+            start: desc.start,
+            end: desc.end,
+            text: text.slice(desc.start, Math.min(text.length, desc.end + 110)),
+            confidence: baseConfidence * 0.92,
+            confidenceReasons: desc.confidenceReasons
+          })
+          if (evidenceId && linkDescriptorEvidence) linkDescriptorEvidence.run(descriptorId, evidenceId)
         }
       }
 
@@ -347,6 +666,70 @@ export function createOntologyService(db: Database.Database): OntologyService {
       }
 
       return { entities: iris.length, triples: triplesWritten }
+    },
+
+    backfillSemanticGraph(opts?: { maxSources?: number; maxTriples?: number }): {
+      sourcesProcessed: number
+      triplesProcessed: number
+    } {
+      if (!hasSemanticTables) return { sourcesProcessed: 0, triplesProcessed: 0 }
+      const maxSources = Math.max(1, Math.min(1000, Math.floor(opts?.maxSources ?? 220)))
+      const maxTriples = Math.max(1, Math.min(12000, Math.floor(opts?.maxTriples ?? 2200)))
+      const existingSemanticRows =
+        (db.prepare('SELECT COUNT(*) as c FROM semantic_entities').get() as { c: number } | undefined)?.c ?? 0
+      if (existingSemanticRows > 0) return { sourcesProcessed: 0, triplesProcessed: 0 }
+
+      const sourceRows = db
+        .prepare(
+          `SELECT s.id, s.uri, COALESCE(d.raw_text, d.distilled_body, '') as text
+           FROM kb_sources s
+           LEFT JOIN kb_documents d ON d.source_id = s.id
+           ORDER BY s.created_at DESC
+           LIMIT ?`
+        )
+        .all(maxSources) as Array<{ id: string; uri: string; text: string }>
+      let sourcesProcessed = 0
+      for (const row of sourceRows) {
+        const text = row.text.trim()
+        if (!text) continue
+        this.ingestText({
+          text,
+          sourceType: inferSourceTypeFromUri(row.uri),
+          sourceRef: row.id,
+          confidence: 0.62,
+          entityType: 'concept'
+        })
+        sourcesProcessed++
+      }
+
+      const tripleRows = db
+        .prepare(
+          `SELECT t.subject_iri as subjectIri, t.predicate_iri as predicateIri, t.object_iri as objectIri, t.confidence
+           FROM ontology_triples t
+           ORDER BY t.created_at DESC
+           LIMIT ?`
+        )
+        .all(maxTriples) as Array<{
+        subjectIri: string
+        predicateIri: string
+        objectIri: string | null
+        confidence: number
+      }>
+      let triplesProcessed = 0
+      for (const row of tripleRows) {
+        if (!row.objectIri) continue
+        const fromId = upsertSemanticEntityId(labelFromIri(row.subjectIri), 'concept', row.confidence)
+        const toId = upsertSemanticEntityId(labelFromIri(row.objectIri), 'concept', row.confidence)
+        if (!fromId || !toId) continue
+        upsertSemanticRelationId({
+          fromEntityId: fromId,
+          toEntityId: toId,
+          verb: verbFromPredicate(row.predicateIri),
+          confidence: row.confidence
+        })
+        triplesProcessed++
+      }
+      return { sourcesProcessed, triplesProcessed }
     },
 
     getStats(): OntologyStats {

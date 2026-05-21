@@ -16,11 +16,18 @@ import type {
   DeepLearnRunProgress,
   DeepLearnRunResult,
   EvidenceCard,
+  ClaudeMemoryCaptureStats,
   IntegrationModelActivityEvent,
+  KbChunk,
   KbSearchHit,
+  KeywordGraphNeighborQuery,
+  KeywordGraphPayload,
+  KeywordGraphQuery,
+  KeywordGraphSearchHit,
   KbDomainOption,
   KbSourceDomainUpdateResult,
   KbIngestJobSummary,
+  KbIngestFileStartResult,
   PluginIntegrationReport,
   OntologyEntityDetails,
   OntologyQueryRequest,
@@ -28,6 +35,7 @@ import type {
   OntologySubgraphPayload,
   RuntimeChatProgress,
   RuntimeLoadProgress,
+  SemanticKnowledgeGraphPayload,
   SaveIntellijPluginZipResult,
   TrainStartValidationResult,
   TrainingManifest,
@@ -129,6 +137,9 @@ contextBridge.exposeInMainWorld('api', {
   integrationPluginReportsList: () => invoke<PluginIntegrationReport[]>(IPC.INTEGRATION_PLUGIN_REPORTS_LIST),
   integrationBridgeSelfTest: (opts?: { smokeChat?: boolean }) =>
     invoke<IntegrationBridgeSelfTestResult>(IPC.INTEGRATION_BRIDGE_SELF_TEST, opts ?? {}),
+  claudeBridgeStart: (opts?: { serverName?: string }) =>
+    invoke<{ ok: boolean; detail?: string; command?: string; error?: string }>(IPC.CLAUDE_BRIDGE_START, opts ?? {}),
+  claudeMemoryStatus: () => invoke<ClaudeMemoryCaptureStats>(IPC.CLAUDE_MEMORY_STATUS),
   onIntegrationPluginReport: (callback: (payload: PluginIntegrationReport) => void) => {
     const channel = IPC.INTEGRATION_PLUGIN_REPORT
     const listener = (_e: IpcRendererEvent, payload: PluginIntegrationReport) => callback(payload)
@@ -245,7 +256,7 @@ contextBridge.exposeInMainWorld('api', {
     invoke<{ baseModelPath: string | null }>(IPC.TRAIN_BASE_FOR_FINETUNE_PATH, artifactPath),
   kbIngestText: (title: string, uri: string, body: string) => invoke(IPC.KB_INGEST_TEXT, title, uri, body),
   kbIngestConversation: (conversationId: string) => invoke(IPC.KB_INGEST_CONVERSATION, conversationId),
-  kbIngestFile: () => invoke(IPC.KB_INGEST_FILE),
+  kbIngestFile: () => invoke<KbIngestFileStartResult>(IPC.KB_INGEST_FILE),
   kbIngestJobs: (limit?: number) => invoke<KbIngestJobSummary[]>(IPC.KB_INGEST_JOBS, limit),
   onKbIngestFileProgress: (callback: (payload: KbIngestFileProgress) => void) => {
     const channel = IPC.KB_INGEST_FILE_PROGRESS
@@ -261,7 +272,7 @@ contextBridge.exposeInMainWorld('api', {
   kbSourceSetDomain: (p: { sourceId: string; domainTitle: string }) =>
     invoke<KbSourceDomainUpdateResult>(IPC.KB_SOURCE_SET_DOMAIN, p),
   kbSearchHits: (query: string, limit?: number) => invoke<KbSearchHit[]>(IPC.KB_SEARCH_HITS, query, limit),
-  kbChunks: (sourceId: string) => invoke(IPC.KB_CHUNKS, sourceId),
+  kbChunks: (sourceId: string) => invoke<KbChunk[]>(IPC.KB_CHUNKS, sourceId),
   kbWikiTopics: () => invoke<WikiTopic[]>(IPC.KB_WIKI_TOPICS),
   kbWikiPage: (sourceId: string) => invoke<WikiPagePayload>(IPC.KB_WIKI_PAGE, sourceId),
   kbWikiCleanupArticle: (sourceId: string) =>
@@ -285,6 +296,13 @@ contextBridge.exposeInMainWorld('api', {
     invoke<{ sourcesRemoved: number; promptDomainsRemoved: number }>(IPC.KB_RESET_WIKI_AND_KEYWORDS),
   kbExportWikiZip: () => invoke<WikiExportZipResult>(IPC.KB_EXPORT_WIKI_ZIP),
   kbKnowledgeGraph: () => invoke(IPC.KB_KNOWLEDGE_GRAPH),
+  kbSemanticGraph: () => invoke<SemanticKnowledgeGraphPayload>(IPC.KB_SEMANTIC_GRAPH),
+  kbKeywordGraph: (query?: KeywordGraphQuery) =>
+    invoke<KeywordGraphPayload>(IPC.KB_KEYWORD_GRAPH, query ?? {}),
+  kbKeywordGraphNeighbors: (query: KeywordGraphNeighborQuery) =>
+    invoke<KeywordGraphPayload>(IPC.KB_KEYWORD_GRAPH_NEIGHBORS, query),
+  kbKeywordGraphSearch: (query: string, limit?: number) =>
+    invoke<KeywordGraphSearchHit[]>(IPC.KB_KEYWORD_GRAPH_SEARCH, { query, limit }),
   kbGraphAnalysisRun: (opts?: { ingestReport?: boolean }) =>
     invoke<KnowledgeGraphAnalysisRunResponse>(IPC.KB_GRAPH_ANALYSIS_RUN, opts ?? {}),
   ontologyStats: () => invoke<OntologyStats>(IPC.ONTOLOGY_STATS),

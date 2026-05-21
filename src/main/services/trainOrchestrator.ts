@@ -1,11 +1,12 @@
 import { randomUUID } from 'crypto'
 import type { ChildProcessWithoutNullStreams } from 'child_process'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { basename, join, resolve } from 'path'
 import type Database from 'better-sqlite3'
 import type { TrainJob } from '@shared/types'
 import { logLine } from '../logger'
 import { exportKbSourcesToTrainingJsonl } from './trainKbExport'
+import { exportClaudeMemorySessionsToTrainingJsonl } from './claudeMemoryStore'
 import { buildManifestFromApproved, recordDomainModelVersion } from './trainingWorkflowStore'
 import {
   probeAxolotlModelSupport,
@@ -80,6 +81,28 @@ function copyArtifactToModelsDir(sourceGguf: string, modelsDir: string, displayN
   return dest
 }
 
+function mergeJsonlFiles(paths: string[], destPath: string): void {
+  const chunks: string[] = []
+  for (const p of paths) {
+    const raw = readFileSync(p, 'utf8')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join('\n')
+    if (raw) chunks.push(raw)
+  }
+  if (chunks.length === 0) throw new Error('No examples were generated for training.')
+  writeFileSync(destPath, `${chunks.join('\n')}\n`, 'utf8')
+}
+
+function describeDatasetSource(kbCount: number, memorySessionCount: number): string {
+  const parts: string[] = []
+  if (kbCount > 0) parts.push(`${kbCount} KB source(s)`)
+  if (memorySessionCount > 0) parts.push(`${memorySessionCount} memory session(s)`)
+  if (parts.length === 0) return 'manual JSONL'
+  return parts.join(' + ')
+}
+
 export function listTrainJobs(db: Database.Database): TrainJob[] {
   return db
     .prepare(
@@ -134,6 +157,8 @@ export interface StartTrainJobOpts {
   datasetPath?: string
   /** When set, export KB chunks to JSONL inside the job output dir */
   kbSourceIds?: string[]
+  /** When set, export memory sessions to JSONL inside the job output dir */
+  claudeSessionIds?: string[]
   /** Shown in the UI and used in finetunes/*.gguf filename */
   displayName?: string
   /** Optional domain profile id for scoped manifests/models. */
@@ -169,15 +194,31 @@ export function startTrainJob(
   const displayName = (opts.displayName ?? '').trim() || `Fine-tune ${id.slice(0, 8)}`
   const domainId = opts.domainId?.trim() || null
   const kbIds = opts.kbSourceIds?.filter((x) => x.trim()) ?? []
+  const claudeSessionIds = opts.claudeSessionIds?.filter((x) => x.trim()) ?? []
   let datasetPathResolved: string
   let kbJson: string | null = null
   let manifestId: string | null = null
 
   try {
-    if (kbIds.length > 0) {
-      datasetPathResolved = join(outputDir, 'kb_training_dataset.jsonl')
-      exportKbSourcesToTrainingJsonl(db, kbIds, datasetPathResolved)
-      kbJson = JSON.stringify(kbIds)
+    if (kbIds.length > 0 || claudeSessionIds.length > 0) {
+      const datasetParts: string[] = []
+      if (kbIds.length > 0) {
+        const kbPath = join(outputDir, 'kb_training_dataset.jsonl')
+        exportKbSourcesToTrainingJsonl(db, kbIds, kbPath)
+        kbJson = JSON.stringify(kbIds)
+        datasetParts.push(kbPath)
+      }
+      if (claudeSessionIds.length > 0) {
+        const memoryPath = join(outputDir, 'claude_memory_training_dataset.jsonl')
+        exportClaudeMemorySessionsToTrainingJsonl(db, claudeSessionIds, memoryPath)
+        datasetParts.push(memoryPath)
+      }
+      if (datasetParts.length === 1) {
+        datasetPathResolved = datasetParts[0]!
+      } else {
+        datasetPathResolved = join(outputDir, 'combined_training_dataset.jsonl')
+        mergeJsonlFiles(datasetParts, datasetPathResolved)
+      }
     } else if (opts.datasetPath?.trim()) {
       datasetPathResolved = opts.datasetPath.trim()
       if (!existsSync(datasetPathResolved)) {
@@ -288,7 +329,7 @@ export function startTrainJob(
         try {
           artifactPath = copyArtifactToModelsDir(primary, opts.modelsDir, displayName, id)
           msg = `${msg}\nRegistered GGUF for Run picker: ${artifactPath}`
-          qualitySummary = `Completed with artifact copy. Dataset source: ${kbIds.length ? `${kbIds.length} KB source(s)` : 'manual JSONL'}.`
+          qualitySummary = `Completed with artifact copy. Dataset source: ${describeDatasetSource(kbIds.length, claudeSessionIds.length)}.`
           regressionRisk = 'low'
         } catch (e) {
           logLine('warn', 'train_artifact_copy_failed', {
@@ -303,7 +344,7 @@ export function startTrainJob(
         regressionRisk = 'high'
       }
       if (!qualitySummary) {
-        qualitySummary = `Job completed. Dataset source: ${kbIds.length ? `${kbIds.length} KB source(s)` : 'manual JSONL'}.`
+        qualitySummary = `Job completed. Dataset source: ${describeDatasetSource(kbIds.length, claudeSessionIds.length)}.`
       }
       if (artifactPath && domainId) {
         try {

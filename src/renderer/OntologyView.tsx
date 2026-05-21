@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState, type ReactNode } from 'react'
-import type { KnowledgeGraphPayload, OntologyEntityDetails, OntologyQueryRequest, OntologyStats, OntologySubgraphPayload } from '@shared/types'
-import { KnowledgeGraphView } from './KnowledgeGraphView'
+import Graph from 'graphology'
+import Sigma from 'sigma'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import type { OntologyEntityDetails, OntologyQueryRequest, OntologyStats, OntologySubgraphPayload } from '@shared/types'
 
 type Props = {
   data: OntologySubgraphPayload | null
@@ -28,6 +29,8 @@ export function OntologyView(props: Props): ReactNode {
   const [recentMode, setRecentMode] = useState<'all' | '24h' | '7d'>('all')
   const [selectionAnchor, setSelectionAnchor] = useState<{ x: number; y: number } | null>(null)
   const graphCardRef = useRef<HTMLDivElement>(null)
+  const graphMountRef = useRef<HTMLDivElement>(null)
+  const sigmaRef = useRef<Sigma | null>(null)
 
   const availableTypes = useMemo(() => {
     if (!data) return [] as string[]
@@ -58,27 +61,62 @@ export function OntologyView(props: Props): ReactNode {
     }
   }
 
-  const graphData = useMemo<KnowledgeGraphPayload | null>(() => {
+  const graphData = useMemo(() => {
     if (!data) return null
-    const nodes = data.nodes.map((node) => ({
-      id: node.iri,
-      kind: 'source' as const,
-      label: node.label,
-      shortLabel: node.label,
-      sublabel: node.type,
-      domainId: node.type,
-      confidence: node.confidence
-    }))
-    const edges = data.edges
-      .filter((edge) => Boolean(edge.objectIri))
-      .map((edge) => ({
-        from: edge.subjectIri,
-        to: edge.objectIri as string,
-        kind: 'semantic_related' as const,
-        confidence: edge.confidence
-      }))
-    return { nodes, edges, truncated: data.truncated }
+    const graph = new Graph({ multi: true, type: 'directed' })
+    const total = Math.max(1, data.nodes.length)
+    const golden = Math.PI * (3 - Math.sqrt(5))
+    data.nodes.forEach((node, i) => {
+      const t = i + 1
+      const radius = Math.sqrt(t / total)
+      const angle = t * golden
+      graph.addNode(node.iri, {
+        label: node.label,
+        x: Math.cos(angle) * radius,
+        y: Math.sin(angle) * radius,
+        size: 3.4 + Math.max(0, Math.min(1, node.confidence)) * 5.2,
+        color: '#8b9dff'
+      })
+    })
+    for (const edge of data.edges) {
+      if (!edge.objectIri) continue
+      if (!graph.hasNode(edge.subjectIri) || !graph.hasNode(edge.objectIri)) continue
+      if (edge.subjectIri === edge.objectIri) continue
+      graph.addEdgeWithKey(edge.id, edge.subjectIri, edge.objectIri, {
+        label: predicateLabel(edge.predicateIri),
+        size: 1.2 + Math.max(0, Math.min(1, edge.confidence)) * 1.6,
+        color: edge.confidence >= 0.72 ? '#8ec5ff' : '#64748b'
+      })
+    }
+    return graph
   }, [data])
+
+  useEffect(() => {
+    const mount = graphMountRef.current
+    if (!mount || !graphData) return
+    sigmaRef.current?.kill()
+    const sigma = new Sigma(graphData, mount, {
+      renderEdgeLabels: false,
+      allowInvalidContainer: true,
+      labelDensity: 0.1,
+      labelRenderedSizeThreshold: 10
+    })
+    sigma.on('clickNode', ({ node }) => {
+      const rect = graphCardRef.current?.getBoundingClientRect()
+      if (rect) {
+        setSelectionAnchor({
+          x: Math.max(12, Math.min(rect.width - 24, rect.width * 0.72)),
+          y: Math.max(12, Math.min(rect.height - 24, rect.height * 0.22))
+        })
+      }
+      onSelectEntity(String(node))
+    })
+    sigmaRef.current = sigma
+    return () => {
+      sigma.kill()
+      sigmaRef.current = null
+    }
+  }, [graphData, onSelectEntity])
 
   return (
     <div className="ontology-shell">
@@ -133,22 +171,7 @@ export function OntologyView(props: Props): ReactNode {
 
       <div className="ontology-main">
         <div ref={graphCardRef} className="ontology-graph card">
-          <KnowledgeGraphView
-            hideToolbarTitle
-            data={graphData}
-            loading={loading}
-            onRefresh={onRefresh}
-            onInspectNode={({ node, anchorClient }) => {
-              const rect = graphCardRef.current?.getBoundingClientRect()
-              if (rect) {
-                setSelectionAnchor({
-                  x: Math.max(12, Math.min(rect.width - 24, anchorClient.x - rect.left)),
-                  y: Math.max(12, Math.min(rect.height - 24, anchorClient.y - rect.top))
-                })
-              }
-              onSelectEntity(node.id)
-            }}
-          />
+          <div className="ontology-sigma-canvas" ref={graphMountRef} />
           {!detailLoading && !details?.entity ? (
             <p className="ontology-overlay-hint muted">Select a graph node to inspect provenance.</p>
           ) : null}
