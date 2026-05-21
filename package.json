@@ -44,7 +44,7 @@
     "better-sqlite3": "^11.7.0",
     "compress-commons": "^6.0.2",
     "d3-force": "^3.0.0",
-    "dompurify": "^3.3.3",
+    "dompurify": "^3.4.5",
     "electron-store": "^10.0.0",
     "electron-updater": "^6.8.3",
     "graphology": "^0.26.0",
