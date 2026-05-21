@@ -2,8 +2,10 @@ import type { RuntimeAdapter } from './runtime/types'
 import { WIKI_REFERENCE_SECTION_MARKDOWN } from '@shared/wikiArticleExtras'
 
 const EXTRACT_MAX_TOKENS = 384
+const DOCUMENT_SUMMARY_MAX_TOKENS = 768
 const MAX_USER_CHARS = 12_000
 const MAX_ASSISTANT_CHARS = 24_000
+const MAX_DOCUMENT_CHARS = 20_000
 
 const EXTRACT_SYSTEM = `You distill the paired USER MESSAGE and ASSISTANT REPLY below into a **standalone reference note** for a personal knowledge base (one main term or short phrase as the entry title). Write as a neutral mini-article: do **not** address the reader, do **not** say "the user", "the assistant", "this chat", or "this conversation". Ground claims only in what the supplied text supports.
 
@@ -32,6 +34,32 @@ Longer nuance, caveats, examples, or technical detail worth keeping for later lo
 BODY_NONE
 
 No outer code fences around the whole reply. No preamble or explanation outside that format.`
+
+const DOCUMENT_SUMMARY_SYSTEM = `You are summarizing a single imported document into a canonical wiki article.
+
+Requirements:
+- Keep the source title exactly as the article title in the tag.
+- Preserve only claims grounded in the provided source text.
+- Be concise and structured for later lookup.
+
+Output format (exactly):
+1) First line: <wiki-title>same as source title</wiki-title>
+2) Then Markdown body using this order:
+
+::: glossary
+**<same title>** -- One-line definition of the source topic.
+:::
+
+## Summary
+3-6 concise bullet points capturing the core ideas.
+
+## Key Details
+Short factual bullets grouped by subtopic where possible.
+
+## Caveats
+Limitations, assumptions, or uncertainty from the source. If none, write one sentence saying none were explicit.
+
+Do not include outer code fences.`
 
 function clip(s: string, maxLen: number): string {
   if (s.length <= maxLen) return s
@@ -94,4 +122,29 @@ export async function runWikiExtractChat(
   )
 }
 
-export const wikiExtractLimits = { EXTRACT_MAX_TOKENS, minAssistantChars: 48 }
+export async function runWikiExtractDocument(
+  rt: RuntimeAdapter,
+  title: string,
+  sourceText: string
+): Promise<string> {
+  const source = clip(sourceText, MAX_DOCUMENT_CHARS)
+  const payload = `SOURCE TITLE:\n${clip(title, 240)}\n\nSOURCE TEXT:\n${source}`
+  return rt.chat(
+    [
+      { role: 'system', content: DOCUMENT_SUMMARY_SYSTEM },
+      { role: 'user', content: payload }
+    ],
+    { maxTokens: DOCUMENT_SUMMARY_MAX_TOKENS }
+  )
+}
+
+export function parseWikiDocumentSummaryResponse(raw: string): { title: string; body: string } | null {
+  const parsed = parseWikiExtractResponse(raw)
+  if ('skip' in parsed) return null
+  const title = parsed.title.trim()
+  const body = parsed.body.trim()
+  if (!title || body.length < 24) return null
+  return { title, body }
+}
+
+export const wikiExtractLimits = { EXTRACT_MAX_TOKENS, DOCUMENT_SUMMARY_MAX_TOKENS, minAssistantChars: 48 }

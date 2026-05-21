@@ -23,9 +23,98 @@ function domainFilterSql(domainIds: string[] | undefined): { sql: string; args: 
   }
 }
 
+function tableExists(db: Database.Database, name: string): boolean {
+  const row = db
+    .prepare(`SELECT 1 as ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`)
+    .get(name) as { ok: number } | undefined
+  return Boolean(row?.ok)
+}
+
+function tokenizeQuery(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.trim().replace(/[^a-z0-9_-]+/g, ''))
+    .filter((t) => t.length >= 2)
+}
+
+function semanticSignalFromOverlap(queryTokens: string[], text: string, heading: string | null | undefined): number {
+  if (queryTokens.length === 0) return 0
+  const corpus = `${heading ?? ''}\n${text}`.toLowerCase()
+  let hitCount = 0
+  for (const token of queryTokens) {
+    if (token && corpus.includes(token)) hitCount++
+  }
+  const coverage = hitCount / queryTokens.length
+  return Number(Math.min(1, Math.max(0, coverage)).toFixed(4))
+}
+
+function keywordExpansionWeights(db: Database.Database, queryTokens: string[]): Map<string, number> {
+  const out = new Map<string, number>()
+  if (queryTokens.length === 0) return out
+  if (!tableExists(db, 'kg_core_entities') || !tableExists(db, 'kg_core_relations')) return out
+  const likeTokens = queryTokens.filter((t) => t.length >= 3).slice(0, 6)
+  if (likeTokens.length === 0) return out
+  const seedIris = new Set<string>()
+  for (const token of likeTokens) {
+    const like = `%${token.replace(/%/g, '').replace(/_/g, '')}%`
+    const rows = db
+      .prepare(
+        `SELECT iri, label
+         FROM kg_core_entities
+         WHERE entity_type IN ('keyword', 'scope')
+           AND label LIKE ?
+         ORDER BY updated_at DESC
+         LIMIT 24`
+      )
+      .all(like) as Array<{ iri: string; label: string }>
+    for (const row of rows) {
+      seedIris.add(row.iri)
+      const key = row.label.toLowerCase()
+      out.set(key, Math.max(out.get(key) ?? 0, 0.14))
+    }
+  }
+  if (seedIris.size === 0) return out
+  const iriList = [...seedIris].slice(0, 32)
+  const placeholders = iriList.map(() => '?').join(',')
+  const neighbors = db
+    .prepare(
+      `SELECT e.label as label
+       FROM kg_core_relations r
+       JOIN kg_core_entities e
+         ON e.iri = CASE
+                      WHEN r.subject_iri IN (${placeholders}) THEN r.object_iri
+                      ELSE r.subject_iri
+                    END
+       WHERE (r.subject_iri IN (${placeholders}) OR r.object_iri IN (${placeholders}))
+         AND r.object_iri IS NOT NULL
+       ORDER BY r.confidence DESC, r.created_at DESC
+       LIMIT 120`
+    )
+    .all(...iriList, ...iriList, ...iriList) as Array<{ label: string }>
+  for (const row of neighbors) {
+    const key = row.label.toLowerCase().trim()
+    if (!key) continue
+    out.set(key, Math.max(out.get(key) ?? 0, 0.1))
+  }
+  return out
+}
+
+function graphSemanticBoost(weights: Map<string, number>, text: string, heading: string | null | undefined): number {
+  if (weights.size === 0) return 0
+  const corpus = `${heading ?? ''}\n${text}`.toLowerCase()
+  let score = 0
+  for (const [term, weight] of weights.entries()) {
+    if (corpus.includes(term)) score += weight
+  }
+  return Math.min(0.28, Number(score.toFixed(4)))
+}
+
 export function retrieveChunks(db: Database.Database, options: RetrievalQueryOptions): RetrievalHit[] {
   const fts = ftsEscape(options.query)
   if (!fts) return []
+  const queryTokens = tokenizeQuery(options.query)
+  const graphWeights = keywordExpansionWeights(db, queryTokens)
   const limit = Math.min(120, Math.max(1, options.limit))
   const filter = domainFilterSql(options.domainIds)
   let rows: Array<{
@@ -98,10 +187,12 @@ export function retrieveChunks(db: Database.Database, options: RetrievalQueryOpt
       .all(like, like, ...filter.args, limit) as typeof rows
   }
 
-  return rows.map((row) => {
+  const kbHits = rows.map((row) => {
     const snippet = row.text.replace(/\s+/g, ' ').trim().slice(0, 220)
     const lexicalScore = Number(row.lexicalScore) || 0
-    const semanticScore = Math.min(1, snippet.length / 220) * 0.35
+    const semanticScore =
+      semanticSignalFromOverlap(queryTokens, row.text, row.heading) * 0.35 +
+      graphSemanticBoost(graphWeights, row.text, row.heading)
     return {
       sourceId: row.sourceId,
       sourceTitle: row.sourceTitle,
@@ -118,6 +209,59 @@ export function retrieveChunks(db: Database.Database, options: RetrievalQueryOpt
       finalScore: lexicalScore + semanticScore
     }
   })
+
+  const includeMemory = !options.domainIds || options.domainIds.length === 0
+  if (!includeMemory) return kbHits
+  if (!tableExists(db, 'claude_memory_rag_units') || !tableExists(db, 'claude_memory_rag_units_fts')) return kbHits
+
+  const memRows = db
+    .prepare(
+      `SELECT u.id as unitId,
+              u.session_id as sessionId,
+              u.event_id as eventId,
+              u.text as text,
+              u.title as title,
+              u.ord as ord,
+              (-1.0 * bm25(f)) as lexicalScore
+       FROM claude_memory_rag_units_fts f
+       JOIN claude_memory_rag_units u ON u.id = f.unit_id
+       WHERE f MATCH ?
+       ORDER BY lexicalScore DESC
+       LIMIT ?`
+    )
+    .all(fts, Math.max(1, Math.floor(limit / 2))) as Array<{
+    unitId: string
+    sessionId: string
+    eventId: string
+    text: string
+    title: string
+    ord: number
+    lexicalScore: number
+  }>
+
+  const memoryHits: RetrievalHit[] = memRows.map((row) => {
+    const snippet = row.text.replace(/\s+/g, ' ').trim().slice(0, 220)
+    const lexicalScore = Number(row.lexicalScore) || 0
+    const semanticScore =
+      semanticSignalFromOverlap(queryTokens, row.text, row.title) * 0.28 +
+      graphSemanticBoost(graphWeights, row.text, row.title)
+    return {
+      sourceId: `memory-session:${row.sessionId}`,
+      sourceTitle: `Memory ${row.sessionId.slice(0, 8)}`,
+      chunkId: row.unitId,
+      text: row.text,
+      snippet: snippet.length < row.text.length ? `${snippet}…` : snippet,
+      heading: row.title,
+      passageTitle: `Session ${row.sessionId.slice(0, 8)} event ${row.eventId.slice(0, 8)}`,
+      anchor: null,
+      ord: row.ord,
+      lexicalScore,
+      semanticScore,
+      finalScore: lexicalScore + semanticScore + 0.05
+    }
+  })
+
+  return [...kbHits, ...memoryHits].sort((a, b) => b.finalScore - a.finalScore).slice(0, limit)
 }
 
 export function retrieveKbHits(db: Database.Database, options: RetrievalQueryOptions): KbSearchHit[] {

@@ -16,12 +16,19 @@ import type {
   DownloadRow,
   EvidenceCard,
   HardwareSummary,
+  KbChunk,
   KbIngestJobSummary,
   KbIngestFileProgress,
+  KbIngestFileStartResult,
   KbDomainOption,
   KbSourceDomainUpdateResult,
   KbSearchHit,
   IntegrationModelActivityEvent,
+  KeywordGraphNeighborQuery,
+  KeywordGraphPayload,
+  KeywordGraphQuery,
+  KeywordGraphSearchHit,
+  ClaudeMemoryCaptureStats,
   KnowledgeGraphPayload,
   OntologyEntityDetails,
   OntologyQueryRequest,
@@ -32,6 +39,7 @@ import type {
   RuntimeChatProgress,
   RuntimeLoadProgress,
   RuntimeStatus,
+  SemanticKnowledgeGraphPayload,
   TrainStartValidationResult,
   TrainingManifest,
   WikiChatHighlightTerm,
@@ -64,6 +72,7 @@ export {}
 
 type Api = {
   getPaths: () => Promise<{
+    appPath: string
     userData: string
     logs: string
     modelsDefault: string
@@ -167,6 +176,8 @@ type Api = {
   onRuntimeChatProgress: (callback: (payload: RuntimeChatProgress) => void) => () => void
   integrationPluginReportsList: () => Promise<PluginIntegrationReport[]>
   integrationBridgeSelfTest: (opts?: { smokeChat?: boolean }) => Promise<IntegrationBridgeSelfTestResult>
+  claudeBridgeStart: (opts?: { serverName?: string }) => Promise<{ ok: boolean; detail?: string; command?: string; error?: string }>
+  claudeMemoryStatus: () => Promise<ClaudeMemoryCaptureStats>
   onIntegrationPluginReport: (callback: (payload: PluginIntegrationReport) => void) => () => void
   onIntegrationModelActivity: (callback: (payload: IntegrationModelActivityEvent) => void) => () => void
   codebaseFormalGet: () => Promise<CodebaseFormalBundle>
@@ -265,7 +276,7 @@ type Api = {
   trainBaseForFinetunePath: (artifactPath: string) => Promise<{ baseModelPath: string | null }>
   kbIngestText: (title: string, uri: string, body: string) => Promise<unknown>
   kbIngestConversation: (conversationId: string) => Promise<unknown>
-  kbIngestFile: () => Promise<unknown>
+  kbIngestFile: () => Promise<KbIngestFileStartResult>
   kbIngestJobs: (limit?: number) => Promise<KbIngestJobSummary[]>
   onKbIngestFileProgress: (callback: (payload: KbIngestFileProgress) => void) => () => void
   kbSources: () => Promise<unknown[]>
@@ -274,7 +285,7 @@ type Api = {
   kbDomainsList: (limit?: number) => Promise<KbDomainOption[]>
   kbSourceSetDomain: (p: { sourceId: string; domainTitle: string }) => Promise<KbSourceDomainUpdateResult>
   kbSearchHits: (query: string, limit?: number) => Promise<KbSearchHit[]>
-  kbChunks: (sourceId: string) => Promise<unknown[]>
+  kbChunks: (sourceId: string) => Promise<KbChunk[]>
   kbWikiTopics: () => Promise<WikiTopic[]>
   kbWikiPage: (sourceId: string) => Promise<WikiPagePayload>
   kbWikiCleanupArticle: (sourceId: string) => Promise<WikiArticleCleanupResult>
@@ -301,6 +312,10 @@ type Api = {
   kbResetWikiAndKeywords: () => Promise<{ sourcesRemoved: number; promptDomainsRemoved: number }>
   kbExportWikiZip: () => Promise<WikiExportZipResult>
   kbKnowledgeGraph: () => Promise<KnowledgeGraphPayload>
+  kbSemanticGraph: () => Promise<SemanticKnowledgeGraphPayload>
+  kbKeywordGraph: (query?: KeywordGraphQuery) => Promise<KeywordGraphPayload>
+  kbKeywordGraphNeighbors: (query: KeywordGraphNeighborQuery) => Promise<KeywordGraphPayload>
+  kbKeywordGraphSearch: (query: string, limit?: number) => Promise<KeywordGraphSearchHit[]>
   kbGraphAnalysisRun: (opts?: { ingestReport?: boolean }) => Promise<KnowledgeGraphAnalysisRunResponse>
   ontologyStats: () => Promise<OntologyStats>
   ontologyQuerySubgraph: (request?: OntologyQueryRequest) => Promise<OntologySubgraphPayload>

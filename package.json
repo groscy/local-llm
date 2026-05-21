@@ -28,6 +28,10 @@
     "prewebsite:preview": "npm run website:assets",
     "website:preview": "npx --yes serve website -l 4174",
     "website:assets": "node scripts/generate-website-assets.mjs",
+    "claude:bridge": "node scripts/claude-bridge-mcp-stdio.mjs",
+    "claude:bridge:ps1": "powershell -ExecutionPolicy Bypass -File scripts/claude-bridge-mcp.ps1",
+    "claude:bridge:legacy-wrapper": "node scripts/claude-code-bridge-wrapper.mjs",
+    "claude:bridge:legacy-wrapper:ps1": "powershell -ExecutionPolicy Bypass -File scripts/claude-bridge.ps1",
     "postinstall": "electron-rebuild -f -w better-sqlite3"
   },
   "dependencies": {
@@ -43,10 +47,12 @@
     "dompurify": "^3.3.3",
     "electron-store": "^10.0.0",
     "electron-updater": "^6.8.3",
+    "graphology": "^0.26.0",
     "katex": "^0.16.45",
     "marked": "^18.0.2",
     "mermaid": "^11.15.0",
     "pdf-parse": "^2.4.5",
+    "sigma": "^3.0.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {

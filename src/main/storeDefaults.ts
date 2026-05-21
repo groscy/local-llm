@@ -81,6 +81,12 @@ export const ELECTRON_STORE_DEFAULTS: Record<string, unknown> = {
   integrationListenEnabled: false,
   integrationPort: 17373,
   integrationToken: '',
+  /** Capture Claude Code bridge events into local long-term memory store. */
+  claudeMemoryCaptureEnabled: true,
+  /** Max accepted serialized event payload size (bytes) before dead-lettering. */
+  claudeMemoryMaxEventBytes: 1_500_000,
+  /** Optional retention horizon for captured events (0 keeps full history). */
+  claudeMemoryRetentionDays: 0,
   /** After a formal verification run completes, optionally summarize logs with the local model (advisory text only). */
   formalVerificationInterpretWithLlm: false,
   /** When interpreting, include KB snippets and a bounded repo scan in the model prompt (opt-in; may contain sensitive titles). */
@@ -202,6 +208,27 @@ export function migrateChatProfileSettings(store: Store<Record<string, unknown>>
   }
   if (typeof store.get('formalVerificationInterpretIncludeKb') !== 'boolean') {
     store.set('formalVerificationInterpretIncludeKb', false)
+  }
+  if (typeof store.get('claudeMemoryCaptureEnabled') !== 'boolean') {
+    store.set('claudeMemoryCaptureEnabled', true)
+  }
+  if (
+    typeof store.get('claudeMemoryMaxEventBytes') !== 'number' ||
+    !Number.isFinite(store.get('claudeMemoryMaxEventBytes'))
+  ) {
+    store.set('claudeMemoryMaxEventBytes', 1_500_000)
+  } else {
+    const n = Math.floor(Number(store.get('claudeMemoryMaxEventBytes')))
+    store.set('claudeMemoryMaxEventBytes', Math.min(8_000_000, Math.max(2048, n)))
+  }
+  if (
+    typeof store.get('claudeMemoryRetentionDays') !== 'number' ||
+    !Number.isFinite(store.get('claudeMemoryRetentionDays'))
+  ) {
+    store.set('claudeMemoryRetentionDays', 0)
+  } else {
+    const n = Math.floor(Number(store.get('claudeMemoryRetentionDays')))
+    store.set('claudeMemoryRetentionDays', Math.min(3650, Math.max(0, n)))
   }
   if (!store.has('typographyComfort')) {
     store.set('typographyComfort', DEFAULT_TYPOGRAPHY_COMFORT)

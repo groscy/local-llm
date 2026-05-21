@@ -613,6 +613,320 @@ const MIGRATIONS: { version: number; sql: string }[] = [
     sql: `
       ALTER TABLE kb_documents ADD COLUMN raw_source_text TEXT NOT NULL DEFAULT '';
     `
+  },
+  {
+    version: 22,
+    sql: `
+      CREATE TABLE IF NOT EXISTS claude_memory_sessions (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        project_path TEXT,
+        metadata_json TEXT,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_claude_memory_sessions_updated ON claude_memory_sessions(updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS claude_memory_events (
+        event_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        turn_id TEXT,
+        sequence INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        project_path TEXT,
+        model TEXT,
+        tool_name TEXT,
+        source_client_version TEXT,
+        token_prompt INTEGER,
+        token_completion INTEGER,
+        payload_json TEXT NOT NULL,
+        received_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES claude_memory_sessions(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_claude_memory_events_session_seq ON claude_memory_events(session_id, sequence);
+      CREATE INDEX IF NOT EXISTS idx_claude_memory_events_type_time ON claude_memory_events(event_type, timestamp DESC);
+
+      CREATE TABLE IF NOT EXISTS claude_memory_dead_letters (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        body_json TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_claude_memory_dead_letters_created ON claude_memory_dead_letters(created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS claude_memory_rag_units (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        ord INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        text TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (event_id, ord),
+        FOREIGN KEY (session_id) REFERENCES claude_memory_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (event_id) REFERENCES claude_memory_events(event_id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_claude_memory_rag_units_session ON claude_memory_rag_units(session_id, created_at DESC);
+      CREATE VIRTUAL TABLE IF NOT EXISTS claude_memory_rag_units_fts USING fts5(unit_id UNINDEXED, body);
+      CREATE TRIGGER IF NOT EXISTS claude_memory_rag_units_ai AFTER INSERT ON claude_memory_rag_units BEGIN
+        INSERT INTO claude_memory_rag_units_fts(unit_id, body) VALUES (new.id, new.text);
+      END;
+      CREATE TRIGGER IF NOT EXISTS claude_memory_rag_units_ad AFTER DELETE ON claude_memory_rag_units BEGIN
+        DELETE FROM claude_memory_rag_units_fts WHERE unit_id = old.id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS claude_memory_rag_units_au AFTER UPDATE ON claude_memory_rag_units BEGIN
+        DELETE FROM claude_memory_rag_units_fts WHERE unit_id = old.id;
+        INSERT INTO claude_memory_rag_units_fts(unit_id, body) VALUES (new.id, new.text);
+      END;
+    `
+  },
+  {
+    version: 23,
+    sql: `
+      CREATE TABLE IF NOT EXISTS semantic_context_scopes (
+        id TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        confidence REAL NOT NULL DEFAULT 0.5,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_semantic_context_scopes_updated
+        ON semantic_context_scopes(updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS semantic_entities (
+        id TEXT PRIMARY KEY,
+        lemma TEXT NOT NULL,
+        label TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_entities_lemma_type
+        ON semantic_entities(lemma, entity_type);
+      CREATE INDEX IF NOT EXISTS idx_semantic_entities_label
+        ON semantic_entities(label);
+
+      CREATE TABLE IF NOT EXISTS semantic_relations (
+        id TEXT PRIMARY KEY,
+        from_entity_id TEXT NOT NULL,
+        to_entity_id TEXT NOT NULL,
+        verb TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (from_entity_id) REFERENCES semantic_entities(id) ON DELETE CASCADE,
+        FOREIGN KEY (to_entity_id) REFERENCES semantic_entities(id) ON DELETE CASCADE
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_relations_unique
+        ON semantic_relations(from_entity_id, to_entity_id, verb);
+      CREATE INDEX IF NOT EXISTS idx_semantic_relations_verb
+        ON semantic_relations(verb);
+
+      CREATE TABLE IF NOT EXISTS semantic_descriptors (
+        id TEXT PRIMARY KEY,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        adjective TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_semantic_descriptors_target
+        ON semantic_descriptors(target_type, target_id);
+
+      CREATE TABLE IF NOT EXISTS semantic_evidence_traces (
+        id TEXT PRIMARY KEY,
+        source_type TEXT NOT NULL,
+        source_ref TEXT NOT NULL,
+        extraction_method TEXT NOT NULL,
+        rule_id TEXT,
+        span_start INTEGER,
+        span_end INTEGER,
+        span_text TEXT,
+        span_page INTEGER,
+        span_anchor TEXT,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        confidence_reasons_json TEXT NOT NULL DEFAULT '[]',
+        parser_warnings_json TEXT NOT NULL DEFAULT '[]',
+        fallback_reason TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_semantic_evidence_source
+        ON semantic_evidence_traces(source_type, source_ref);
+      CREATE INDEX IF NOT EXISTS idx_semantic_evidence_created
+        ON semantic_evidence_traces(created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS semantic_entity_scope_membership (
+        entity_id TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        rationale TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (entity_id, scope_id),
+        FOREIGN KEY (entity_id) REFERENCES semantic_entities(id) ON DELETE CASCADE,
+        FOREIGN KEY (scope_id) REFERENCES semantic_context_scopes(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_semantic_entity_scope_scope
+        ON semantic_entity_scope_membership(scope_id, confidence DESC);
+
+      CREATE TABLE IF NOT EXISTS semantic_entity_evidence (
+        entity_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        PRIMARY KEY (entity_id, evidence_id),
+        FOREIGN KEY (entity_id) REFERENCES semantic_entities(id) ON DELETE CASCADE,
+        FOREIGN KEY (evidence_id) REFERENCES semantic_evidence_traces(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_semantic_entity_evidence_evidence
+        ON semantic_entity_evidence(evidence_id);
+
+      CREATE TABLE IF NOT EXISTS semantic_relation_evidence (
+        relation_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        PRIMARY KEY (relation_id, evidence_id),
+        FOREIGN KEY (relation_id) REFERENCES semantic_relations(id) ON DELETE CASCADE,
+        FOREIGN KEY (evidence_id) REFERENCES semantic_evidence_traces(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_semantic_relation_evidence_evidence
+        ON semantic_relation_evidence(evidence_id);
+
+      CREATE TABLE IF NOT EXISTS semantic_descriptor_evidence (
+        descriptor_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        PRIMARY KEY (descriptor_id, evidence_id),
+        FOREIGN KEY (descriptor_id) REFERENCES semantic_descriptors(id) ON DELETE CASCADE,
+        FOREIGN KEY (evidence_id) REFERENCES semantic_evidence_traces(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_semantic_descriptor_evidence_evidence
+        ON semantic_descriptor_evidence(evidence_id);
+    `
+  },
+  {
+    version: 24,
+    sql: `
+      CREATE TABLE IF NOT EXISTS kg_core_entities (
+        id TEXT PRIMARY KEY,
+        iri TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kg_core_entities_type_label
+        ON kg_core_entities(entity_type, label);
+
+      CREATE TABLE IF NOT EXISTS kg_core_relations (
+        id TEXT PRIMARY KEY,
+        subject_iri TEXT NOT NULL,
+        predicate_iri TEXT NOT NULL,
+        object_iri TEXT,
+        object_literal TEXT,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        source_ref TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kg_core_relations_subject_predicate_created
+        ON kg_core_relations(subject_iri, predicate_iri, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_kg_core_relations_object_predicate_created
+        ON kg_core_relations(object_iri, predicate_iri, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS kg_core_provenance (
+        id TEXT PRIMARY KEY,
+        source_system TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        source_record_id TEXT NOT NULL,
+        source_uri TEXT,
+        source_checksum TEXT,
+        ingest_run_id TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_kg_core_provenance_run_source
+        ON kg_core_provenance(ingest_run_id, source_system, observed_at DESC);
+
+      CREATE TABLE IF NOT EXISTS kg_semantic_scope_intersections (
+        id TEXT PRIMARY KEY,
+        scope_a_id TEXT NOT NULL,
+        scope_b_id TEXT NOT NULL,
+        shared_count INTEGER NOT NULL DEFAULT 0,
+        shared_entity_ids_json TEXT NOT NULL DEFAULT '[]',
+        updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_semantic_scope_intersections_pair
+        ON kg_semantic_scope_intersections(scope_a_id, scope_b_id);
+
+      CREATE TABLE IF NOT EXISTS kg_projection_nodes (
+        graph_type TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        node_json TEXT NOT NULL,
+        rank REAL NOT NULL DEFAULT 0,
+        generated_at INTEGER NOT NULL,
+        PRIMARY KEY (graph_type, node_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_kg_projection_nodes_type_rank
+        ON kg_projection_nodes(graph_type, rank DESC);
+
+      CREATE TABLE IF NOT EXISTS kg_projection_edges (
+        graph_type TEXT NOT NULL,
+        edge_id TEXT NOT NULL,
+        edge_json TEXT NOT NULL,
+        salience REAL NOT NULL DEFAULT 0,
+        generated_at INTEGER NOT NULL,
+        PRIMARY KEY (graph_type, edge_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_kg_projection_edges_type_salience
+        ON kg_projection_edges(graph_type, salience DESC);
+
+      CREATE TABLE IF NOT EXISTS kg_projection_meta (
+        graph_type TEXT PRIMARY KEY,
+        payload_json TEXT NOT NULL,
+        node_count INTEGER NOT NULL,
+        edge_count INTEGER NOT NULL,
+        generated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ontology_triples_subject_object_predicate_created
+        ON ontology_triples(subject_iri, object_iri, predicate_iri, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ontology_triples_created_subject
+        ON ontology_triples(created_at DESC, subject_iri);
+      CREATE INDEX IF NOT EXISTS idx_semantic_entity_scope_scope_entity
+        ON semantic_entity_scope_membership(scope_id, entity_id, confidence DESC);
+      CREATE INDEX IF NOT EXISTS idx_semantic_relation_evidence_relation_trace
+        ON semantic_relation_evidence(relation_id, evidence_id);
+      CREATE INDEX IF NOT EXISTS idx_semantic_entity_evidence_entity_trace
+        ON semantic_entity_evidence(entity_id, evidence_id);
+    `
+  },
+  {
+    version: 25,
+    sql: `
+      ALTER TABLE kb_documents ADD COLUMN extraction_version TEXT NOT NULL DEFAULT 'v1';
+      ALTER TABLE kb_documents ADD COLUMN parser_stage_timings_json TEXT NOT NULL DEFAULT '{}';
+      ALTER TABLE kb_documents ADD COLUMN parser_ocr_coverage REAL;
+
+      ALTER TABLE semantic_entities ADD COLUMN canonical_id TEXT;
+      ALTER TABLE semantic_entities ADD COLUMN alias_of TEXT;
+      CREATE INDEX IF NOT EXISTS idx_semantic_entities_canonical_id ON semantic_entities(canonical_id);
+      CREATE INDEX IF NOT EXISTS idx_semantic_entities_alias_of ON semantic_entities(alias_of);
+
+      CREATE TABLE IF NOT EXISTS semantic_rejection_events (
+        id TEXT PRIMARY KEY,
+        source_ref TEXT NOT NULL,
+        candidate_type TEXT NOT NULL,
+        candidate_label TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        reasons_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_semantic_rejection_events_source
+        ON semantic_rejection_events(source_ref, created_at DESC);
+    `
   }
 ]
 

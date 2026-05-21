@@ -10,6 +10,7 @@ import {
   extractWikiArticlesFromSource,
   getDocumentRecord,
   getKnowledgeGraph,
+  getSemanticKnowledgeGraph,
   ingestFile,
   ingestText,
   listIngestJobs,
@@ -69,6 +70,9 @@ describe('kbService structured wiki flow', () => {
     expect(payload.passages.length).toBeGreaterThan(0)
     expect(payload.suggestedKeywords.length).toBeGreaterThan(0)
     expect(payload.confidence?.score ?? 0).toBeGreaterThan(0)
+    expect(payload.summaryMarkdown.length).toBeGreaterThan(0)
+    expect(payload.metadata?.sourceId).toBe(src.id)
+    expect(payload.rawReference?.totalChunkCount).toBe(payload.passages.length)
   })
 
   maybeIt('extracts selected passages into a separate article', () => {
@@ -134,6 +138,18 @@ describe('kbService structured wiki flow', () => {
     const kg = getKnowledgeGraph(db)
     const related = kg.edges.filter((e) => e.kind === 'related' || e.kind === 'semantic_related')
     expect(related.length).toBeGreaterThan(0)
+  })
+
+  maybeIt('builds semantic graph payload with noun entities and verb relations', () => {
+    db = new Database(':memory:')
+    migrate(db)
+    ingestText(db, 'Transit', 'file://transit.md', 'Bus uses Route. Route is a transport concept.')
+    ingestText(db, 'Energy', 'file://energy.md', 'Grid uses Route for monitoring context.')
+    const semantic = getSemanticKnowledgeGraph(db)
+    expect(semantic.entities.length).toBeGreaterThan(0)
+    expect(semantic.relations.length).toBeGreaterThan(0)
+    expect(semantic.relations.some((r) => r.verb.includes('uses'))).toBe(true)
+    expect(Array.isArray(semantic.evidence)).toBe(true)
   })
 
   maybeIt('allows manual domain assignment for a document', () => {
@@ -203,6 +219,42 @@ describe('kbService structured wiki flow', () => {
       expect(doc).not.toBeNull()
       expect(doc?.sourceRawText).toBe(original)
       expect((doc?.rawText ?? '')).not.toBe('')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  maybeIt('uses runtime summary generation during file ingest when available', async () => {
+    db = new Database(':memory:')
+    migrate(db)
+    const dir = mkdtempSync(join(tmpdir(), 'kb-summary-llm-'))
+    const filePath = join(dir, 'summary-llm.txt')
+    writeFileSync(filePath, '## Intro\nThis source explains deploy orchestration in distributed systems.', 'utf8')
+    let callCount = 0
+    const runtime: RuntimeAdapter = {
+      kind: 'ollama',
+      async start() {},
+      async stop() {},
+      getStatus() {
+        return { running: true, kind: 'ollama', modelPath: 'mock-summary-model' } as any
+      },
+      async chat() {
+        callCount += 1
+        if (callCount === 1) {
+          return '<clean_markdown>\n## Intro\nThis source explains deploy orchestration in distributed systems.\n</clean_markdown>'
+        }
+        return '<wiki-title>summary-llm.txt</wiki-title>\n::: glossary\n**summary-llm.txt** -- Deploy orchestration reference.\n:::\n\n## Summary\n- Coordinates deployment stages.\n\n## Key Details\n- Tracks workers and retries.\n\n## Caveats\n- Source omits failure budgets.'
+      }
+    }
+    try {
+      const src = await ingestFile(db, filePath, undefined, undefined, runtime)
+      const doc = getDocumentRecord(db, src.id)
+      expect(doc?.diagnostics.summaryMode).toBe('llm')
+      expect(doc?.diagnostics.summaryPromptVersion).toMatch(/wiki-summary-ingest/)
+      expect(doc?.distilledBody).toContain('## Summary')
+      const payload = buildWikiPagePayload(db, src.id)
+      expect(payload.summaryMarkdown).toContain('## Summary')
+      expect(payload.metadata?.confidence?.score ?? 0).toBeGreaterThan(0)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

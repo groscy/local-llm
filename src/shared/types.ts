@@ -158,9 +158,19 @@ export interface KbImportDiagnostic {
   parserWarnings: string[]
   truncated: boolean
   cleanupEdits: number
+  parserEngine?: string
+  parserMode?: 'text_layer' | 'ocr_fallback' | 'plain_text' | 'html_text'
+  parseDurationMs?: number
+  ocrApplied?: boolean
+  ocrCoverage?: number
+  extractionVersion?: string
+  qualityFlags?: string[]
   cleanupMode?: 'llm' | 'heuristic'
   cleanupPromptVersion?: string
   cleanupFallbackReason?: string
+  summaryMode?: 'llm' | 'deterministic'
+  summaryPromptVersion?: string
+  summaryModelId?: string
 }
 
 export interface KbImportConfidence {
@@ -168,7 +178,15 @@ export interface KbImportConfidence {
   reasons: string[]
 }
 
-export type KbIngestJobStage = 'selected' | 'extracting' | 'normalizing' | 'enriching' | 'indexing' | 'done' | 'failed'
+export type KbIngestJobStage =
+  | 'selected'
+  | 'extracting'
+  | 'parsing'
+  | 'normalizing'
+  | 'enriching'
+  | 'indexing'
+  | 'done'
+  | 'failed'
 
 export interface KbIngestJobSummary {
   id: string
@@ -199,13 +217,25 @@ export interface KbDocumentRecord {
 export type KbIngestFileProgress =
   | { kind: 'selected'; filePath: string }
   | { kind: 'reading'; filePath: string; format: 'pdf' | 'text' }
+  | { kind: 'pdf_page_progress'; processedPages: number; totalPages: number; pagesLeft: number }
   | { kind: 'stage'; stage: KbIngestJobStage; stageLabel: string; jobId: string; progress?: number }
-  | { kind: 'chunking'; chunkCount: number }
+  | {
+      kind: 'chunking'
+      chunkCount: number
+      step?: 'segmenting' | 'title_generation' | 'finalizing'
+      sectionCount?: number
+      rawCharCount?: number
+      normalizedCharCount?: number
+    }
   | { kind: 'indexing'; inserted: number; total: number }
   | { kind: 'analysis'; sourceId: string; domainsDetected: number }
   | { kind: 'done'; sourceId: string; title: string; chunkCount: number }
   | { kind: 'cancelled' }
   | { kind: 'error'; message: string }
+
+export type KbIngestFileStartResult =
+  | { started: true; jobId: string; filePath: string }
+  | { started: false; cancelled: true }
 
 export interface KbChunk {
   id: string
@@ -284,6 +314,66 @@ export interface RetrievalHit {
   finalScore: number
 }
 
+/**
+ * Source-agnostic ingestion contract used by adapters and orchestrators.
+ * Every connector emits this canonical shape before ontology/graph mapping.
+ */
+export interface IngestProvenance {
+  sourceSystem: string
+  sourceType: 'file' | 'text' | 'chat' | 'codebase' | 'integration' | 'other'
+  sourceRecordId: string
+  sourceUri?: string
+  sourceChecksum?: string
+  ingestRunId: string
+  observedAt: number
+}
+
+export interface CanonicalIngestRecord {
+  id: string
+  recordType: 'document' | 'message' | 'analysis' | 'event'
+  title: string
+  body: string
+  heading?: string
+  conversationId?: string | null
+  provenance: IngestProvenance
+  metadata?: Record<string, string | number | boolean | null>
+}
+
+export interface CanonicalEntityCandidate {
+  recordId: string
+  label: string
+  entityType: string
+  confidence: number
+  start?: number
+  end?: number
+  evidenceText?: string
+  confidenceReasons?: string[]
+}
+
+export interface CanonicalRelationCandidate {
+  recordId: string
+  fromEntityLabel: string
+  toEntityLabel: string
+  predicate: string
+  verb?: string
+  confidence: number
+  start?: number
+  end?: number
+  evidenceText?: string
+  ruleId?: string
+  confidenceReasons?: string[]
+}
+
+export interface IngestBatchResult {
+  runId: string
+  recordsProcessed: number
+  recordsSucceeded: number
+  recordsFailed: number
+  entitiesWritten: number
+  relationsWritten: number
+  warnings: string[]
+}
+
 /** A defined term extracted from a `::: glossary` block in wiki Markdown. */
 export interface WikiGlossaryEntry {
   term: string
@@ -310,14 +400,57 @@ export interface WikiRelatedSource {
   sharedTerms: string[]
 }
 
+export interface WikiPageMetadata {
+  sourceId: string
+  sourceTitle: string
+  sourceKind: WikiSourceKind
+  sourceUri: string
+  importedAt?: number
+  updatedAt?: number
+  chunkCount: number
+  domainId?: string
+  domainTitle?: string
+  confidence?: KbImportConfidence
+  revisionId?: string
+  revisionVersion?: number
+  promptVersion?: string
+}
+
+export interface WikiRawReferenceChunk {
+  chunkId: string
+  ord: number
+  heading: string | null
+  title: string
+  anchor: string
+  snippet: string
+  wordCount: number
+}
+
+export interface WikiRawReferencePayload {
+  sourceTextPreview: string
+  sourceTextLength: number
+  totalChunkCount: number
+  chunks: WikiRawReferenceChunk[]
+}
+
 /** Wiki article returned to the renderer (body has glossary fences removed). */
 export interface WikiPagePayload {
   id: string
   title: string
+  /** Primary article content for wiki rendering. */
+  summaryMarkdown: string
+  metadata?: WikiPageMetadata
+  rawReference?: WikiRawReferencePayload
+  sourceId?: string
+  evidenceTraceIds?: string[]
+  relatedGraphNodeIds?: string[]
+  /** Transitional compatibility field. Prefer `summaryMarkdown`. */
   body: string
+  /** Transitional compatibility field. Prefer `metadata.confidence`. */
   confidence?: KbImportConfidence
   glossary: WikiGlossaryEntry[]
   relatedSources: WikiRelatedSource[]
+  /** Transitional compatibility field. Prefer `rawReference.chunks`. */
   passages: WikiPassageSummary[]
   suggestedKeywords: WikiKeywordCandidate[]
 }
@@ -525,6 +658,12 @@ export interface KnowledgeGraphNode {
   layoutMass?: number
   /** Optional precomputed grouping key for renderer clustering. */
   layoutGroupId?: string
+  /** Optional backend rank hint (higher means keep visible longer in LOD pruning). */
+  rank?: number
+  /** Optional backend-provided source degree for renderer shortcuts. */
+  degree?: number
+  /** Optional backend-provided cluster rank within domain/group. */
+  clusterRank?: number
 }
 
 export type KnowledgeGraphEdgeKind = 'contains' | 'indexes' | 'compiled_from' | 'related' | 'semantic_related'
@@ -539,6 +678,8 @@ export interface KnowledgeGraphEdge {
   recency?: number
   /** Optional renderer salience hint (0..1) for edge clutter reduction. */
   salience?: number
+  /** Optional backend tier hint to reduce client-side sorting work. */
+  tier?: 'strong' | 'mid' | 'faint'
 }
 
 export interface KnowledgeGraphPayload {
@@ -546,6 +687,170 @@ export interface KnowledgeGraphPayload {
   edges: KnowledgeGraphEdge[]
   /** True when some chunks were omitted from the graph for performance. */
   truncated: boolean
+  /** Optional projection metadata when payload is served from materialized tables. */
+  projectionMeta?: {
+    generatedAt: number
+    nodeCount: number
+    edgeCount: number
+    sliceNodeBudget?: number
+    sliceEdgeBudget?: number
+    source: 'dynamic' | 'projection'
+  }
+}
+
+/**
+ * Provenance metadata for semantic extraction: enough detail for UI transparency
+ * and deterministic replay diagnostics.
+ */
+export type SemanticExtractionMethod = 'deterministic_rule' | 'heuristic' | 'llm_enrichment' | 'manual'
+
+export interface SemanticSourceSpan {
+  /** Character offsets in the normalized source text. */
+  start: number
+  end: number
+  /** Optional snippet for quick evidence preview. */
+  text?: string
+  /** Optional page/section hints for document sources. */
+  page?: number
+  sectionAnchor?: string
+}
+
+export interface EvidenceTrace {
+  id: string
+  sourceType: 'pdf' | 'text' | 'codebase' | 'chat' | 'other'
+  sourceRef: string
+  extractionMethod: SemanticExtractionMethod
+  ruleId?: string
+  sourceSpan?: SemanticSourceSpan
+  confidence: number
+  confidenceReasons: string[]
+  parserWarnings?: string[]
+  fallbackReason?: string
+  createdAt: number
+}
+
+/** Adjective layer attached to entities/relations without becoming graph edges. */
+export interface SemanticDescriptor {
+  id: string
+  targetType: 'entity' | 'relation'
+  targetId: string
+  adjective: string
+  confidence: number
+  evidenceTraceId?: string
+  createdAt: number
+}
+
+/** Noun-centric entity node rendered in semantic graph mode. */
+export interface SemanticEntityNode {
+  id: string
+  lemma: string
+  label: string
+  type: string
+  confidence: number
+  scopeIds: string[]
+  evidenceTraceIds: string[]
+  createdAt: number
+  updatedAt: number
+}
+
+/** Verb-labeled relation between noun entities. */
+export interface SemanticRelationEdge {
+  id: string
+  fromEntityId: string
+  toEntityId: string
+  verb: string
+  confidence: number
+  evidenceTraceIds: string[]
+  createdAt: number
+}
+
+export interface SemanticContextScope {
+  id: string
+  slug: string
+  title: string
+  summary?: string
+  confidence: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface SemanticScopeIntersection {
+  id: string
+  scopeIds: string[]
+  sharedEntityIds: string[]
+  label: string
+}
+
+/** Parallel payload to `KnowledgeGraphPayload` for the semantic redesign path. */
+export interface SemanticKnowledgeGraphPayload {
+  entities: SemanticEntityNode[]
+  relations: SemanticRelationEdge[]
+  descriptors: SemanticDescriptor[]
+  scopes: SemanticContextScope[]
+  intersections: SemanticScopeIntersection[]
+  evidence: EvidenceTrace[]
+  truncated: boolean
+}
+
+export type KeywordGraphNodeType = 'keyword' | 'scope'
+
+export interface KeywordGraphNode {
+  id: string
+  type: KeywordGraphNodeType
+  canonicalLabel: string
+  aliases: string[]
+  confidence: number
+  salience: number
+  sourceCoverage: number
+  evidenceTraceIds: string[]
+}
+
+export interface KeywordGraphEdge {
+  id: string
+  from: string
+  to: string
+  predicate: string
+  directed: boolean
+  confidence: number
+  supportCount: number
+  provenanceIds: string[]
+  recency: number
+}
+
+export interface KeywordGraphPayload {
+  nodes: KeywordGraphNode[]
+  edges: KeywordGraphEdge[]
+  truncated: boolean
+  nextCursor?: string
+  projectionMeta?: {
+    generatedAt: number
+    nodeCount: number
+    edgeCount: number
+    source: 'dynamic' | 'projection'
+  }
+}
+
+export interface KeywordGraphQuery {
+  query?: string
+  relationTypes?: string[]
+  minConfidence?: number
+  limitNodes?: number
+  limitEdges?: number
+  cursor?: string
+}
+
+export interface KeywordGraphNeighborQuery {
+  nodeId: string
+  hops?: number
+  limitNodes?: number
+  limitEdges?: number
+}
+
+export interface KeywordGraphSearchHit {
+  id: string
+  canonicalLabel: string
+  aliases: string[]
+  score: number
 }
 
 export interface OntologyNode {
@@ -862,6 +1167,61 @@ export interface IntegrationModelActivityEvent {
   tokenText?: string
   responseText?: string
   error?: string
+}
+
+export type ClaudeMemoryEventType =
+  | 'session_started'
+  | 'session_ended'
+  | 'user_message'
+  | 'assistant_message'
+  | 'tool_call'
+  | 'tool_result'
+  | 'file_edit'
+  | 'shell_command'
+  | 'diagnostic'
+  | 'metadata'
+
+export interface ClaudeMemoryEventEnvelope {
+  eventId: string
+  sessionId: string
+  turnId?: string
+  sequence: number
+  eventType: ClaudeMemoryEventType
+  timestamp: number
+  projectPath?: string
+  model?: string
+  toolName?: string
+  tokenUsage?: { promptTokens?: number; completionTokens?: number }
+  sourceClientVersion?: string
+  payload: Record<string, unknown>
+}
+
+export interface ClaudeMemorySessionRecord {
+  id: string
+  source: string
+  projectPath?: string | null
+  startedAt: number
+  endedAt?: number | null
+  createdAt: number
+  updatedAt: number
+  eventCount: number
+  tokenCountPrompt: number
+  tokenCountCompletion: number
+  metadataJson?: string | null
+}
+
+export interface ClaudeMemoryEventRecord extends ClaudeMemoryEventEnvelope {
+  receivedAt: number
+  payloadJson: string
+}
+
+export interface ClaudeMemoryCaptureStats {
+  sessions: number
+  events: number
+  ragUnits: number
+  deadLetters: number
+  bytesApprox: number
+  lastIngestAt?: number
 }
 
 export type CodebaseAnalysisFacet = 'domain_model' | 'design_pattern' | 'architecture_pattern'

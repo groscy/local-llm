@@ -1,14 +1,28 @@
 import { randomUUID } from 'crypto'
-import { createWriteStream, readFileSync } from 'fs'
-import { extractPdfTextWithDiagnostics, isPdfFilePath } from './pdfIngest'
+import { createWriteStream } from 'fs'
 import { finished } from 'stream/promises'
 import { resolve } from 'path'
 import archiver from 'archiver'
 import type Database from 'better-sqlite3'
+import { parseDocumentFromFile } from './documentParser'
 import { composeWikiReadModel } from './wikiComposer'
+import { parseWikiDocumentSummaryResponse, runWikiExtractDocument } from './wikiExtractService'
 import { analyzeSourceDomains } from './domainAnalysisService'
 import { retrieveChunks, retrieveKbHits } from './retrievalService'
 import { runArticleCleanup, type ArticleCleanupProgress } from './articleCleanupService'
+import { createOntologyService } from './ontologyService'
+import { createGraphWriteService, type GraphWriteService } from './graphWriteService'
+import { createIngestOrchestrator, type IngestOrchestrator } from './ingestOrchestrator'
+import { fromFileSource, fromTextSource } from './sourceAdapters'
+import {
+  clearProjection,
+  removeKnowledgeGraphProjectionBySource,
+  rebuildKnowledgeGraphProjection,
+  rebuildSemanticGraphProjection,
+  readProjectedKnowledgeGraph,
+  readProjectedSemanticGraph,
+  upsertKnowledgeGraphProjectionSlice
+} from './graphProjectionService'
 import type { RuntimeAdapter } from './runtime/types'
 import { extractWikiGlossary, stripWikiControlMarkers, WIKI_REFERENCE_SECTION_MARKDOWN } from '@shared/wikiArticleExtras'
 import { wikiKindFromUri } from '@shared/wikiSourceGroups'
@@ -27,19 +41,29 @@ import type {
   KnowledgeGraphEdge,
   KnowledgeGraphNode,
   KnowledgeGraphPayload,
+  SemanticContextScope,
+  SemanticDescriptor,
+  SemanticEntityNode,
+  SemanticKnowledgeGraphPayload,
+  SemanticRelationEdge,
+  SemanticScopeIntersection,
+  EvidenceTrace,
   WikiChatHighlightTerm,
   WikiExtractArticleRequest,
   WikiExtractArticleResult,
   WikiArticleCleanupResult,
   WikiKeywordCandidate,
+  WikiPageMetadata,
   WikiPassageSummary,
   WikiPagePayload,
+  WikiRawReferencePayload,
   WikiReanalyzeResult,
   WikiRelatedSource,
   WikiTermResolutionResult,
   WikiSourceKind,
   WikiTopic
 } from '@shared/types'
+import type { OntologyService } from './ontologyService'
 
 const CHUNK_SIZE = 1200
 const CHUNK_OVERLAP = 200
@@ -75,6 +99,17 @@ function tableExists(db: Database.Database, name: string): boolean {
     .prepare(`SELECT 1 as ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`)
     .get(name) as { ok: number } | undefined
   return Boolean(row?.ok)
+}
+
+function parseJsonStringArray(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((v): v is string => typeof v === 'string')
+  } catch {
+    return []
+  }
 }
 
 function hasWikiEntryTables(db: Database.Database): boolean {
@@ -331,8 +366,10 @@ type ChunkDraft = { text: string; heading?: string; anchor: string; passageTitle
 type IngestDocumentInput = {
   title: string
   uri: string
+  filePath?: string
   sourceRawText?: string
   rawText: string
+  canonicalSummaryBody?: string
   source: 'pdf' | 'text'
   diagnostics?: Partial<KbImportDiagnostic>
   cleanupMode?: 'llm' | 'heuristic'
@@ -341,6 +378,296 @@ type IngestDocumentInput = {
   heading?: string
   conversationId?: string | null
   onProgress?: (payload: KbIngestFileProgress) => void
+}
+
+function inferSemanticSourceType(input: Pick<IngestDocumentInput, 'source' | 'uri'>): 'pdf' | 'text' | 'codebase' {
+  if (input.source === 'pdf') return 'pdf'
+  const uri = input.uri.trim().toLowerCase()
+  if (uri.startsWith('codebase-analysis:')) return 'codebase'
+  return 'text'
+}
+
+const ontologyByDb = new WeakMap<Database.Database, OntologyService>()
+const writerByDb = new WeakMap<Database.Database, GraphWriteService>()
+const orchestratorByDb = new WeakMap<Database.Database, IngestOrchestrator>()
+
+function getOntologySingleton(db: Database.Database): OntologyService {
+  const existing = ontologyByDb.get(db)
+  if (existing) return existing
+  const created = createOntologyService(db)
+  ontologyByDb.set(db, created)
+  return created
+}
+
+function getIngestOrchestrator(db: Database.Database): IngestOrchestrator {
+  const existing = orchestratorByDb.get(db)
+  if (existing) return existing
+  const writer =
+    writerByDb.get(db) ??
+    (() => {
+      const createdWriter = createGraphWriteService({ db, ontology: getOntologySingleton(db) })
+      writerByDb.set(db, createdWriter)
+      return createdWriter
+    })()
+  const orchestrator = createIngestOrchestrator(writer)
+  orchestratorByDb.set(db, orchestrator)
+  return orchestrator
+}
+
+function rankStructuralPayload(payload: KnowledgeGraphPayload): KnowledgeGraphPayload {
+  const degreeByNode = new Map<string, number>()
+  for (const edge of payload.edges) {
+    degreeByNode.set(edge.from, (degreeByNode.get(edge.from) ?? 0) + 1)
+    degreeByNode.set(edge.to, (degreeByNode.get(edge.to) ?? 0) + 1)
+  }
+  const maxDegree = Math.max(1, ...degreeByNode.values(), 1)
+  const nodesRanked = payload.nodes.map((node) => {
+    const degree = degreeByNode.get(node.id) ?? 0
+    const confidence = typeof node.confidence === 'number' ? node.confidence : 0.56
+    const novelty = typeof node.novelty === 'number' ? node.novelty : 0.42
+    return {
+      ...node,
+      degree,
+      rank: Number((degree / maxDegree * 0.52 + confidence * 0.3 + novelty * 0.18).toFixed(4)),
+      clusterRank: degree
+    }
+  })
+  const edgesRanked = payload.edges.map((edge) => {
+    const salience =
+      edge.salience ??
+      Math.max(
+        0.08,
+        Math.min(
+          1,
+          (edge.kind === 'contains'
+            ? 0.76
+            : edge.kind === 'compiled_from'
+              ? 0.69
+              : edge.kind === 'indexes'
+                ? 0.58
+                : 0.4) *
+            0.56 +
+            (edge.confidence ?? 0.62) * 0.24 +
+            (edge.recency ?? 0.55) * 0.2
+        )
+      )
+    const tier: 'strong' | 'mid' | 'faint' = salience >= 0.72 ? 'strong' : salience >= 0.44 ? 'mid' : 'faint'
+    return { ...edge, salience, tier }
+  })
+  return { ...payload, nodes: nodesRanked, edges: edgesRanked }
+}
+
+function buildStructuralProjectionSliceForSource(db: Database.Database, sourceId: string): KnowledgeGraphPayload {
+  ensureWikiVersioningBackfill(db)
+  const source = db
+    .prepare('SELECT id, title, uri FROM kb_sources WHERE id = ? LIMIT 1')
+    .get(sourceId) as { id: string; title: string; uri: string } | undefined
+  if (!source) return { nodes: [], edges: [], truncated: false }
+  const sourceDomain = db
+    .prepare(
+      `SELECT domain_id as domainId
+       FROM kb_domain_membership
+       WHERE source_id = ?
+       ORDER BY confidence DESC
+       LIMIT 1`
+    )
+    .get(sourceId) as { domainId: string } | undefined
+  const docConfidence = getDocumentRecord(db, sourceId)?.confidenceScore ?? 0.72
+  const nodes: KnowledgeGraphNode[] = [
+    {
+      id: source.id,
+      kind: 'source',
+      label: source.title,
+      shortLabel: semanticToken(source.title),
+      targetSourceId: source.id,
+      domainId: sourceDomain?.domainId ?? domainIdFromUri(source.uri),
+      confidence: docConfidence,
+      novelty: 0.36,
+      provenance: 'knowledge-base'
+    }
+  ]
+  const edges: KnowledgeGraphEdge[] = []
+  const chunkRows = db
+    .prepare(
+      `SELECT id, ord, heading, anchor, passage_title as passageTitle
+       FROM kb_chunks
+       WHERE source_id = ?
+       ORDER BY ord ASC
+       LIMIT ?`
+    )
+    .all(sourceId, GRAPH_MAX_CHUNKS_PER_SOURCE + 1) as Array<{
+    id: string
+    ord: number
+    heading: string | null
+    anchor: string | null
+    passageTitle: string | null
+  }>
+  const slice = chunkRows.slice(0, GRAPH_MAX_CHUNKS_PER_SOURCE)
+  for (const row of slice) {
+    const sub =
+      (row.passageTitle && row.passageTitle.trim()) || (row.heading && row.heading.trim())
+        ? (row.passageTitle || row.heading || '').trim().slice(0, 42) +
+          ((row.passageTitle || row.heading || '').trim().length > 42 ? '…' : '')
+        : undefined
+    nodes.push({
+      id: row.id,
+      kind: 'chunk',
+      label: `#${row.ord + 1}`,
+      shortLabel: `c${row.ord + 1}`,
+      sublabel: sub,
+      sourceId,
+      targetSourceId: sourceId,
+      sectionOrd: row.ord,
+      sectionAnchor: row.anchor ?? undefined,
+      domainId: sourceDomain?.domainId ?? domainIdFromUri(source.uri),
+      confidence: Math.max(0.3, docConfidence - 0.08),
+      novelty: row.heading ? 0.62 : 0.44,
+      provenance: 'knowledge-base'
+    })
+    edges.push({ from: sourceId, to: row.id, kind: 'contains', confidence: 0.92, recency: 0.5 })
+  }
+  if (chunkRows.length > slice.length) {
+    const omitted = chunkRows.length - slice.length
+    const overflowId = `kg-overflow:${sourceId}`
+    nodes.push({
+      id: overflowId,
+      kind: 'chunk',
+      label: `+${omitted}`,
+      shortLabel: `+${omitted}`,
+      sublabel: 'chunks not drawn',
+      sourceId,
+      domainId: sourceDomain?.domainId ?? domainIdFromUri(source.uri),
+      confidence: 0.4,
+      novelty: 0.2,
+      provenance: 'knowledge-base'
+    })
+    edges.push({ from: sourceId, to: overflowId, kind: 'contains', confidence: 0.82, recency: 0.4 })
+  }
+  const entryRows = db
+    .prepare(
+      `SELECT e.id as entryId, r.title as title, r.source_ids_json as sourceIdsJson
+       FROM wiki_entry_sources es
+       JOIN wiki_entries e ON e.id = es.entry_id
+       JOIN wiki_entry_revisions r ON r.id = e.active_revision_id
+       WHERE es.source_id = ?`
+    )
+    .all(sourceId) as Array<{ entryId: string; title: string; sourceIdsJson: string }>
+  const chunkIds = new Set(slice.map((c) => c.id))
+  for (const entry of entryRows) {
+    const wikiNodeId = `wiki-entry:${entry.entryId}`
+    nodes.push({
+      id: wikiNodeId,
+      kind: 'wiki',
+      label: entry.title,
+      shortLabel: semanticToken(entry.title),
+      targetSourceId: sourceId,
+      domainId: sourceDomain?.domainId ?? domainIdFromUri(source.uri),
+      confidence: 0.82,
+      novelty: 0.56,
+      provenance: 'knowledge-base'
+    })
+    const sourceIds = readSourceIdsJson(entry.sourceIdsJson)
+    if (sourceIds.includes(sourceId)) edges.push({ from: wikiNodeId, to: sourceId, kind: 'compiled_from', confidence: 0.9, recency: 0.7 })
+    for (const chunkId of chunkIds) edges.push({ from: wikiNodeId, to: chunkId, kind: 'indexes', confidence: 0.76, recency: 0.58 })
+  }
+  if (tableExists(db, 'kb_doc_relations')) {
+    const relationRows = db
+      .prepare(
+        `SELECT from_source_id as fromSourceId, to_source_id as toSourceId, confidence, relation_kind as relationKind
+         FROM kb_doc_relations
+         WHERE from_source_id = ? OR to_source_id = ?
+         ORDER BY confidence DESC
+         LIMIT 220`
+      )
+      .all(sourceId, sourceId) as Array<{ fromSourceId: string; toSourceId: string; confidence: number; relationKind: string }>
+    for (const row of relationRows) {
+      if (row.fromSourceId === row.toSourceId) continue
+      edges.push({
+        from: row.fromSourceId,
+        to: row.toSourceId,
+        kind: row.relationKind === 'semantic_similarity' ? 'semantic_related' : 'related',
+        confidence: Math.min(1, Math.max(0.2, Number(row.confidence) || 0.5)),
+        recency: 0.58
+      })
+    }
+  }
+  return rankStructuralPayload({
+    nodes,
+    edges,
+    truncated: chunkRows.length > slice.length
+  })
+}
+
+function refreshGraphProjectionsBestEffort(db: Database.Database): void {
+  try {
+    const structural = buildKnowledgeGraphDynamic(db)
+    rebuildKnowledgeGraphProjection(db, structural)
+    const semantic = buildSemanticKnowledgeGraphDynamic(db)
+    rebuildSemanticGraphProjection(db, semantic)
+  } catch {
+    // projection refresh should not break core KB operations
+  }
+}
+
+function refreshGraphProjectionForSourceBestEffort(db: Database.Database, sourceId: string): void {
+  try {
+    const slice = buildStructuralProjectionSliceForSource(db, sourceId)
+    upsertKnowledgeGraphProjectionSlice(db, { sourceId, payload: slice })
+    // Semantic projection is invalidated on source updates and rebuilt lazily on next read.
+    clearProjection(db, 'semantic')
+  } catch {
+    refreshGraphProjectionsBestEffort(db)
+  }
+}
+
+function removeGraphProjectionForSourceBestEffort(db: Database.Database, sourceId: string): void {
+  try {
+    removeKnowledgeGraphProjectionBySource(db, sourceId)
+    clearProjection(db, 'semantic')
+  } catch {
+    refreshGraphProjectionsBestEffort(db)
+  }
+}
+
+function ingestSemanticBestEffort(
+  db: Database.Database,
+  input: Pick<IngestDocumentInput, 'source' | 'uri' | 'filePath'> & {
+    sourceId: string
+    text: string
+    diagnostics?: Partial<KbImportDiagnostic>
+  }
+): void {
+  const text = input.text.trim()
+  if (!text) return
+  try {
+    const canonical =
+      input.filePath || inferSemanticSourceType(input) === 'pdf'
+        ? fromFileSource({
+            title: input.sourceId,
+            filePath: input.filePath || input.uri.replace(/^file:\/\//i, ''),
+            body: text,
+            sourceKind: inferSemanticSourceType(input) === 'pdf' ? 'pdf' : 'text',
+            diagnostics: input.diagnostics,
+            ingestRunId: `kb-${input.sourceId}-${Date.now()}`
+          })
+        : fromTextSource({
+            title: input.sourceId,
+            uri: input.uri || `src:${input.sourceId}`,
+            body: text,
+            ingestRunId: `kb-${input.sourceId}-${Date.now()}`
+          })
+    canonical.provenance.sourceType =
+      inferSemanticSourceType(input) === 'codebase'
+        ? 'codebase'
+        : input.filePath || inferSemanticSourceType(input) === 'pdf'
+          ? 'file'
+          : 'text'
+    canonical.provenance.sourceRecordId = input.sourceId
+    const orchestrator = getIngestOrchestrator(db)
+    orchestrator.ingestRecord(canonical)
+  } catch {
+    // Semantic extraction is an additive layer; core KB ingest should still succeed.
+  }
 }
 
 function splitMarkdownSections(text: string): Array<{ heading?: string; body: string }> {
@@ -458,6 +785,33 @@ function distillDocumentToWikiBody(title: string, rawText: string): string {
   ].join('\n')
 }
 
+type CanonicalSummaryResult = {
+  body: string
+  promptVersion: string
+  modelId?: string
+}
+
+async function summarizeImportedDocument(
+  runtime: RuntimeAdapter | null | undefined,
+  title: string,
+  rawText: string
+): Promise<CanonicalSummaryResult | null> {
+  if (!runtime) return null
+  if (!runtime.getStatus().running) return null
+  try {
+    const raw = await runWikiExtractDocument(runtime, title, rawText)
+    const parsed = parseWikiDocumentSummaryResponse(raw)
+    if (!parsed) return null
+    return {
+      body: parsed.body,
+      promptVersion: 'wiki-summary-ingest-2026-05-16.v1',
+      modelId: runtime.getStatus().modelPath || runtime.getStatus().kind
+    }
+  } catch {
+    return null
+  }
+}
+
 function scoreImportConfidence(rawText: string, distilledBody: string, diagnostics: KbImportDiagnostic): KbImportConfidence {
   let score = 0.92
   const reasons: string[] = []
@@ -490,6 +844,14 @@ function scoreImportConfidence(rawText: string, distilledBody: string, diagnosti
     score -= Math.min(0.16, brokenTokens * 0.01)
     reasons.push('broken_token_sequences')
   }
+  if (diagnostics.ocrApplied) {
+    score -= diagnostics.ocrCoverage && diagnostics.ocrCoverage >= 0.8 ? 0.06 : 0.12
+    reasons.push('ocr_fallback_applied')
+  }
+  if (diagnostics.qualityFlags?.length) {
+    score -= Math.min(0.18, diagnostics.qualityFlags.length * 0.05)
+    reasons.push('quality_gate_flags')
+  }
   return { score: Number(Math.min(1, Math.max(0.05, score)).toFixed(3)), reasons }
 }
 
@@ -506,8 +868,9 @@ function saveDocumentRecord(
   const now = Date.now()
   db.prepare(
     `INSERT OR REPLACE INTO kb_documents
-       (source_id, raw_source_text, raw_text, distilled_body, confidence_score, confidence_reasons_json, diagnostics_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM kb_documents WHERE source_id = ?), ?), ?)`
+       (source_id, raw_source_text, raw_text, distilled_body, confidence_score, confidence_reasons_json, diagnostics_json,
+        extraction_version, parser_stage_timings_json, parser_ocr_coverage, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM kb_documents WHERE source_id = ?), ?), ?)`
   ).run(
     sourceId,
     sourceRawText,
@@ -516,6 +879,11 @@ function saveDocumentRecord(
     confidence.score,
     JSON.stringify(confidence.reasons),
     JSON.stringify(diagnostics),
+    diagnostics.extractionVersion || 'v1',
+    JSON.stringify({
+      parseDurationMs: diagnostics.parseDurationMs ?? null
+    }),
+    typeof diagnostics.ocrCoverage === 'number' ? diagnostics.ocrCoverage : null,
     sourceId,
     now,
     now
@@ -607,7 +975,7 @@ function ingestDocument(db: Database.Database, input: IngestDocumentInput): KbSo
   const t = Date.now()
   const sourceRawText = input.sourceRawText ?? input.rawText
   const rawText = normalizeImportedRawText(input.rawText)
-  const distilledBody = distillDocumentToWikiBody(input.title, rawText)
+  const distilledBody = (input.canonicalSummaryBody?.trim() || distillDocumentToWikiBody(input.title, rawText)).trim()
   const diagnostics: KbImportDiagnostic = {
     source: input.source,
     parserWarnings: input.diagnostics?.parserWarnings ?? [],
@@ -615,15 +983,47 @@ function ingestDocument(db: Database.Database, input: IngestDocumentInput): KbSo
     cleanupEdits: Math.max(0, Number(input.diagnostics?.cleanupEdits ?? 0)),
     cleanupMode: input.cleanupMode,
     cleanupPromptVersion: input.cleanupPromptVersion,
-    cleanupFallbackReason: input.cleanupFallbackReason
+    cleanupFallbackReason: input.cleanupFallbackReason,
+    parserEngine: input.diagnostics?.parserEngine,
+    parserMode: input.diagnostics?.parserMode,
+    parseDurationMs: input.diagnostics?.parseDurationMs,
+    ocrApplied: input.diagnostics?.ocrApplied,
+    ocrCoverage: input.diagnostics?.ocrCoverage,
+    extractionVersion: input.diagnostics?.extractionVersion,
+    qualityFlags: input.diagnostics?.qualityFlags ?? [],
+    summaryMode: input.diagnostics?.summaryMode ?? (input.canonicalSummaryBody ? 'llm' : 'deterministic'),
+    summaryPromptVersion: input.diagnostics?.summaryPromptVersion,
+    summaryModelId: input.diagnostics?.summaryModelId
   }
   const confidence = scoreImportConfidence(rawText, distilledBody, diagnostics)
   db.prepare(
     'INSERT INTO kb_sources (id, title, uri, created_at, conversation_id) VALUES (?, ?, ?, ?, ?)'
   ).run(sourceId, input.title, input.uri, t, input.conversationId ?? null)
   input.onProgress?.({ kind: 'stage', stage: 'normalizing', stageLabel: 'Normalizing document', jobId: sourceId, progress: 0.3 })
+  const sectionCountEstimate = Math.max(
+    1,
+    rawText
+      .split(/\n{2,}/g)
+      .map((section) => section.trim())
+      .filter(Boolean).length
+  )
+  input.onProgress?.({
+    kind: 'chunking',
+    chunkCount: 0,
+    step: 'segmenting',
+    sectionCount: sectionCountEstimate,
+    rawCharCount: sourceRawText.length,
+    normalizedCharCount: rawText.length
+  })
   const chunks = chunkText(rawText, input.heading)
-  input.onProgress?.({ kind: 'chunking', chunkCount: chunks.length })
+  input.onProgress?.({
+    kind: 'chunking',
+    chunkCount: chunks.length,
+    step: 'title_generation',
+    sectionCount: sectionCountEstimate,
+    rawCharCount: sourceRawText.length,
+    normalizedCharCount: rawText.length
+  })
   let ord = 0
   const ins = db.prepare(
     `INSERT INTO kb_chunks (id, source_id, ord, heading, text, anchor, passage_title) VALUES (?, ?, ?, ?, ?, ?, ?)`
@@ -637,14 +1037,32 @@ function ingestDocument(db: Database.Database, input: IngestDocumentInput): KbSo
       input.onProgress?.({ kind: 'indexing', inserted, total: chunks.length })
     }
   }
+  input.onProgress?.({
+    kind: 'chunking',
+    chunkCount: chunks.length,
+    step: 'finalizing',
+    sectionCount: sectionCountEstimate,
+    rawCharCount: sourceRawText.length,
+    normalizedCharCount: rawText.length
+  })
   persistDocumentSections(db, sourceId, rawText)
   persistEntityMentions(db, sourceId, chunks)
   rebuildDocRelations(db, sourceId)
   const detectedDomains = analyzeSourceDomains(db, sourceId)
   const wikiBody = composeWikiReadModel(db, sourceId)
-  saveDocumentRecord(db, sourceId, sourceRawText, rawText, wikiBody || distilledBody, confidence, diagnostics)
+  const canonicalWikiBody = (input.canonicalSummaryBody?.trim() || wikiBody || distilledBody).trim()
+  saveDocumentRecord(db, sourceId, sourceRawText, rawText, canonicalWikiBody, confidence, diagnostics)
+  ingestSemanticBestEffort(db, {
+    source: input.source,
+    uri: input.uri,
+    filePath: input.filePath,
+    sourceId,
+    text: rawText,
+    diagnostics
+  })
   input.onProgress?.({ kind: 'analysis', sourceId, domainsDetected: detectedDomains.length })
   input.onProgress?.({ kind: 'done', sourceId, title: input.title, chunkCount: chunks.length })
+  refreshGraphProjectionForSourceBestEffort(db, sourceId)
   return { id: sourceId, title: input.title, uri: input.uri, createdAt: t, conversationId: input.conversationId ?? null }
 }
 
@@ -657,15 +1075,41 @@ export function ingestText(
   conversationId?: string | null,
   onProgress?: (payload: KbIngestFileProgress) => void
 ): KbSource {
-  return ingestDocument(db, {
+  return ingestTextWithMetadata(db, {
     title,
     uri,
-    sourceRawText: body,
-    rawText: body,
-    source: 'text',
+    body,
     heading,
     conversationId,
     onProgress
+  })
+}
+
+export function ingestTextWithMetadata(
+  db: Database.Database,
+  input: {
+    title: string
+    uri: string
+    body: string
+    heading?: string
+    conversationId?: string | null
+    source?: 'pdf' | 'text'
+    diagnostics?: Partial<KbImportDiagnostic>
+    filePath?: string
+    onProgress?: (payload: KbIngestFileProgress) => void
+  }
+): KbSource {
+  return ingestDocument(db, {
+    title: input.title,
+    uri: input.uri,
+    sourceRawText: input.body,
+    rawText: input.body,
+    source: input.source ?? 'text',
+    diagnostics: input.diagnostics,
+    filePath: input.filePath,
+    heading: input.heading,
+    conversationId: input.conversationId,
+    onProgress: input.onProgress
   })
 }
 
@@ -674,14 +1118,15 @@ export async function ingestFile(
   filePath: string,
   title?: string,
   onProgress?: (payload: KbIngestFileProgress) => void,
-  runtime?: RuntimeAdapter | null
+  runtime?: RuntimeAdapter | null,
+  forcedJobId?: string
 ): Promise<KbSource> {
   const existing = findExistingFileSource(db, filePath)
   if (existing) {
     throw new Error(`This document is already in your wiki library as "${existing.title}".`)
   }
   const name = title ?? filePath.split(/[/\\]/).pop() ?? filePath
-  const jobId = randomUUID()
+  const jobId = forcedJobId ?? randomUUID()
   upsertIngestJob(db, {
     jobId,
     filePath,
@@ -692,42 +1137,56 @@ export async function ingestFile(
   onProgress?.({ kind: 'stage', stage: 'selected', stageLabel: 'File selected', jobId, progress: 0.05 })
   let body: string
   let sourceRawText = ''
+  let parsedFilePath: string | undefined
   let diagnostics: Partial<KbImportDiagnostic> = {
     source: 'text',
     parserWarnings: [],
     truncated: false,
     cleanupEdits: 0
   }
-  if (isPdfFilePath(filePath)) {
-    upsertIngestJob(db, { jobId, filePath, title: name, stage: 'extracting', status: 'running' })
-    onProgress?.({ kind: 'stage', stage: 'extracting', stageLabel: 'Extracting PDF text', jobId, progress: 0.2 })
-    onProgress?.({ kind: 'reading', filePath, format: 'pdf' })
-    const buf = readFileSync(filePath)
-    const result = await extractPdfTextWithDiagnostics(buf)
-    body = result.text
-    sourceRawText = body
-    diagnostics = {
-      source: 'pdf',
-      parserWarnings: result.diagnostics.parserWarnings,
-      truncated: result.diagnostics.truncated,
-      cleanupEdits: result.diagnostics.cleanupEdits
+  upsertIngestJob(db, { jobId, filePath, title: name, stage: 'extracting', status: 'running' })
+  onProgress?.({ kind: 'stage', stage: 'extracting', stageLabel: 'Reading document', jobId, progress: 0.16 })
+  onProgress?.({ kind: 'reading', filePath, format: filePath.toLowerCase().endsWith('.pdf') ? 'pdf' : 'text' })
+  onProgress?.({ kind: 'stage', stage: 'parsing', stageLabel: 'Parsing document structure', jobId, progress: 0.24 })
+  const parsed = await parseDocumentFromFile({
+    filePath,
+    onPdfPageProgress: (progress) => {
+      onProgress?.({
+        kind: 'pdf_page_progress',
+        processedPages: progress.processedPages,
+        totalPages: progress.totalPages,
+        pagesLeft: progress.pagesLeft
+      })
     }
-    if (!body.trim()) {
-      throw new Error('No extractable text in this PDF (it may be image-only, encrypted, or empty).')
-    }
-  } else {
-    upsertIngestJob(db, { jobId, filePath, title: name, stage: 'extracting', status: 'running' })
-    onProgress?.({ kind: 'stage', stage: 'extracting', stageLabel: 'Reading document', jobId, progress: 0.2 })
-    onProgress?.({ kind: 'reading', filePath, format: 'text' })
-    body = readFileSync(filePath, 'utf8')
-    sourceRawText = body
+  })
+  body = parsed.normalizedText
+  sourceRawText = parsed.rawText
+  parsedFilePath = filePath
+  diagnostics = {
+    source: parsed.sourceKind,
+    parserWarnings: parsed.warnings.length > 0 ? parsed.warnings : (parsed.parserDiagnostics?.parserWarnings ?? []),
+    truncated: parsed.parserDiagnostics?.truncated === true,
+    cleanupEdits: Number(parsed.parserDiagnostics?.cleanupEdits ?? 0),
+    parserEngine: parsed.parserEngine,
+    parserMode: parsed.parserMode,
+    parseDurationMs: parsed.parseDurationMs,
+    ocrApplied: parsed.ocrApplied,
+    ocrCoverage: parsed.ocrCoverage,
+    extractionVersion: parsed.extractionVersion
+  }
+  if (!body.trim()) {
+    throw new Error('No extractable text in this document (it may be image-only, encrypted, or empty).')
   }
   try {
     const cleanup = await runArticleCleanup({ title: name, body, runtime })
     body = cleanup.body
+    const canonicalSummary = await summarizeImportedDocument(runtime, name, body)
     diagnostics = {
       ...diagnostics,
-      cleanupEdits: Math.max(0, Number(diagnostics.cleanupEdits ?? 0)) + cleanup.heuristicEdits
+      cleanupEdits: Math.max(0, Number(diagnostics.cleanupEdits ?? 0)) + cleanup.heuristicEdits,
+      summaryMode: canonicalSummary ? 'llm' : 'deterministic',
+      summaryPromptVersion: canonicalSummary?.promptVersion,
+      summaryModelId: canonicalSummary?.modelId
     }
     onProgress?.({ kind: 'stage', stage: 'enriching', stageLabel: 'Extracting context and entities', jobId, progress: 0.55 })
     const out = ingestDocument(db, {
@@ -735,7 +1194,9 @@ export async function ingestFile(
       uri: `file://${filePath}`,
       sourceRawText,
       rawText: body,
-      source: isPdfFilePath(filePath) ? 'pdf' : 'text',
+      canonicalSummaryBody: canonicalSummary?.body,
+      source: parsed.sourceKind,
+      filePath: parsedFilePath,
       diagnostics,
       cleanupMode: cleanup.mode,
       cleanupPromptVersion: cleanup.promptVersion,
@@ -785,6 +1246,13 @@ export async function cleanupWikiArticle(
     parserWarnings: doc?.diagnostics.parserWarnings ?? [],
     truncated: doc?.diagnostics.truncated === true,
     cleanupEdits: Math.max(0, Number(doc?.diagnostics.cleanupEdits ?? 0)) + cleanup.heuristicEdits,
+    parserEngine: doc?.diagnostics.parserEngine,
+    parserMode: doc?.diagnostics.parserMode,
+    parseDurationMs: doc?.diagnostics.parseDurationMs,
+    ocrApplied: doc?.diagnostics.ocrApplied,
+    ocrCoverage: doc?.diagnostics.ocrCoverage,
+    extractionVersion: doc?.diagnostics.extractionVersion,
+    qualityFlags: doc?.diagnostics.qualityFlags ?? [],
     cleanupMode: cleanup.mode,
     cleanupPromptVersion: cleanup.promptVersion,
     cleanupFallbackReason: cleanup.fallbackReason
@@ -834,6 +1302,13 @@ export async function cleanupWikiArticle(
       confidence,
       diagnostics
     )
+    ingestSemanticBestEffort(db, {
+      source: diagnostics.source === 'pdf' ? 'pdf' : 'text',
+      uri: `src:${sourceId}`,
+      sourceId,
+      text: cleanedBody,
+      diagnostics
+    })
     ensureWikiPageForSource(db, sourceId)
     const activeEntry = resolveActiveWikiEntryForSource(db, sourceId)
     if (activeEntry) {
@@ -850,6 +1325,7 @@ export async function cleanupWikiArticle(
     }
   })
   tx()
+  refreshGraphProjectionForSourceBestEffort(db, sourceId)
   return {
     ok: true,
     sourceId,
@@ -907,6 +1383,7 @@ export function deleteKbSource(db: Database.Database, sourceId: string): void {
     }
   }
   db.prepare('DELETE FROM kb_sources WHERE id = ?').run(sourceId)
+  removeGraphProjectionForSourceBestEffort(db, sourceId)
 }
 
 /** Delete all knowledge sources tied to a conversation (from "Save chat to wiki"). */
@@ -948,7 +1425,10 @@ export function resetEntireWikiAndKeywords(db: Database.Database): ResetWikiAndK
     }
     return { sourcesRemoved: ids.length, promptDomainsRemoved }
   })
-  return tx()
+  const result = tx()
+  clearProjection(db, 'structural')
+  clearProjection(db, 'semantic')
+  return result
 }
 
 export function searchChunks(db: Database.Database, query: string, limit: number): KbChunk[] {
@@ -1036,11 +1516,30 @@ export function getDocumentRecord(db: Database.Database, sourceId: string): KbDo
         : [],
       truncated: parsed.truncated === true,
       cleanupEdits: Math.max(0, Number(parsed.cleanupEdits ?? 0)),
+      parserEngine: typeof parsed.parserEngine === 'string' ? parsed.parserEngine : undefined,
+      parserMode:
+        parsed.parserMode === 'text_layer' ||
+        parsed.parserMode === 'ocr_fallback' ||
+        parsed.parserMode === 'plain_text' ||
+        parsed.parserMode === 'html_text'
+          ? parsed.parserMode
+          : undefined,
+      parseDurationMs: Number.isFinite(Number(parsed.parseDurationMs)) ? Number(parsed.parseDurationMs) : undefined,
+      ocrApplied: parsed.ocrApplied === true,
+      ocrCoverage: Number.isFinite(Number(parsed.ocrCoverage)) ? Number(parsed.ocrCoverage) : undefined,
+      extractionVersion: typeof parsed.extractionVersion === 'string' ? parsed.extractionVersion : undefined,
+      qualityFlags: Array.isArray(parsed.qualityFlags)
+        ? parsed.qualityFlags.filter((x): x is string => typeof x === 'string')
+        : [],
       cleanupMode: parsed.cleanupMode === 'llm' || parsed.cleanupMode === 'heuristic' ? parsed.cleanupMode : undefined,
       cleanupPromptVersion:
         typeof parsed.cleanupPromptVersion === 'string' ? parsed.cleanupPromptVersion : undefined,
       cleanupFallbackReason:
-        typeof parsed.cleanupFallbackReason === 'string' ? parsed.cleanupFallbackReason : undefined
+        typeof parsed.cleanupFallbackReason === 'string' ? parsed.cleanupFallbackReason : undefined,
+      summaryMode: parsed.summaryMode === 'llm' || parsed.summaryMode === 'deterministic' ? parsed.summaryMode : undefined,
+      summaryPromptVersion:
+        typeof parsed.summaryPromptVersion === 'string' ? parsed.summaryPromptVersion : undefined,
+      summaryModelId: typeof parsed.summaryModelId === 'string' ? parsed.summaryModelId : undefined
     }
   } catch {
     /* ignore */
@@ -1656,7 +2155,7 @@ function parseCodebaseAnalysisItems(raw: string): CodebaseAnalysisItem[] {
  * wiki pages tied to their source when `page_id` is `src:<sourceId>`, and weak `related` edges between
  * sources that share a long token in their titles.
  */
-export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload {
+function buildKnowledgeGraphDynamic(db: Database.Database): KnowledgeGraphPayload {
   ensureWikiVersioningBackfill(db)
   const sources = db
     .prepare(`SELECT id, title, uri, created_at as createdAt FROM kb_sources ORDER BY created_at ASC`)
@@ -1972,7 +2471,284 @@ export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload 
     }
   }
 
-  return { nodes, edges, truncated }
+  return rankStructuralPayload({ nodes, edges, truncated })
+}
+
+function buildSemanticKnowledgeGraphDynamic(db: Database.Database): SemanticKnowledgeGraphPayload {
+  if (
+    !tableExists(db, 'semantic_entities') ||
+    !tableExists(db, 'semantic_relations') ||
+    !tableExists(db, 'semantic_descriptors') ||
+    !tableExists(db, 'semantic_context_scopes') ||
+    !tableExists(db, 'semantic_entity_scope_membership') ||
+    !tableExists(db, 'semantic_evidence_traces')
+  ) {
+    return {
+      entities: [],
+      relations: [],
+      descriptors: [],
+      scopes: [],
+      intersections: [],
+      evidence: [],
+      truncated: false
+    }
+  }
+
+  const entities = db
+    .prepare(
+      `SELECT id, lemma, label, entity_type as entityType, confidence, created_at as createdAt, updated_at as updatedAt
+       FROM semantic_entities
+       ORDER BY updated_at DESC
+       LIMIT 4000`
+    )
+    .all() as Array<{
+    id: string
+    lemma: string
+    label: string
+    entityType: string
+    confidence: number
+    createdAt: number
+    updatedAt: number
+  }>
+
+  const relations = db
+    .prepare(
+      `SELECT id, from_entity_id as fromEntityId, to_entity_id as toEntityId, verb, confidence, created_at as createdAt
+       FROM semantic_relations
+       ORDER BY created_at DESC
+       LIMIT 6000`
+    )
+    .all() as Array<{
+    id: string
+    fromEntityId: string
+    toEntityId: string
+    verb: string
+    confidence: number
+    createdAt: number
+  }>
+
+  const descriptors = db
+    .prepare(
+      `SELECT id, target_type as targetType, target_id as targetId, adjective, confidence, created_at as createdAt
+       FROM semantic_descriptors
+       ORDER BY created_at DESC
+       LIMIT 6000`
+    )
+    .all() as Array<{
+    id: string
+    targetType: 'entity' | 'relation'
+    targetId: string
+    adjective: string
+    confidence: number
+    createdAt: number
+  }>
+
+  const scopes = db
+    .prepare(
+      `SELECT id, slug, title, summary, confidence, created_at as createdAt, updated_at as updatedAt
+       FROM semantic_context_scopes
+       ORDER BY updated_at DESC`
+    )
+    .all() as Array<{
+    id: string
+    slug: string
+    title: string
+    summary: string
+    confidence: number
+    createdAt: number
+    updatedAt: number
+  }>
+
+  const memberships = db
+    .prepare(
+      `SELECT entity_id as entityId, scope_id as scopeId, confidence
+       FROM semantic_entity_scope_membership
+       ORDER BY confidence DESC`
+    )
+    .all() as Array<{ entityId: string; scopeId: string; confidence: number }>
+
+  const entityEvidenceRows = db
+    .prepare(`SELECT entity_id as entityId, evidence_id as evidenceId FROM semantic_entity_evidence`)
+    .all() as Array<{ entityId: string; evidenceId: string }>
+
+  const relationEvidenceRows = db
+    .prepare(`SELECT relation_id as relationId, evidence_id as evidenceId FROM semantic_relation_evidence`)
+    .all() as Array<{ relationId: string; evidenceId: string }>
+
+  const descriptorEvidenceRows = db
+    .prepare(`SELECT descriptor_id as descriptorId, evidence_id as evidenceId FROM semantic_descriptor_evidence`)
+    .all() as Array<{ descriptorId: string; evidenceId: string }>
+
+  const evidenceRows = db
+    .prepare(
+      `SELECT id, source_type as sourceType, source_ref as sourceRef, extraction_method as extractionMethod, rule_id as ruleId,
+              span_start as spanStart, span_end as spanEnd, span_text as spanText, span_page as spanPage, span_anchor as spanAnchor,
+              confidence, confidence_reasons_json as confidenceReasonsJson, parser_warnings_json as parserWarningsJson,
+              fallback_reason as fallbackReason, created_at as createdAt
+       FROM semantic_evidence_traces
+       ORDER BY created_at DESC
+       LIMIT 9000`
+    )
+    .all() as Array<{
+    id: string
+    sourceType: EvidenceTrace['sourceType']
+    sourceRef: string
+    extractionMethod: EvidenceTrace['extractionMethod']
+    ruleId: string | null
+    spanStart: number | null
+    spanEnd: number | null
+    spanText: string | null
+    spanPage: number | null
+    spanAnchor: string | null
+    confidence: number
+    confidenceReasonsJson: string | null
+    parserWarningsJson: string | null
+    fallbackReason: string | null
+    createdAt: number
+  }>
+
+  const scopeIdsByEntity = new Map<string, string[]>()
+  for (const row of memberships) {
+    if (!scopeIdsByEntity.has(row.entityId)) scopeIdsByEntity.set(row.entityId, [])
+    scopeIdsByEntity.get(row.entityId)!.push(row.scopeId)
+  }
+
+  const evidenceIdsByEntity = new Map<string, string[]>()
+  for (const row of entityEvidenceRows) {
+    if (!evidenceIdsByEntity.has(row.entityId)) evidenceIdsByEntity.set(row.entityId, [])
+    evidenceIdsByEntity.get(row.entityId)!.push(row.evidenceId)
+  }
+  const evidenceIdsByRelation = new Map<string, string[]>()
+  for (const row of relationEvidenceRows) {
+    if (!evidenceIdsByRelation.has(row.relationId)) evidenceIdsByRelation.set(row.relationId, [])
+    evidenceIdsByRelation.get(row.relationId)!.push(row.evidenceId)
+  }
+  const evidenceIdsByDescriptor = new Map<string, string[]>()
+  for (const row of descriptorEvidenceRows) {
+    if (!evidenceIdsByDescriptor.has(row.descriptorId)) evidenceIdsByDescriptor.set(row.descriptorId, [])
+    evidenceIdsByDescriptor.get(row.descriptorId)!.push(row.evidenceId)
+  }
+
+  const entityPayload: SemanticEntityNode[] = entities.map((row) => ({
+    id: row.id,
+    lemma: row.lemma,
+    label: row.label,
+    type: row.entityType,
+    confidence: row.confidence,
+    scopeIds: scopeIdsByEntity.get(row.id) ?? [],
+    evidenceTraceIds: evidenceIdsByEntity.get(row.id) ?? [],
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  }))
+
+  const relationPayload: SemanticRelationEdge[] = relations.map((row) => ({
+    id: row.id,
+    fromEntityId: row.fromEntityId,
+    toEntityId: row.toEntityId,
+    verb: row.verb,
+    confidence: row.confidence,
+    evidenceTraceIds: evidenceIdsByRelation.get(row.id) ?? [],
+    createdAt: row.createdAt
+  }))
+
+  const descriptorPayload: SemanticDescriptor[] = descriptors.map((row) => ({
+    id: row.id,
+    targetType: row.targetType,
+    targetId: row.targetId,
+    adjective: row.adjective,
+    confidence: row.confidence,
+    evidenceTraceId: (evidenceIdsByDescriptor.get(row.id) ?? [])[0],
+    createdAt: row.createdAt
+  }))
+
+  const scopePayload: SemanticContextScope[] = scopes.map((row) => ({
+    id: row.id,
+    slug: row.slug,
+    title: row.title,
+    summary: row.summary || undefined,
+    confidence: row.confidence,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  }))
+
+  const evidencePayload: EvidenceTrace[] = evidenceRows.map((row) => ({
+    id: row.id,
+    sourceType: row.sourceType ?? 'other',
+    sourceRef: row.sourceRef,
+    extractionMethod: row.extractionMethod ?? 'heuristic',
+    ruleId: row.ruleId ?? undefined,
+    ...(row.spanStart != null && row.spanEnd != null
+      ? {
+          sourceSpan: {
+            start: row.spanStart,
+            end: row.spanEnd,
+            text: row.spanText ?? undefined,
+            page: row.spanPage ?? undefined,
+            sectionAnchor: row.spanAnchor ?? undefined
+          }
+        }
+      : {}),
+    confidence: row.confidence,
+    confidenceReasons: parseJsonStringArray(row.confidenceReasonsJson),
+    parserWarnings: parseJsonStringArray(row.parserWarningsJson),
+    fallbackReason: row.fallbackReason ?? undefined,
+    createdAt: row.createdAt
+  }))
+
+  const entityIdsByScope = new Map<string, Set<string>>()
+  for (const row of memberships) {
+    if (!entityIdsByScope.has(row.scopeId)) entityIdsByScope.set(row.scopeId, new Set())
+    entityIdsByScope.get(row.scopeId)!.add(row.entityId)
+  }
+
+  const intersections: SemanticScopeIntersection[] = []
+  const allScopeIds = [...new Set(memberships.map((m) => m.scopeId))]
+  for (let i = 0; i < allScopeIds.length; i++) {
+    for (let j = i + 1; j < allScopeIds.length; j++) {
+      const a = allScopeIds[i]!
+      const b = allScopeIds[j]!
+      const aSet = entityIdsByScope.get(a) ?? new Set<string>()
+      const bSet = entityIdsByScope.get(b) ?? new Set<string>()
+      const shared = [...aSet].filter((id) => bSet.has(id))
+      if (shared.length === 0) continue
+      intersections.push({
+        id: `scope-intersection:${a}:${b}`,
+        scopeIds: [a, b],
+        sharedEntityIds: shared.slice(0, 200),
+        label: `Shared terminology (${shared.length})`
+      })
+    }
+  }
+
+  return {
+    entities: entityPayload,
+    relations: relationPayload,
+    descriptors: descriptorPayload,
+    scopes: scopePayload,
+    intersections,
+    evidence: evidencePayload,
+    truncated:
+      entities.length >= 4000 ||
+      relations.length >= 6000 ||
+      descriptors.length >= 6000 ||
+      evidenceRows.length >= 9000
+  }
+}
+
+export function getKnowledgeGraph(db: Database.Database): KnowledgeGraphPayload {
+  const projected = readProjectedKnowledgeGraph(db)
+  if (projected) return projected
+  const payload = buildKnowledgeGraphDynamic(db)
+  rebuildKnowledgeGraphProjection(db, payload)
+  return payload
+}
+
+export function getSemanticKnowledgeGraph(db: Database.Database): SemanticKnowledgeGraphPayload {
+  const projected = readProjectedSemanticGraph(db)
+  if (projected) return projected
+  const payload = buildSemanticKnowledgeGraphDynamic(db)
+  rebuildSemanticGraphProjection(db, payload)
+  return payload
 }
 
 const KG_HIGHLIGHT_RELATED_MAX = 4
@@ -2094,6 +2870,8 @@ export function ensureWikiPageForSource(db: Database.Database, sourceId: string)
 
 const RELATED_CHUNK_SAMPLE = 3
 const RELATED_BODY_CAP = 12_000
+const WIKI_RAW_SOURCE_PREVIEW_CHARS = 2200
+const WIKI_RAW_CHUNK_PREVIEW_LIMIT = 24
 
 /** Other sources that share topical tokens with this article (title + first chunks). */
 export function listRelatedWikiSources(
@@ -2139,6 +2917,94 @@ export function listRelatedWikiSources(
   }))
 }
 
+function listEvidenceTraceIdsForSource(db: Database.Database, sourceId: string, limit = 40): string[] {
+  if (!tableExists(db, 'semantic_evidence_traces')) return []
+  const rows = db
+    .prepare(
+      `SELECT id
+       FROM semantic_evidence_traces
+       WHERE source_ref = ?
+       ORDER BY created_at DESC
+       LIMIT ?`
+    )
+    .all(sourceId, Math.max(1, limit)) as Array<{ id: string }>
+  return rows.map((r) => r.id)
+}
+
+function buildWikiPageMetadata(
+  db: Database.Database,
+  sourceId: string,
+  title: string,
+  confidence: KbImportConfidence | undefined,
+  activeEntry?: WikiEntryActiveRevisionRow
+): WikiPageMetadata {
+  const source = db
+    .prepare(
+      `SELECT s.id as sourceId,
+              s.title as sourceTitle,
+              s.uri as sourceUri,
+              s.created_at as importedAt,
+              d.id as domainId,
+              d.title as domainTitle
+       FROM kb_sources s
+       LEFT JOIN kb_domain_membership dm ON dm.source_id = s.id
+       LEFT JOIN kb_domains d ON d.id = dm.domain_id
+       WHERE s.id = ?
+       LIMIT 1`
+    )
+    .get(sourceId) as
+    | {
+        sourceId: string
+        sourceTitle: string
+        sourceUri: string
+        importedAt: number
+        domainId: string | null
+        domainTitle: string | null
+      }
+    | undefined
+  const chunkCount = Number(
+    (db.prepare('SELECT COUNT(*) as c FROM kb_chunks WHERE source_id = ?').get(sourceId) as { c: number } | undefined)?.c ?? 0
+  )
+  const sourceUri = source?.sourceUri ?? `src:${sourceId}`
+  return {
+    sourceId,
+    sourceTitle: title,
+    sourceKind: wikiKindFromUri(sourceUri),
+    sourceUri,
+    importedAt: source?.importedAt,
+    updatedAt: activeEntry?.updatedAt,
+    chunkCount,
+    domainId: source?.domainId ?? undefined,
+    domainTitle: source?.domainTitle ?? undefined,
+    confidence,
+    revisionId: activeEntry?.revisionId,
+    revisionVersion: activeEntry?.versionNo,
+    promptVersion: activeEntry?.promptVersion ?? undefined
+  }
+}
+
+function buildWikiRawReference(doc: KbDocumentRecord | null, passages: WikiPassageSummary[]): WikiRawReferencePayload {
+  const sourceText = (doc?.sourceRawText || doc?.rawText || '').trim()
+  const sourceTextPreview =
+    sourceText.length > WIKI_RAW_SOURCE_PREVIEW_CHARS
+      ? `${sourceText.slice(0, WIKI_RAW_SOURCE_PREVIEW_CHARS)}...`
+      : sourceText
+  return {
+    sourceTextPreview,
+    sourceTextLength: sourceText.length,
+    totalChunkCount: passages.length,
+    chunks: passages.slice(0, WIKI_RAW_CHUNK_PREVIEW_LIMIT).map((p) => ({
+      chunkId: p.chunkId,
+      ord: p.ord,
+      heading: p.heading,
+      title: p.title,
+      anchor: p.anchor,
+      snippet: p.snippet,
+      wordCount: p.wordCount
+    }))
+  }
+}
+
 /** Sync wiki page row, then return payload for the renderer (glossary stripped from body). */
 export function buildWikiPagePayload(db: Database.Database, sourceId: string): WikiPagePayload {
   ensureWikiVersioningBackfill(db)
@@ -2159,9 +3025,18 @@ export function buildWikiPagePayload(db: Database.Database, sourceId: string): W
   const activeEntry = resolveActiveWikiEntryForSource(db, sourceId)
   if (activeEntry) {
     const { body, glossary } = extractWikiGlossary(stripWikiControlMarkers(activeEntry.body))
+    const metadata = buildWikiPageMetadata(db, sourceId, activeEntry.title, confidence, activeEntry)
+    const rawReference = buildWikiRawReference(doc, passages)
+    const evidenceTraceIds = listEvidenceTraceIdsForSource(db, sourceId, 40)
     return {
       id: `src:${sourceId}`,
       title: activeEntry.title,
+      summaryMarkdown: body,
+      metadata,
+      rawReference,
+      sourceId,
+      evidenceTraceIds,
+      relatedGraphNodeIds: [sourceId, ...passages.slice(0, 12).map((p) => p.chunkId)],
       body,
       confidence,
       glossary,
@@ -2172,9 +3047,18 @@ export function buildWikiPagePayload(db: Database.Database, sourceId: string): W
   }
   const page = ensureWikiPageForSource(db, sourceId)
   const { body, glossary } = extractWikiGlossary(stripWikiControlMarkers(page.body))
+  const metadata = buildWikiPageMetadata(db, sourceId, page.title, confidence)
+  const rawReference = buildWikiRawReference(doc, passages)
+  const evidenceTraceIds = listEvidenceTraceIdsForSource(db, sourceId, 40)
   return {
     id: page.id,
     title: page.title,
+    summaryMarkdown: body,
+    metadata,
+    rawReference,
+    sourceId,
+    evidenceTraceIds,
+    relatedGraphNodeIds: [sourceId, ...passages.slice(0, 12).map((p) => p.chunkId)],
     body,
     confidence,
     glossary,
@@ -2324,7 +3208,9 @@ export function applyWikiReanalysis(
       promptVersion: args.promptVersion ?? WIKI_REANALYZE_PROMPT_VERSION
     } satisfies WikiReanalyzeResult
   })
-  return tx()
+  const summary = tx()
+  refreshGraphProjectionsBestEffort(db)
+  return summary
 }
 
 function safeWikiExportFileStem(title: string): string {
