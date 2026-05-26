@@ -4,7 +4,7 @@ import { finished } from 'stream/promises'
 import { resolve } from 'path'
 import archiver from 'archiver'
 import type Database from 'better-sqlite3'
-import { parseDocumentFromFile } from './documentParser'
+import { parseDocumentFromFile, type ParsedDocumentSection } from './documentParser'
 import { composeWikiReadModel } from './wikiComposer'
 import { parseWikiDocumentSummaryResponse, runWikiExtractDocument } from './wikiExtractService'
 import { analyzeSourceDomains } from './domainAnalysisService'
@@ -14,6 +14,7 @@ import { createOntologyService } from './ontologyService'
 import { createGraphWriteService, type GraphWriteService } from './graphWriteService'
 import { createIngestOrchestrator, type IngestOrchestrator } from './ingestOrchestrator'
 import { fromFileSource, fromTextSource } from './sourceAdapters'
+import { runDocumentImportBenchmark, type ImportBenchmarkSummary } from './documentImportBenchmark'
 import {
   clearProjection,
   removeKnowledgeGraphProjectionBySource,
@@ -99,6 +100,40 @@ function tableExists(db: Database.Database, name: string): boolean {
     .prepare(`SELECT 1 as ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`)
     .get(name) as { ok: number } | undefined
   return Boolean(row?.ok)
+}
+
+function shadowModeEnabled(): boolean {
+  return process.env.KB_IMPORT_SHADOW_MODE === '1'
+}
+
+function persistShadowRun(
+  db: Database.Database,
+  sourceId: string,
+  diagnostics: KbImportDiagnostic,
+  confidence: KbImportConfidence
+): void {
+  if (!shadowModeEnabled()) return
+  if (!tableExists(db, 'kb_import_shadow_runs')) return
+  const now = Date.now()
+  db.prepare(
+    `INSERT INTO kb_import_shadow_runs
+      (id, source_id, parser_mode, extraction_version, metrics_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(
+    randomUUID(),
+    sourceId,
+    diagnostics.parserMode ?? 'unknown',
+    diagnostics.extractionVersion ?? 'v1',
+    JSON.stringify({
+      parserWarnings: diagnostics.parserWarnings,
+      confidenceScore: confidence.score,
+      confidenceReasons: confidence.reasons,
+      ocrApplied: diagnostics.ocrApplied === true,
+      ocrCoverage: diagnostics.ocrCoverage ?? null,
+      qualityFlags: diagnostics.qualityFlags ?? []
+    }),
+    now
+  )
 }
 
 function parseJsonStringArray(raw: string | null | undefined): string[] {
@@ -362,7 +397,21 @@ function resolveActiveWikiEntryForSource(
     .get(sourceId) as WikiEntryActiveRevisionRow | undefined
 }
 
-type ChunkDraft = { text: string; heading?: string; anchor: string; passageTitle: string }
+type StructuredSectionInput = {
+  heading?: string
+  body: string
+  pageStart?: number
+  pageEnd?: number
+}
+
+type ChunkDraft = {
+  text: string
+  heading?: string
+  anchor: string
+  passageTitle: string
+  pageStart?: number
+  pageEnd?: number
+}
 type IngestDocumentInput = {
   title: string
   uri: string
@@ -376,7 +425,9 @@ type IngestDocumentInput = {
   cleanupPromptVersion?: string
   cleanupFallbackReason?: string
   heading?: string
+  structuredSections?: StructuredSectionInput[]
   conversationId?: string | null
+  runtime?: RuntimeAdapter | null
   onProgress?: (payload: KbIngestFileProgress) => void
 }
 
@@ -629,14 +680,15 @@ function removeGraphProjectionForSourceBestEffort(db: Database.Database, sourceI
   }
 }
 
-function ingestSemanticBestEffort(
+async function ingestSemanticBestEffort(
   db: Database.Database,
   input: Pick<IngestDocumentInput, 'source' | 'uri' | 'filePath'> & {
     sourceId: string
     text: string
     diagnostics?: Partial<KbImportDiagnostic>
+    runtime?: RuntimeAdapter | null
   }
-): void {
+): Promise<void> {
   const text = input.text.trim()
   if (!text) return
   try {
@@ -664,7 +716,7 @@ function ingestSemanticBestEffort(
           : 'text'
     canonical.provenance.sourceRecordId = input.sourceId
     const orchestrator = getIngestOrchestrator(db)
-    orchestrator.ingestRecord(canonical)
+    await orchestrator.ingestRecord(canonical, { runtime: input.runtime ?? null })
   } catch {
     // Semantic extraction is an additive layer; core KB ingest should still succeed.
   }
@@ -713,10 +765,20 @@ function summarizePassageTitle(raw: string, fallback?: string): string {
   return words.slice(0, 30).join(' ')
 }
 
-function chunkText(text: string, heading?: string): ChunkDraft[] {
+function chunkText(text: string, heading?: string, structuredSections?: StructuredSectionInput[]): ChunkDraft[] {
   const normalized = text.replace(/\r\n/g, '\n').trim()
   if (!normalized) return []
-  const sections = heading ? [{ heading, body: normalized }] : splitMarkdownSections(normalized)
+  const sections: Array<{ heading?: string; body: string; pageStart?: number; pageEnd?: number }> =
+    structuredSections && structuredSections.length > 0
+      ? structuredSections.map((section) => ({
+          heading: section.heading,
+          body: section.body,
+          pageStart: section.pageStart,
+          pageEnd: section.pageEnd
+        }))
+      : heading
+        ? [{ heading, body: normalized, pageStart: undefined, pageEnd: undefined }]
+        : splitMarkdownSections(normalized).map((section) => ({ ...section, pageStart: undefined, pageEnd: undefined }))
   const parts: ChunkDraft[] = []
   let sectionIdx = 0
   for (const section of sections) {
@@ -737,7 +799,9 @@ function chunkText(text: string, heading?: string): ChunkDraft[] {
         text: slice,
         heading: section.heading,
         anchor: `${slugifyAnchor(section.heading || sectionTitle || `section-${sectionIdx + 1}`)}-${chunkInSection + 1}`,
-        passageTitle
+        passageTitle,
+        pageStart: section.pageStart,
+        pageEnd: section.pageEnd
       })
       if (end >= section.body.length) break
       i = end - CHUNK_OVERLAP
@@ -855,6 +919,21 @@ function scoreImportConfidence(rawText: string, distilledBody: string, diagnosti
   return { score: Number(Math.min(1, Math.max(0.05, score)).toFixed(3)), reasons }
 }
 
+function parserTelemetryQualityFlags(diagnostics: Partial<KbImportDiagnostic>): string[] {
+  const flags: string[] = []
+  const mode = diagnostics.parserMode
+  const parserWarnings = diagnostics.parserWarnings ?? []
+  const hasOcrMode = mode === 'true_ocr_fallback' || mode === 'hybrid_merged'
+  if (hasOcrMode && diagnostics.ocrApplied !== true) flags.push('telemetry_ocr_mode_without_ocr_applied')
+  if (!hasOcrMode && diagnostics.ocrApplied === true) flags.push('telemetry_ocr_applied_without_ocr_mode')
+  if ((diagnostics.ocrCoverage ?? 0) > 0 && diagnostics.ocrApplied !== true) flags.push('telemetry_ocr_coverage_without_ocr')
+  if (mode === 'text_layer' && parserWarnings.includes('pdf_text_layer_low_signal')) {
+    flags.push('telemetry_text_mode_low_signal_warning')
+  }
+  if (!diagnostics.parserEngine || diagnostics.parserEngine.trim().length === 0) flags.push('telemetry_missing_parser_engine')
+  return flags
+}
+
 function saveDocumentRecord(
   db: Database.Database,
   sourceId: string,
@@ -890,9 +969,17 @@ function saveDocumentRecord(
   )
 }
 
-function persistDocumentSections(db: Database.Database, sourceId: string, text: string): void {
+function persistDocumentSections(
+  db: Database.Database,
+  sourceId: string,
+  text: string,
+  structuredSections?: StructuredSectionInput[]
+): void {
   if (!tableExists(db, 'kb_document_sections')) return
-  const sections = splitMarkdownSections(text)
+  const sections =
+    structuredSections && structuredSections.length > 0
+      ? structuredSections
+      : splitMarkdownSections(text).map((section) => ({ ...section, pageStart: undefined, pageEnd: undefined }))
   const ins = db.prepare(
     `INSERT INTO kb_document_sections
       (id, source_id, ord, heading, body, page_start, page_end, anchor, created_at)
@@ -901,7 +988,17 @@ function persistDocumentSections(db: Database.Database, sourceId: string, text: 
   const now = Date.now()
   for (const [idx, section] of sections.entries()) {
     const anchor = `${slugifyAnchor(section.heading || `section-${idx + 1}`)}-${idx + 1}`
-    ins.run(randomUUID(), sourceId, idx, section.heading ?? null, section.body, null, null, anchor, now)
+    ins.run(
+      randomUUID(),
+      sourceId,
+      idx,
+      section.heading ?? null,
+      section.body,
+      typeof section.pageStart === 'number' ? section.pageStart : null,
+      typeof section.pageEnd === 'number' ? section.pageEnd : null,
+      anchor,
+      now
+    )
   }
 }
 
@@ -995,6 +1092,7 @@ function ingestDocument(db: Database.Database, input: IngestDocumentInput): KbSo
     summaryPromptVersion: input.diagnostics?.summaryPromptVersion,
     summaryModelId: input.diagnostics?.summaryModelId
   }
+  diagnostics.qualityFlags = [...new Set([...(diagnostics.qualityFlags ?? []), ...parserTelemetryQualityFlags(diagnostics)])]
   const confidence = scoreImportConfidence(rawText, distilledBody, diagnostics)
   db.prepare(
     'INSERT INTO kb_sources (id, title, uri, created_at, conversation_id) VALUES (?, ?, ?, ?, ?)'
@@ -1002,10 +1100,11 @@ function ingestDocument(db: Database.Database, input: IngestDocumentInput): KbSo
   input.onProgress?.({ kind: 'stage', stage: 'normalizing', stageLabel: 'Normalizing document', jobId: sourceId, progress: 0.3 })
   const sectionCountEstimate = Math.max(
     1,
-    rawText
-      .split(/\n{2,}/g)
-      .map((section) => section.trim())
-      .filter(Boolean).length
+    input.structuredSections?.length ??
+      rawText
+        .split(/\n{2,}/g)
+        .map((section) => section.trim())
+        .filter(Boolean).length
   )
   input.onProgress?.({
     kind: 'chunking',
@@ -1015,7 +1114,7 @@ function ingestDocument(db: Database.Database, input: IngestDocumentInput): KbSo
     rawCharCount: sourceRawText.length,
     normalizedCharCount: rawText.length
   })
-  const chunks = chunkText(rawText, input.heading)
+  const chunks = chunkText(rawText, input.heading, input.structuredSections)
   input.onProgress?.({
     kind: 'chunking',
     chunkCount: chunks.length,
@@ -1045,20 +1144,22 @@ function ingestDocument(db: Database.Database, input: IngestDocumentInput): KbSo
     rawCharCount: sourceRawText.length,
     normalizedCharCount: rawText.length
   })
-  persistDocumentSections(db, sourceId, rawText)
+  persistDocumentSections(db, sourceId, rawText, input.structuredSections)
   persistEntityMentions(db, sourceId, chunks)
   rebuildDocRelations(db, sourceId)
   const detectedDomains = analyzeSourceDomains(db, sourceId)
   const wikiBody = composeWikiReadModel(db, sourceId)
   const canonicalWikiBody = (input.canonicalSummaryBody?.trim() || wikiBody || distilledBody).trim()
   saveDocumentRecord(db, sourceId, sourceRawText, rawText, canonicalWikiBody, confidence, diagnostics)
-  ingestSemanticBestEffort(db, {
+  persistShadowRun(db, sourceId, diagnostics, confidence)
+  void ingestSemanticBestEffort(db, {
     source: input.source,
     uri: input.uri,
     filePath: input.filePath,
     sourceId,
     text: rawText,
-    diagnostics
+    diagnostics,
+    runtime: input.runtime
   })
   input.onProgress?.({ kind: 'analysis', sourceId, domainsDetected: detectedDomains.length })
   input.onProgress?.({ kind: 'done', sourceId, title: input.title, chunkCount: chunks.length })
@@ -1174,6 +1275,7 @@ export async function ingestFile(
     ocrCoverage: parsed.ocrCoverage,
     extractionVersion: parsed.extractionVersion
   }
+  diagnostics.qualityFlags = parserTelemetryQualityFlags(diagnostics)
   if (!body.trim()) {
     throw new Error('No extractable text in this document (it may be image-only, encrypted, or empty).')
   }
@@ -1188,7 +1290,7 @@ export async function ingestFile(
       summaryPromptVersion: canonicalSummary?.promptVersion,
       summaryModelId: canonicalSummary?.modelId
     }
-    onProgress?.({ kind: 'stage', stage: 'enriching', stageLabel: 'Extracting context and entities', jobId, progress: 0.55 })
+    onProgress?.({ kind: 'stage', stage: 'enriching', stageLabel: 'Extracting context and entities', jobId, progress: 0.55, parserMode: diagnostics.parserMode })
     const out = ingestDocument(db, {
       title: name,
       uri: `file://${filePath}`,
@@ -1198,9 +1300,11 @@ export async function ingestFile(
       source: parsed.sourceKind,
       filePath: parsedFilePath,
       diagnostics,
+      structuredSections: parsed.sections,
       cleanupMode: cleanup.mode,
       cleanupPromptVersion: cleanup.promptVersion,
       cleanupFallbackReason: cleanup.fallbackReason,
+      runtime,
       onProgress
     })
     upsertIngestJob(db, {
@@ -1302,7 +1406,7 @@ export async function cleanupWikiArticle(
       confidence,
       diagnostics
     )
-    ingestSemanticBestEffort(db, {
+    void ingestSemanticBestEffort(db, {
       source: diagnostics.source === 'pdf' ? 'pdf' : 'text',
       uri: `src:${sourceId}`,
       sourceId,
@@ -1519,7 +1623,9 @@ export function getDocumentRecord(db: Database.Database, sourceId: string): KbDo
       parserEngine: typeof parsed.parserEngine === 'string' ? parsed.parserEngine : undefined,
       parserMode:
         parsed.parserMode === 'text_layer' ||
-        parsed.parserMode === 'ocr_fallback' ||
+        parsed.parserMode === 'pdftotext_fallback' ||
+        parsed.parserMode === 'true_ocr_fallback' ||
+        parsed.parserMode === 'hybrid_merged' ||
         parsed.parserMode === 'plain_text' ||
         parsed.parserMode === 'html_text'
           ? parsed.parserMode
@@ -3310,4 +3416,71 @@ export async function exportWikiZip(db: Database.Database, outPath: string): Pro
 
   await archive.finalize()
   await outputClosed
+}
+
+export function listBackfillCandidates(
+  db: Database.Database,
+  targetExtractionVersion: string,
+  limit = 120
+): Array<{ sourceId: string; title: string; extractionVersion: string | null; confidenceScore: number | null }> {
+  if (!tableExists(db, 'kb_documents')) return []
+  return db
+    .prepare(
+      `SELECT s.id as sourceId,
+              s.title as title,
+              d.extraction_version as extractionVersion,
+              d.confidence_score as confidenceScore
+       FROM kb_sources s
+       LEFT JOIN kb_documents d ON d.source_id = s.id
+       WHERE COALESCE(d.extraction_version, '') != ?
+       ORDER BY s.created_at DESC
+       LIMIT ?`
+    )
+    .all(targetExtractionVersion, Math.max(1, Math.min(limit, 1000))) as Array<{
+    sourceId: string
+    title: string
+    extractionVersion: string | null
+    confidenceScore: number | null
+  }>
+}
+
+export async function runImportBenchmarkAndPersist(
+  db: Database.Database,
+  corpusPath: string
+): Promise<ImportBenchmarkSummary> {
+  const summary = await runDocumentImportBenchmark(corpusPath)
+  if (tableExists(db, 'kb_import_benchmark_runs')) {
+    db.prepare(
+      `INSERT INTO kb_import_benchmark_runs (id, corpus_path, metrics_json, created_at)
+       VALUES (?, ?, ?, ?)`
+    ).run(randomUUID(), corpusPath, JSON.stringify(summary), Date.now())
+  }
+  return summary
+}
+
+export function markBackfillQueued(
+  db: Database.Database,
+  args: {
+    sourceId: string
+    previousExtractionVersion?: string | null
+    nextExtractionVersion: string
+    details?: Record<string, unknown>
+  }
+): void {
+  if (!tableExists(db, 'kb_import_backfill_runs')) return
+  const now = Date.now()
+  db.prepare(
+    `INSERT INTO kb_import_backfill_runs
+      (id, source_id, previous_extraction_version, next_extraction_version, status, details_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    randomUUID(),
+    args.sourceId,
+    args.previousExtractionVersion ?? null,
+    args.nextExtractionVersion,
+    'queued',
+    JSON.stringify(args.details ?? {}),
+    now,
+    now
+  )
 }

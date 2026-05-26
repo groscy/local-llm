@@ -4,6 +4,7 @@ import { extname, join } from 'path'
 import { tmpdir } from 'os'
 import { spawnSync } from 'child_process'
 import { extractPdfTextWithDiagnostics, isPdfFilePath, type PdfExtractDiagnostics } from './pdfIngest'
+import { extractPdfTextWithTrueOcrFallback } from './pdfOcr'
 
 export type ParsedDocumentSection = {
   heading?: string
@@ -20,7 +21,7 @@ export type ParsedDocument = {
   sections: ParsedDocumentSection[]
   warnings: string[]
   parserEngine: string
-  parserMode: 'text_layer' | 'ocr_fallback' | 'plain_text' | 'html_text'
+  parserMode: 'text_layer' | 'pdftotext_fallback' | 'true_ocr_fallback' | 'hybrid_merged' | 'plain_text' | 'html_text'
   parseDurationMs: number
   ocrApplied: boolean
   ocrCoverage: number
@@ -35,7 +36,7 @@ type ParseInput = {
   onPdfPageProgress?: (progress: { processedPages: number; totalPages: number; pagesLeft: number }) => void
 }
 
-const PARSER_VERSION = 'document-parser-v2.local.2026-05-20'
+const PARSER_VERSION = 'document-parser-v3.local.2026-05-25'
 
 function normalizeText(text: string): string {
   return text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
@@ -150,6 +151,25 @@ function attemptPdfToTextFallback(bytes: Uint8Array): { text: string; warning?: 
   }
 }
 
+function layoutAwareSectionsFromPages(
+  pages: Array<{ page: number; text: string }>,
+  fallbackText: string
+): ParsedDocumentSection[] {
+  const sections: ParsedDocumentSection[] = []
+  for (const page of pages) {
+    const body = normalizeText(page.text)
+    if (!body) continue
+    sections.push({
+      heading: `Page ${page.page}`,
+      body,
+      pageStart: page.page,
+      pageEnd: page.page
+    })
+  }
+  if (sections.length > 0) return sections
+  return splitSections(fallbackText)
+}
+
 export async function parseDocumentFromBytes(input: ParseInput): Promise<ParsedDocument> {
   const startedAt = Date.now()
   const ext = extname(input.fileName).toLowerCase()
@@ -162,16 +182,43 @@ export async function parseDocumentFromBytes(input: ParseInput): Promise<ParsedD
     let parserMode: ParsedDocument['parserMode'] = 'text_layer'
     let ocrApplied = false
     let ocrCoverage = 0
-    if (lowSignalPdfText(rawText)) {
-      const fallback = attemptPdfToTextFallback(input.bytes)
-      if (fallback?.text) {
-        rawText = fallback.text
-        parserMode = 'ocr_fallback'
-        ocrApplied = true
-        ocrCoverage = 1
+    let parserEngine = 'pdf-parse'
+    const textLayer = rawText
+    const isLowSignal = lowSignalPdfText(textLayer)
+    if (isLowSignal) {
+      const pdftotextFallback = attemptPdfToTextFallback(input.bytes)
+      let pdftotextText = ''
+      if (pdftotextFallback?.text) {
+        pdftotextText = pdftotextFallback.text
+        rawText = pdftotextText
+        parserMode = 'pdftotext_fallback'
+        parserEngine = 'pdf-parse+pdftotext'
       }
-      if (fallback?.warning) warnings.push(fallback.warning)
-      if (!fallback || !fallback.text) warnings.push('ocr_engine_unavailable_or_failed')
+      if (pdftotextFallback?.warning) warnings.push(pdftotextFallback.warning)
+      if (!pdftotextFallback || !pdftotextFallback.text) warnings.push('pdftotext_unavailable_or_failed')
+
+      const ocr = extractPdfTextWithTrueOcrFallback(input.bytes)
+      if (ocr?.warnings?.length) warnings.push(...ocr.warnings)
+      const ocrText = normalizeText(ocr?.text ?? '')
+      if (ocr && ocrText) {
+        ocrApplied = true
+        ocrCoverage = ocr.pagesProcessed > 0 ? Math.min(1, ocr.pagesProcessed / Math.max(1, ocr.totalPagesDetected)) : 0
+        if (textLayer && textLayer.length > 120 && !lowSignalPdfText(textLayer)) {
+          rawText = normalizeText(`${textLayer}\n\n${ocrText}`)
+          parserMode = 'hybrid_merged'
+          parserEngine = `pdf-parse+${ocr.engine}+hybrid`
+        } else if (pdftotextText && pdftotextText.length > 120) {
+          rawText = normalizeText(`${pdftotextText}\n\n${ocrText}`)
+          parserMode = 'hybrid_merged'
+          parserEngine = `pdf-parse+pdftotext+${ocr.engine}`
+        } else {
+          rawText = ocrText
+          parserMode = 'true_ocr_fallback'
+          parserEngine = ocr.engine
+        }
+      } else if (!pdftotextText) {
+        warnings.push('true_ocr_unavailable_or_failed')
+      }
     }
     const normalizedText = normalizeText(rawText)
     return {
@@ -179,9 +226,9 @@ export async function parseDocumentFromBytes(input: ParseInput): Promise<ParsedD
       sourceKind: 'pdf',
       rawText,
       normalizedText,
-      sections: splitSections(normalizedText),
+      sections: layoutAwareSectionsFromPages(result.pages, normalizedText),
       warnings,
-      parserEngine: 'pdf-parse+pdftotext-fallback',
+      parserEngine,
       parserMode,
       parseDurationMs: Date.now() - startedAt,
       ocrApplied,

@@ -38,7 +38,11 @@ export const IPC = {
 
   // Runtime
   RUNTIME_LIST: 'runtime:list',
+  /** Fast status path for high-frequency polling (no heavy probes). */
+  RUNTIME_STATUS_FAST: 'runtime:statusFast',
   RUNTIME_INSTALL_PATH: 'runtime:installPath',
+  /** Fast install/env status path with cached validation/probes. */
+  RUNTIME_INSTALL_PATH_FAST: 'runtime:installPathFast',
   RUNTIME_LIST_LOCAL_MODELS: 'runtime:listLocalModels',
   RUNTIME_INSTALL_OLLAMA: 'runtime:installOllama',
   /** Main → renderer: `{ message: string }` lines while install is running. */
@@ -156,6 +160,8 @@ export const IPC = {
 
   // Metrics
   METRICS_SNAPSHOT: 'metrics:snapshot',
+  /** Fast path for lightweight metrics polling with shared cache. */
+  METRICS_SNAPSHOT_FAST: 'metrics:snapshotFast',
   METRICS_HISTORY: 'metrics:history',
 
   // Training
@@ -220,3 +226,6 @@ export const IPC = {
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
+
+/** Polling request class to keep expensive probes off high-frequency paths. */
+export type RuntimeProbeClass = 'fast_status' | 'normal_status' | 'heavy_probe'
