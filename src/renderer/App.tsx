@@ -1,7 +1,9 @@
 import {
   Fragment,
+  Suspense,
   useCallback,
   useEffect,
+  lazy,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -155,16 +157,10 @@ import { touchPresenceSessionHidden } from './presenceSession'
 import { MetricsTimeSeries } from './MetricsTimeSeries'
 import { IssuesPinnedWidget } from './IssuesPinnedWidget'
 import { MetricsPinnedWidget } from './MetricsPinnedWidget'
-import { KeywordGraphSigmaView } from './knowledgeGraph/KeywordGraphSigmaView'
-import { OntologyView } from './OntologyView'
 import { HfModelBrowserDrawer } from './components/HfModelBrowserDrawer'
 import { buildWikiTocGroupsFromRoot, WikiArticleTocNav, type WikiTocGroup } from './WikiArticleToc'
-import { ElectronDevDashboard } from './ElectronDevDashboard'
 import { ReleaseReadinessView, defaultReleaseFeatureSet, normalizeReleaseFeatureSet } from './ReleaseReadinessView'
-import { TrainMainView } from './TrainMainView'
-import { ArchitectureRepositoryView } from './ArchitectureRepositoryView'
 import { CodebaseFormalSettingsSection } from './CodebaseFormalSettingsSection'
-import { CodebaseLandscapeView } from './CodebaseLandscapeView'
 import { ViewToastRegion } from './ViewToastRegion'
 import { notifyWhenBackground, setViewToastNavigation } from './viewToastBus'
 import { SetupRoleTour, type SetupTourFinishPayload } from './SetupRoleTour'
@@ -172,9 +168,14 @@ import {
   ActionDock,
   ContextRail,
   PrimaryWork,
-  RoleWorkspaceShell,
-  UnifiedCommandSurfaceButton
+  RoleWorkspaceShell
 } from './RoleWorkspaceShell'
+import { DeleteConversationModal } from './app-shell/DeleteConversationModal'
+import { NavRail } from './app-shell/NavRail'
+import { PinnedWidgetsRailHeader } from './app-shell/PinnedWidgetsRailHeader'
+import { TopBarShell } from './app-shell/TopBarShell'
+import { WelcomeChecklistModal } from './app-shell/WelcomeChecklistModal'
+import { deriveViewCopyKey, deriveWorkspaceStatus, viewCopyFor, workflowStageForView, STAGE_ENTRY_VIEW } from './app-shell/workflowStatus'
 import { WIKI_KIND_LABELS, WIKI_KIND_ORDER, groupWikiTopicsByKind, wikiSidebarRowsForKind } from '@shared/wikiSourceGroups'
 import { defaultIdeJourneyChecklist, mergeIdeJourneyChecklist, type IdeJourneyChecklist } from '@shared/ideJourney'
 import {
@@ -189,12 +190,10 @@ import {
   layoutDefaultMainArea,
   devShellChromeVisible,
   clampMainViewForLayout,
-  APP_MAIN_VIEW_COPY,
   isAdvancedMainView,
   type UiRole,
   type AppMainView,
   type WorkspaceDensity,
-  type WorkspaceStatusLabel,
   type SettingsSectionId,
   type SetupTourAction,
   type ToolDrawerId,
@@ -202,6 +201,22 @@ import {
   UI_ROLE_IDS,
   UI_ROLE_LABELS
 } from '@shared/uiRole'
+import { usePollTask } from './app-shell/usePollTask'
+
+const KeywordGraphSigmaView = lazy(() =>
+  import('./knowledgeGraph/KeywordGraphSigmaView').then((m) => ({ default: m.KeywordGraphSigmaView }))
+)
+const OntologyView = lazy(() => import('./OntologyView').then((m) => ({ default: m.OntologyView })))
+const TrainMainView = lazy(() => import('./TrainMainView').then((m) => ({ default: m.TrainMainView })))
+const ArchitectureRepositoryView = lazy(() =>
+  import('./ArchitectureRepositoryView').then((m) => ({ default: m.ArchitectureRepositoryView }))
+)
+const CodebaseLandscapeView = lazy(() =>
+  import('./CodebaseLandscapeView').then((m) => ({ default: m.CodebaseLandscapeView }))
+)
+const ElectronDevDashboard = lazy(() =>
+  import('./ElectronDevDashboard').then((m) => ({ default: m.ElectronDevDashboard }))
+)
 
 function WikiEntryRemoveButton(props: { ariaLabel: string; onPress: () => void }): ReactElement {
   return (
@@ -1155,43 +1170,6 @@ function IconSend(): React.ReactElement {
   )
 }
 
-/** Pinned widget bar docked on the left (narrow strip beside main). */
-function IconDockLeft(): React.ReactElement {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden>
-      <rect x="3" y="4" width="5" height="16" rx="1.5" />
-      <rect x="10" y="4" width="11" height="16" rx="1.5" />
-    </svg>
-  )
-}
-
-function IconDockRight(): React.ReactElement {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden>
-      <rect x="3" y="4" width="11" height="16" rx="1.5" />
-      <rect x="16" y="4" width="5" height="16" rx="1.5" />
-    </svg>
-  )
-}
-
-function IconDockTop(): React.ReactElement {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden>
-      <rect x="3" y="4" width="18" height="5" rx="1.5" />
-      <rect x="3" y="11" width="18" height="9" rx="1.5" />
-    </svg>
-  )
-}
-
-function IconDockBottom(): React.ReactElement {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden>
-      <rect x="3" y="4" width="18" height="9" rx="1.5" />
-      <rect x="3" y="15" width="18" height="5" rx="1.5" />
-    </svg>
-  )
-}
-
 const DMS_PROVIDER_LABELS: Record<DmsProvider, string> = {
   'google-drive': 'Google Drive',
   onedrive: 'OneDrive',
@@ -1267,6 +1245,9 @@ export default function App(): React.ReactElement {
   const [presenceWakeOpen, setPresenceWakeOpen] = useState(false)
   const [wakeBackdropIntensity, setWakeBackdropIntensity] = useState(0)
   const [wakeChromeReveal, setWakeChromeReveal] = useState(false)
+  const [tabVisible, setTabVisible] = useState(
+    typeof document !== 'undefined' ? document.visibilityState !== 'hidden' : true
+  )
   const [resumeRuntimeOnLaunch, setResumeRuntimeOnLaunch] = useState(false)
 
   const [runtimeKind, setRuntimeKind] = useState<'llamacpp' | 'ollama'>('ollama')
@@ -1282,6 +1263,8 @@ export default function App(): React.ReactElement {
   const [ollamaInstallLog, setOllamaInstallLog] = useState<string[]>([])
   const ollamaInstallLogRef = useRef<HTMLPreElement>(null)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
+  const lastFastStatusAtRef = useRef<number>(0)
+  const [runtimeStatusStale, setRuntimeStatusStale] = useState(false)
   const presentationStarterToastShownRef = useRef(false)
   const [localDownloads, setLocalDownloads] = useState<DownloadRow[]>([])
   const [localModelFilePaths, setLocalModelFilePaths] = useState<string[]>([])
@@ -1376,6 +1359,30 @@ export default function App(): React.ReactElement {
     topBarOllamaModelOptions,
     winPlatform
   ])
+
+  const topBarFileOptions = useMemo(
+    () =>
+      topBarLlamaModelPathOptions.map((p) => {
+        const loadedMp = (runtimeOn ? runtimeStatus?.modelPath?.trim() : '') ?? ''
+        const loadedOnly =
+          Boolean(loadedMp) &&
+          localModelPathsEqual(p, loadedMp, winPlatform) &&
+          !localModelFilePaths.some((q) => localModelPathsEqual(q, loadedMp, winPlatform))
+        return {
+          value: p,
+          label: localModelOptionLabel(p, localDownloads, winPlatform),
+          loadedOnly
+        }
+      }),
+    [
+      localDownloads,
+      localModelFilePaths,
+      runtimeOn,
+      runtimeStatus?.modelPath,
+      topBarLlamaModelPathOptions,
+      winPlatform
+    ]
+  )
 
   useEffect(() => {
     const k = inferRuntimeKindForModelSelection(modelPath, localModelFilePaths, winPlatform)
@@ -2527,8 +2534,10 @@ export default function App(): React.ReactElement {
   }, [wikiSelectedId])
 
   const refreshRuntimeStatus = useCallback(async () => {
-    const s = await window.api.runtimeStatus()
+    const s = await window.api.runtimeStatusFast()
     setRuntimeStatus(s)
+    lastFastStatusAtRef.current = Date.now()
+    setRuntimeStatusStale(false)
   }, [])
 
   const applyRuntimeInstallPaths = useCallback(
@@ -2547,11 +2556,13 @@ export default function App(): React.ReactElement {
 
   const refreshRunDrawerQuick = useCallback(async () => {
     const [s, downloads, install] = await Promise.all([
-      window.api.runtimeStatus(),
+      window.api.runtimeStatusFast(),
       window.api.downloadsList(),
-      window.api.runtimeInstallPath()
+      window.api.runtimeInstallPathFast()
     ])
     setRuntimeStatus(s)
+    lastFastStatusAtRef.current = Date.now()
+    setRuntimeStatusStale(false)
     setLocalDownloads(downloads)
     applyRuntimeInstallPaths(install)
   }, [applyRuntimeInstallPaths])
@@ -3162,6 +3173,8 @@ export default function App(): React.ReactElement {
       const initialBin = c.llamaBinary.trim() ? c.llamaBinary : c.llamaResolvedPath || ''
       setLlamaBin(initialBin)
       applyRuntimeInstallPaths(c)
+      lastFastStatusAtRef.current = Date.now()
+      setRuntimeStatusStale(false)
     })
     void loadConversations()
     void loadWiki()
@@ -3492,23 +3505,20 @@ export default function App(): React.ReactElement {
     return off
   }, [])
 
-  useEffect(() => {
-    let cancelled = false
-    const load = async (): Promise<void> => {
-      try {
-        const stats = await window.api.claudeMemoryStatus()
-        if (!cancelled) setClaudeMemoryStats(stats)
-      } catch {
-        if (!cancelled) setClaudeMemoryStats(null)
-      }
-    }
-    void load()
-    const id = window.setInterval(() => void load(), 5000)
-    return () => {
-      cancelled = true
-      window.clearInterval(id)
+  const refreshClaudeMemoryStats = useCallback(async (): Promise<void> => {
+    try {
+      const stats = await window.api.claudeMemoryStatus()
+      setClaudeMemoryStats(stats)
+    } catch {
+      setClaudeMemoryStats(null)
     }
   }, [])
+
+  usePollTask({
+    enabled: true,
+    intervalMs: 7000,
+    run: refreshClaudeMemoryStats
+  })
 
   useEffect(() => {
     return window.api.onIntegrationModelActivity((evt: IntegrationModelActivityEvent) => {
@@ -3573,20 +3583,40 @@ export default function App(): React.ReactElement {
   useEffect(() => {
     if (drawer !== 'runtime') return
     void refreshRunDrawer()
-    const quickId = window.setInterval(() => void refreshRunDrawerQuick(), 1000)
-    const modelsId = window.setInterval(() => void refreshLocalModelFiles(), 4000)
-    return () => {
-      window.clearInterval(quickId)
-      window.clearInterval(modelsId)
-    }
-  }, [drawer, refreshRunDrawer, refreshRunDrawerQuick, refreshLocalModelFiles])
+  }, [drawer, refreshRunDrawer])
+
+  usePollTask({
+    enabled: drawer === 'runtime',
+    intervalMs: 1800,
+    run: refreshRunDrawerQuick
+  })
+
+  usePollTask({
+    enabled: drawer === 'runtime',
+    intervalMs: 6000,
+    run: refreshLocalModelFiles
+  })
+
+  usePollTask({
+    enabled: setupTourOpen,
+    intervalMs: 3200,
+    run: refreshRunDrawerQuick
+  })
+
+  usePollTask({
+    enabled: true,
+    intervalMs: 1200,
+    run: refreshRuntimeStatus,
+    runImmediately: false
+  })
 
   useEffect(() => {
-    if (!setupTourOpen) return
-    void refreshRunDrawerQuick()
-    const id = window.setInterval(() => void refreshRunDrawerQuick(), 2000)
+    const id = window.setInterval(() => {
+      const elapsed = Date.now() - lastFastStatusAtRef.current
+      setRuntimeStatusStale(lastFastStatusAtRef.current > 0 && elapsed > 10_000)
+    }, 2000)
     return () => window.clearInterval(id)
-  }, [setupTourOpen, refreshRunDrawerQuick])
+  }, [])
 
   useEffect(() => {
     if (drawer !== 'runtime') return
@@ -3603,57 +3633,58 @@ export default function App(): React.ReactElement {
     void refreshDownloadsList()
   }, [refreshDownloadsList])
 
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      void (async () => {
-        const jobs = hfDownloadJobsRef.current
-        const repoIds = Object.keys(jobs)
-        if (repoIds.length === 0) return
-        const next: Record<string, HfCardDownloadState> = { ...jobs }
-        let changed = false
-        let refreshDownloadsAfter = false
-        for (const repoId of repoIds) {
-          const cur = jobs[repoId]
-          const raw = await window.api.hfDownloadStatus(cur.jobId)
-          const st = parseHfDownloadStatus(raw)
-          if (!st) {
-            delete next[repoId]
-            changed = true
-            continue
-          }
-          if (st.status === 'complete' || st.status === 'error' || st.status === 'cancelled') {
-            if (st.status === 'complete') refreshDownloadsAfter = true
-            delete next[repoId]
-            changed = true
-            continue
-          }
-          const mergedDisplay = st.displayName ?? cur.displayName
-          if (
-            cur.progress !== st.progress ||
-            cur.bytesReceived !== st.bytesReceived ||
-            cur.bytesTotal !== st.bytesTotal ||
-            cur.status !== st.status ||
-            cur.displayName !== mergedDisplay
-          ) {
-            next[repoId] = {
-              jobId: cur.jobId,
-              progress: st.progress,
-              bytesReceived: st.bytesReceived,
-              bytesTotal: st.bytesTotal,
-              status: st.status,
-              displayName: mergedDisplay
-            }
-            changed = true
-          }
+  const refreshHfDownloadJobs = useCallback(async (): Promise<void> => {
+    const jobs = hfDownloadJobsRef.current
+    const repoIds = Object.keys(jobs)
+    if (repoIds.length === 0) return
+    const next: Record<string, HfCardDownloadState> = { ...jobs }
+    let changed = false
+    let refreshDownloadsAfter = false
+    for (const repoId of repoIds) {
+      const cur = jobs[repoId]
+      const raw = await window.api.hfDownloadStatus(cur.jobId)
+      const st = parseHfDownloadStatus(raw)
+      if (!st) {
+        delete next[repoId]
+        changed = true
+        continue
+      }
+      if (st.status === 'complete' || st.status === 'error' || st.status === 'cancelled') {
+        if (st.status === 'complete') refreshDownloadsAfter = true
+        delete next[repoId]
+        changed = true
+        continue
+      }
+      const mergedDisplay = st.displayName ?? cur.displayName
+      if (
+        cur.progress !== st.progress ||
+        cur.bytesReceived !== st.bytesReceived ||
+        cur.bytesTotal !== st.bytesTotal ||
+        cur.status !== st.status ||
+        cur.displayName !== mergedDisplay
+      ) {
+        next[repoId] = {
+          jobId: cur.jobId,
+          progress: st.progress,
+          bytesReceived: st.bytesReceived,
+          bytesTotal: st.bytesTotal,
+          status: st.status,
+          displayName: mergedDisplay
         }
-        if (changed) {
-          setHfDownloadJobs(next)
-          if (refreshDownloadsAfter) void refreshDownloadsList()
-        }
-      })()
-    }, 400)
-    return () => clearInterval(id)
+        changed = true
+      }
+    }
+    if (changed) {
+      setHfDownloadJobs(next)
+      if (refreshDownloadsAfter) void refreshDownloadsList()
+    }
   }, [refreshDownloadsList])
+
+  usePollTask({
+    enabled: true,
+    intervalMs: 1200,
+    run: refreshHfDownloadJobs
+  })
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -3674,26 +3705,6 @@ export default function App(): React.ReactElement {
     const bundle = await loadMetricsBundle()
     setMetricsBundle(bundle)
   }, [loadMetricsBundle])
-
-  useEffect(() => {
-    if (drawer !== 'metrics') return
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const bundle = await loadMetricsBundle()
-        if (cancelled) return
-        setMetricsBundle(bundle)
-      } catch {
-        /* ignore */
-      }
-    }
-    void tick()
-    const id = window.setInterval(tick, metricsRefreshMs)
-    return () => {
-      cancelled = true
-      window.clearInterval(id)
-    }
-  }, [drawer, metricsRefreshMs, loadMetricsBundle])
 
   const saveMetricsWidgetConfig = useCallback(
     async (patch: {
@@ -3751,51 +3762,95 @@ export default function App(): React.ReactElement {
   }, [])
 
   useEffect(() => {
+    const onVisibility = (): void => setTabVisible(document.visibilityState !== 'hidden')
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [])
+
+  useEffect(() => {
     if (!metricsPinned) {
       setWidgetSeries([])
       return
     }
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const s = (await window.api.metricsSnapshot({ persist: false })) as MetricsSnapshot
-        if (cancelled) return
-        setWidgetSnap(s)
-        setWidgetSeries((prev) => [...prev.slice(-47), s])
-      } catch {
-        /* ignore */
-      }
+  }, [metricsPinned])
+
+  const refreshPinnedMetrics = useCallback(async (): Promise<void> => {
+    try {
+      const s = (await window.api.metricsSnapshotFast({ persist: false })) as MetricsSnapshot
+      setWidgetSnap(s)
+      setWidgetSeries((prev) => [...prev.slice(-47), s])
+    } catch {
+      /* ignore */
     }
-    void tick()
-    const id = window.setInterval(tick, metricsRefreshMs)
-    return () => {
-      cancelled = true
-      window.clearInterval(id)
-    }
-  }, [metricsPinned, metricsRefreshMs])
+  }, [])
+
+  usePollTask({
+    enabled: metricsPinned,
+    intervalMs: metricsRefreshMs,
+    run: refreshPinnedMetrics
+  })
 
   useEffect(() => {
-    const active = animatedBackdropEnabled && (Boolean(runtimeStatus?.running) || runtimeStarting || chatSending)
+    if (!downloadsPinned) {
+      setPinnedDownloadsSnapshot([])
+    }
+  }, [downloadsPinned])
+
+  const refreshPinnedDownloads = useCallback(async (): Promise<void> => {
+    try {
+      const rows = await window.api.downloadsList()
+      setPinnedDownloadsSnapshot(rows)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  usePollTask({
+    enabled: downloadsPinned,
+    intervalMs: 1500,
+    run: refreshPinnedDownloads
+  })
+
+  const refreshBackdropMetrics = useCallback(async (): Promise<void> => {
+    try {
+      const s = (await window.api.metricsSnapshotFast({ persist: false })) as MetricsSnapshot
+      setBackdropSnap(s)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  useEffect(() => {
+    const active =
+      tabVisible && animatedBackdropEnabled && (Boolean(runtimeStatus?.running) || runtimeStarting || chatSending)
     if (!active) {
       setBackdropSnap(null)
-      return
     }
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const s = (await window.api.metricsSnapshot({ persist: false })) as MetricsSnapshot
-        if (!cancelled) setBackdropSnap(s)
-      } catch {
-        /* ignore */
-      }
+  }, [tabVisible, animatedBackdropEnabled, runtimeStatus?.running, runtimeStarting, chatSending])
+
+  usePollTask({
+    enabled:
+      tabVisible &&
+      animatedBackdropEnabled &&
+      (Boolean(runtimeStatus?.running) || runtimeStarting || chatSending),
+    intervalMs: BACKDROP_METRICS_MS,
+    run: refreshBackdropMetrics
+  })
+
+  const refreshMetricsDrawer = useCallback(async (): Promise<void> => {
+    try {
+      const bundle = await loadMetricsBundle()
+      setMetricsBundle(bundle)
+    } catch {
+      /* ignore */
     }
-    void tick()
-    const id = window.setInterval(tick, BACKDROP_METRICS_MS)
-    return () => {
-      cancelled = true
-      window.clearInterval(id)
-    }
-  }, [animatedBackdropEnabled, runtimeStatus?.running, runtimeStarting, chatSending])
+  }, [loadMetricsBundle])
+
+  usePollTask({
+    enabled: drawer === 'metrics',
+    intervalMs: metricsRefreshMs,
+    run: refreshMetricsDrawer
+  })
 
   const personalityModelKey = useMemo(() => {
     if (runtimeStatus?.running && runtimeStatus.modelPath?.trim()) return runtimeStatus.modelPath.trim()
@@ -3935,28 +3990,6 @@ export default function App(): React.ReactElement {
     })
   }, [])
 
-  useEffect(() => {
-    if (!downloadsPinned) {
-      setPinnedDownloadsSnapshot([])
-      return
-    }
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const rows = await window.api.downloadsList()
-        if (cancelled) return
-        setPinnedDownloadsSnapshot(rows)
-      } catch {
-        /* ignore */
-      }
-    }
-    void tick()
-    const id = window.setInterval(tick, 1000)
-    return () => {
-      cancelled = true
-      window.clearInterval(id)
-    }
-  }, [downloadsPinned])
 
   const appBlockingIssues = useMemo((): AppBlockingIssue[] => {
     const out: AppBlockingIssue[] = []
@@ -5904,25 +5937,17 @@ export default function App(): React.ReactElement {
     }
     return raw
   }, [runtimeStatus, localDownloads, paths?.platform])
-  const viewCopyKey: AppMainView =
-    mainView === 'wiki' && wikiSubview === 'knowledgeGraph' ? 'knowledgeGraph' : mainView
-  const viewCopy = APP_MAIN_VIEW_COPY[viewCopyKey] ?? APP_MAIN_VIEW_COPY.chat
+  const viewCopyKey: AppMainView = deriveViewCopyKey(mainView, wikiSubview)
+  const viewCopy = viewCopyFor(viewCopyKey)
   const topTitle = viewCopy.title
   const topSub = viewCopy.subtitle
-  const workspaceStatusState: WorkspaceStatusLabel = runtimeStarting
-    ? 'Running'
-    : runtimeOn
-      ? 'Ready'
-      : modelPath.trim().length === 0
-        ? 'Needs input'
-        : 'Blocked'
-  const workspaceStatusHint = runtimeStarting
-    ? runtimeLoadProgress?.message ?? 'Model is starting.'
-    : runtimeOn
-      ? 'Model is ready. Open Knowledge to continue the presentation flow.'
-      : modelPath.trim().length === 0
-        ? 'Choose a model to begin the presentation flow.'
-        : 'Start the model from Run or the play button, then open Knowledge.'
+  const workspaceStatus = deriveWorkspaceStatus({
+    runtimeStarting,
+    runtimeOn,
+    modelPath,
+    runtimeLoadMessage: runtimeLoadProgress?.message ?? null
+  })
+  const activeWorkflowStage = workflowStageForView(viewCopyKey)
   const nextBestActionLabel = runtimeOn ? 'Continue workflow' : 'Start runtime'
   const nextBestActionTitle = runtimeOn
     ? 'Open Knowledge and continue the presentation workflow.'
@@ -6275,6 +6300,7 @@ export default function App(): React.ReactElement {
       <div className={shellClassName}>
       {animatedBackdropEnabled ? (
         <ModelPresenceBackdrop
+          animate={Boolean(runtimeStatus?.running) || runtimeStarting || chatSending || wakeBackdropIntensity > 0}
           running={Boolean(runtimeStatus?.running)}
           starting={runtimeStarting}
           loadPercent={runtimeLoadProgress?.percent ?? null}
@@ -6314,127 +6340,26 @@ export default function App(): React.ReactElement {
         />
       )}
       <div className={shellChromeClass}>
-      <aside className="nav-rail nav-rail--icons-only" aria-label="Primary navigation">
-        <div className="nav-brand" title="Local LLM Desktop — private chat on your computer">
-          <img
-            src={`${import.meta.env.BASE_URL}app-icon.png`}
-            alt=""
-            width={44}
-            height={44}
-            decoding="async"
-          />
-        </div>
-        <nav className="nav-main">
-          {visibleRoleTasks.map((task) => {
-            const active =
-              (task.mainView === 'knowledgeGraph'
-                ? (mainView === 'wiki' && wikiSubview === 'knowledgeGraph') || mainView === 'knowledgeGraph'
-                : task.mainView === 'wiki'
-                  ? mainView === 'wiki' && wikiSubview === 'article'
-                  : task.mainView != null && mainView === task.mainView) ||
-              (task.drawer != null && drawer === task.drawer) ||
-              (task.drawer === 'settings' && drawer === 'settings')
-            return (
-              <button
-                key={task.id}
-                type="button"
-                className={`nav-btn ${active ? 'active' : ''}`}
-                onClick={() => openRoleTask(task)}
-                title={task.hint}
-                aria-label={`${task.label}: ${task.hint}`}
-              >
-                <i className={`fa-solid ${task.icon}`} aria-hidden />
-                <span className="nav-btn-label">{task.label}</span>
-              </button>
-            )
-          })}
-          {devShellChrome && !visibleRoleTasks.some((task) => task.mainView === 'electronDev') ? (
-            <button
-              type="button"
-              className={`nav-btn ${mainView === 'electronDev' ? 'active' : ''}`}
-              onClick={() => setMainView('electronDev')}
-              title="Developer hub — bridge, shortcuts, setup tour"
-              aria-label="Develop: open Developer hub for bridge, shortcuts, and setup tour"
-            >
-              <i className="fa-solid fa-code" aria-hidden />
-              <span className="nav-btn-label">Develop</span>
-            </button>
-          ) : null}
-        </nav>
-        <div className="nav-spacer" />
-        <nav className="nav-tools" aria-label="Tools">
-          {visibleToolDrawers.map((id: ToolDrawerId) => {
-            if (id === 'hf') {
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className="nav-btn"
-                  onClick={() => setDrawer('hf')}
-                  title="Browse and download models"
-                  aria-label="Models: browse and download models"
-                >
-                  <IconBox />
-                  <span className="nav-btn-label">Models</span>
-                </button>
-              )
-            }
-            if (id === 'runtime') {
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className="nav-btn"
-                  onClick={() => setDrawer('runtime')}
-                  title="Run — turn your AI model on or off"
-                  aria-label="Run: turn your AI model on or off"
-                >
-                  <IconCpu />
-                  <span className="nav-btn-label">Run</span>
-                </button>
-              )
-            }
-            if (id === 'train') {
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className="nav-btn"
-                  onClick={() => openTrainSurface()}
-                  title="Train"
-                  aria-label="Train: open model tuning and training"
-                >
-                  <IconFlask />
-                  <span className="nav-btn-label">Train</span>
-                </button>
-              )
-            }
-            return (
-              <button
-                key={id}
-                type="button"
-                className="nav-btn"
-                onClick={() => setDrawer('metrics')}
-                title="Metrics"
-                aria-label="Metrics: open runtime and system metrics"
-              >
-                <IconActivity />
-                <span className="nav-btn-label">Metrics</span>
-              </button>
-            )
-          })}
-          <button
-            type="button"
-            className="nav-btn"
-            onClick={() => openSettings('general')}
-            title="Settings"
-            aria-label="Settings: open workspace preferences"
-          >
-            <IconGear />
-            <span className="nav-btn-label">Settings</span>
-          </button>
-        </nav>
-      </aside>
+      <NavRail
+        visibleRoleTasks={visibleRoleTasks}
+        visibleToolDrawers={visibleToolDrawers}
+        mainView={mainView}
+        wikiSubview={wikiSubview}
+        drawer={drawer}
+        devShellChrome={devShellChrome}
+        onOpenRoleTask={openRoleTask}
+        onOpenDevHub={() => setMainView('electronDev')}
+        onOpenHf={() => setDrawer('hf')}
+        onOpenRuntime={() => setDrawer('runtime')}
+        onOpenTrain={openTrainSurface}
+        onOpenMetrics={() => setDrawer('metrics')}
+        onOpenSettings={() => openSettings('general')}
+        IconBox={IconBox}
+        IconCpu={IconCpu}
+        IconFlask={IconFlask}
+        IconActivity={IconActivity}
+        IconGear={IconGear}
+      />
 
       <RoleWorkspaceShell className={`shell-content shell-content--pinned-${pinnedWidgetsSide}`}>
         <ContextRail
@@ -6455,142 +6380,82 @@ export default function App(): React.ReactElement {
           )}
         >
           {pinnedWidgetsBarCollapsed ? (
-            <div className="pinned-widgets-aside-collapsed">
-              <button
-                type="button"
-                className="pinned-widgets-aside-expand-btn"
-                title="Expand pinned widgets"
-                aria-label="Expand pinned widgets"
-                onClick={() => {
-                  setPinnedWidgetsBarCollapsed(false)
-                  void saveMetricsWidgetConfig({ pinnedWidgetsBarCollapsed: false })
-                }}
-              >
-                <i
-                  className={`fa-solid ${pinnedWidgetsExpandChevronClass(narrowSlideConv, pinnedWidgetsSide)} pinned-widgets-aside-expand-chevron`}
-                  aria-hidden
-                />
-                <span className="visually-hidden">Expand pinned widgets</span>
-              </button>
-            </div>
+            <PinnedWidgetsRailHeader
+              collapsed
+              expandChevronClass={pinnedWidgetsExpandChevronClass(narrowSlideConv, pinnedWidgetsSide)}
+              collapseChevronClass={pinnedWidgetsCollapseChevron(pinnedWidgetsSide)}
+              pinnedWidgetsSide={pinnedWidgetsSide}
+              metricsPinned={metricsPinned}
+              downloadsPinned={downloadsPinned}
+              activityPinned={activityPinned}
+              issuesPinned={issuesPinned}
+              onToggleCollapsed={(collapsed) => {
+                setPinnedWidgetsBarCollapsed(collapsed)
+                void saveMetricsWidgetConfig({ pinnedWidgetsBarCollapsed: collapsed })
+              }}
+              onTogglePin={(kind, next) => {
+                if (kind === 'metrics') {
+                  setMetricsPinned(next)
+                  void saveMetricsWidgetConfig({ metricsPinned: next })
+                  return
+                }
+                if (kind === 'downloads') {
+                  setDownloadsPinned(next)
+                  void saveMetricsWidgetConfig({ downloadsPinned: next })
+                  return
+                }
+                if (kind === 'activity') {
+                  setActivityPinned(next)
+                  void saveMetricsWidgetConfig({ activityPinned: next })
+                  return
+                }
+                setIssuesPinned(next)
+                void saveMetricsWidgetConfig({ issuesPinned: next })
+              }}
+              onSetSide={(side) => {
+                setPinnedWidgetsSide(side)
+                void saveMetricsWidgetConfig({ pinnedWidgetsSide: side })
+              }}
+            />
           ) : (
             <>
-          <div className="pinned-widgets-aside-header">
-            <div className="pinned-widgets-aside-header-row pinned-widgets-aside-header-row--title">
-              <span className="pinned-widgets-aside-title">Pinned widgets</span>
-              <button
-                type="button"
-                className="pinned-widgets-bar-collapse-btn"
-                title="Collapse widget bar"
-                aria-label="Collapse widget bar"
-                onClick={() => {
-                  setPinnedWidgetsBarCollapsed(true)
-                  void saveMetricsWidgetConfig({ pinnedWidgetsBarCollapsed: true })
-                }}
-              >
-                <i className={`fa-solid ${pinnedWidgetsCollapseChevron(pinnedWidgetsSide)}`} aria-hidden />
-              </button>
-            </div>
-            <div className="pinned-widgets-aside-header-row pinned-widgets-aside-header-row--controls">
-              <div className="pinned-widgets-pin-group" role="group" aria-label="Pin widgets to this panel">
-                <button
-                  type="button"
-                  className={`pinned-widgets-pin ${metricsPinned ? 'active' : ''}`}
-                  title={metricsPinned ? 'Unpin metrics' : 'Pin live metrics here'}
-                  aria-label={metricsPinned ? 'Unpin metrics' : 'Pin live metrics to this panel'}
-                  aria-pressed={metricsPinned}
-                  onClick={() => {
-                    const next = !metricsPinned
-                    setMetricsPinned(next)
-                    void saveMetricsWidgetConfig({ metricsPinned: next })
-                  }}
-                >
-                  <span className="pinned-widgets-pin-icon" aria-hidden>
-                    <i className="fa-solid fa-chart-line" />
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={`pinned-widgets-pin ${downloadsPinned ? 'active' : ''}`}
-                  title={downloadsPinned ? 'Unpin downloads' : 'Pin Hub download progress here'}
-                  aria-label={downloadsPinned ? 'Unpin downloads' : 'Pin download progress to this panel'}
-                  aria-pressed={downloadsPinned}
-                  onClick={() => {
-                    const next = !downloadsPinned
-                    setDownloadsPinned(next)
-                    void saveMetricsWidgetConfig({ downloadsPinned: next })
-                  }}
-                >
-                  <span className="pinned-widgets-pin-icon" aria-hidden>
-                    <i className="fa-solid fa-download" />
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={`pinned-widgets-pin ${activityPinned ? 'active' : ''}`}
-                  title={
-                    activityPinned ? 'Unpin activity' : 'Pin model load and reply progress here'
-                  }
-                  aria-label={
-                    activityPinned ? 'Unpin activity' : 'Pin model load and reply progress to this panel'
-                  }
-                  aria-pressed={activityPinned}
-                  onClick={() => {
-                    const next = !activityPinned
-                    setActivityPinned(next)
-                    void saveMetricsWidgetConfig({ activityPinned: next })
-                  }}
-                >
-                  <span className="pinned-widgets-pin-icon" aria-hidden>
-                    <i className="fa-solid fa-bolt" />
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={`pinned-widgets-pin ${issuesPinned ? 'active' : ''}`}
-                  title={issuesPinned ? 'Unpin issues' : 'Pin blocking issues and warnings here'}
-                  aria-label={
-                    issuesPinned ? 'Unpin issues' : 'Pin blocking issues and warnings to this panel'
-                  }
-                  aria-pressed={issuesPinned}
-                  onClick={() => {
-                    const next = !issuesPinned
-                    setIssuesPinned(next)
-                    void saveMetricsWidgetConfig({ issuesPinned: next })
-                  }}
-                >
-                  <span className="pinned-widgets-pin-icon" aria-hidden>
-                    <i className="fa-solid fa-triangle-exclamation" />
-                  </span>
-                </button>
-              </div>
-              <div className="pinned-widgets-dock-symbols" role="group" aria-label="Widget bar position">
-                {(
-                  [
-                    { side: 'left' as const, DockIcon: IconDockLeft, title: 'Dock bar on the left (beside nav)' },
-                    { side: 'right' as const, DockIcon: IconDockRight, title: 'Dock bar on the right (after main)' },
-                    { side: 'top' as const, DockIcon: IconDockTop, title: 'Dock bar on top (above main)' },
-                    { side: 'bottom' as const, DockIcon: IconDockBottom, title: 'Dock bar on the bottom (below main)' }
-                  ] as const
-                ).map(({ side, DockIcon, title }) => (
-                  <button
-                    key={side}
-                    type="button"
-                    className={`pinned-widgets-dock-btn ${pinnedWidgetsSide === side ? 'pinned-widgets-dock-btn--active' : ''}`}
-                    title={title}
-                    aria-label={title}
-                    aria-pressed={pinnedWidgetsSide === side}
-                    onClick={() => {
-                      setPinnedWidgetsSide(side)
-                      void saveMetricsWidgetConfig({ pinnedWidgetsSide: side })
-                    }}
-                  >
-                    <DockIcon />
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
+          <PinnedWidgetsRailHeader
+            collapsed={false}
+            expandChevronClass={pinnedWidgetsExpandChevronClass(narrowSlideConv, pinnedWidgetsSide)}
+            collapseChevronClass={pinnedWidgetsCollapseChevron(pinnedWidgetsSide)}
+            pinnedWidgetsSide={pinnedWidgetsSide}
+            metricsPinned={metricsPinned}
+            downloadsPinned={downloadsPinned}
+            activityPinned={activityPinned}
+            issuesPinned={issuesPinned}
+            onToggleCollapsed={(collapsed) => {
+              setPinnedWidgetsBarCollapsed(collapsed)
+              void saveMetricsWidgetConfig({ pinnedWidgetsBarCollapsed: collapsed })
+            }}
+            onTogglePin={(kind, next) => {
+              if (kind === 'metrics') {
+                setMetricsPinned(next)
+                void saveMetricsWidgetConfig({ metricsPinned: next })
+                return
+              }
+              if (kind === 'downloads') {
+                setDownloadsPinned(next)
+                void saveMetricsWidgetConfig({ downloadsPinned: next })
+                return
+              }
+              if (kind === 'activity') {
+                setActivityPinned(next)
+                void saveMetricsWidgetConfig({ activityPinned: next })
+                return
+              }
+              setIssuesPinned(next)
+              void saveMetricsWidgetConfig({ issuesPinned: next })
+            }}
+            onSetSide={(side) => {
+              setPinnedWidgetsSide(side)
+              void saveMetricsWidgetConfig({ pinnedWidgetsSide: side })
+            }}
+          />
           <div
             ref={pinnedWidgetsBodyRef}
             className={[
@@ -6764,183 +6629,44 @@ export default function App(): React.ReactElement {
           )}
           </ContextRail>
         <PrimaryWork className="main-column">
-        <header className="top-bar">
-          <div className="top-bar-leading">
-            <div className="top-bar-title">{topTitle}</div>
-            {topSub ? <div className="top-bar-sub">{topSub}</div> : null}
-            <div className="workspace-status-row" role="status" aria-live="polite">
-              <span className={`workspace-status-chip workspace-status-chip--${workspaceStatusState.toLowerCase().replace(' ', '-')}`}>
-                {workspaceStatusState}
-              </span>
-              <span className="workspace-status-hint">{workspaceStatusHint}</span>
-            </div>
-          </div>
-          <div className="top-bar-runtime-wrap" aria-label="Model and runtime">
-            <div className="top-bar-runtime-row">
-              <select
-                id="top-bar-runtime-model-select"
-                className="select top-bar-runtime-model-select top-bar-runtime-model-select--unified"
-                aria-label="Choose a local model (Ollama library or file on disk)"
-                disabled={runtimeStarting || runtimeOn}
-                value={topBarModelSelectValue}
-                onChange={(e) => {
-                  const v = e.target.value
-                  setModelPath(v)
-                  const k = inferRuntimeKindForModelSelection(v, localModelFilePaths, winPlatform)
-                  setRuntimeKind(k)
-                  void window.api.setConfig({ runtimeKind: k })
-                }}
-              >
-                <option value="">
-                  {ollamaChatTagsLoading
-                    ? 'Loading models…'
-                    : ollamaChatTagsErr
-                      ? 'Could not list Ollama models'
-                      : topBarOllamaModelOptions.length === 0 && topBarLlamaModelPathOptions.length === 0
-                        ? 'No models found — add weights or install Ollama'
-                        : 'Choose a model…'}
-                </option>
-                {topBarOllamaModelOptions.length > 0 ? (
-                  <optgroup label="Ollama library">
-                    {topBarOllamaModelOptions.map((tag) => {
-                      const ollamaLoaded = runtimeStatus?.modelPath?.trim() ?? ''
-                      const loadedOnly =
-                        runtimeOn && ollamaLoaded !== '' && tag === ollamaLoaded && !ollamaChatTags.includes(tag)
-                      return (
-                        <option key={tag} value={tag} title={tag}>
-                          {tag}
-                          {loadedOnly ? ' · loaded' : ''}
-                        </option>
-                      )
-                    })}
-                  </optgroup>
-                ) : null}
-                {topBarLlamaModelPathOptions.length > 0 ? (
-                  <optgroup label="Files on this PC">
-                    {topBarLlamaModelPathOptions.map((p) => {
-                      const loadedMp = (runtimeOn ? runtimeStatus?.modelPath?.trim() : '') ?? ''
-                      const loadedOnly =
-                        Boolean(loadedMp) &&
-                        localModelPathsEqual(p, loadedMp, winPlatform) &&
-                        !localModelFilePaths.some((q) => localModelPathsEqual(q, loadedMp, winPlatform))
-                      return (
-                        <option key={p} value={p} title={p}>
-                          {localModelOptionLabel(p, localDownloads, winPlatform)}
-                          {loadedOnly ? ' · loaded' : ''}
-                        </option>
-                      )
-                    })}
-                  </optgroup>
-                ) : null}
-              </select>
-              <button
-                type="button"
-                className={`top-bar-runtime-playstop ${runtimeOn ? 'btn-secondary' : 'btn-primary'}`}
-                disabled={!runtimeOn && (runtimeStarting || !modelPath.trim())}
-                title={
-                  runtimeOn
-                    ? 'Stop — unload model from memory'
-                    : runtimeStarting
-                      ? 'Starting your model…'
-                      : !modelPath.trim()
-                        ? 'Choose a model from the list first'
-                        : 'Start — load model so you can chat'
-                }
-                aria-label={
-                  runtimeOn
-                    ? 'Stop and unload the model'
-                    : runtimeStarting
-                      ? 'Starting your model'
-                      : !modelPath.trim()
-                        ? 'Start AI (choose a model first)'
-                        : 'Start AI model'
-                }
-                onClick={() => (runtimeOn ? void stopRuntime() : void startRuntime())}
-              >
-                <i className={`fa-solid ${runtimeOn ? 'fa-stop' : 'fa-play'}`} aria-hidden />
-              </button>
-            </div>
-            {runtimeStarting ? (
-              <div className="top-bar-runtime-progress-wrap" role="status" aria-live="polite">
-                {runtimeLoadProgress?.percent != null ? (
-                  <div className="top-bar-runtime-progress-track">
-                    <div
-                      className="top-bar-runtime-progress-fill"
-                      style={{
-                        width: `${Math.min(100, Math.max(0, runtimeLoadProgress.percent))}%`
-                      }}
-                    />
-                  </div>
-                ) : null}
-                <span className="top-bar-runtime-progress-msg">
-                  {runtimeLoadProgress?.message ?? 'Starting…'}
-                </span>
-              </div>
-            ) : null}
-          </div>
-          <div className="top-bar-actions">
-            {mainView === 'chat' && (
-              <>
-                <button
-                  type="button"
-                  className="top-bar-mobile-toggle top-bar-mobile-toggle--conv"
-                  aria-expanded={mobileConvOpen}
-                  onClick={() => {
-                    setMobileKbOpen(false)
-                    setMobileConvOpen((o) => !o)
-                  }}
-                >
-                  Chats
-                </button>
-                <button
-                  type="button"
-                  className="top-bar-mobile-toggle top-bar-mobile-toggle--kb"
-                  aria-expanded={mobileKbOpen}
-                  onClick={() => {
-                    setMobileConvOpen(false)
-                    setMobileKbOpen((o) => !o)
-                  }}
-                >
-                  Knowledge
-                </button>
-              </>
-            )}
-            <div
-              className="runtime-pill"
-              title={
-                runtimeOn
-                  ? 'AI is on — click for details'
-                  : 'AI is off — click for help starting a model'
-              }
-              aria-label={
-                runtimeOn
-                  ? 'AI model is running. Open Run for details.'
-                  : 'AI model is off. Open Run to start.'
-              }
-              onClick={() => setDrawer('runtime')}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault()
-                  setDrawer('runtime')
-                }
-              }}
-            >
-              <span className={`runtime-pill-dot ${runtimeOn ? 'on' : ''}`} aria-hidden />
-            </div>
-            <UnifiedCommandSurfaceButton
-              label={nextBestActionLabel}
-              title={nextBestActionTitle}
-              onClick={() => {
-                if (runtimeOn) {
-                  openKnowledgeLibrary()
-                }
-                else setDrawer('runtime')
-              }}
-            />
-          </div>
-        </header>
+        <TopBarShell
+          title={topTitle}
+          subtitle={topSub}
+          workspaceStatus={workspaceStatus}
+          activeWorkflowStage={activeWorkflowStage}
+          runtimeStarting={runtimeStarting}
+          runtimeOn={runtimeOn}
+          modelPath={modelPath}
+          topBarModelSelectValue={topBarModelSelectValue}
+          ollamaChatTagsLoading={ollamaChatTagsLoading}
+          ollamaChatTagsErr={ollamaChatTagsErr}
+          ollamaOptions={topBarOllamaModelOptions}
+          fileOptions={topBarFileOptions}
+          runtimeStatus={runtimeStatus}
+          runtimeLoadProgress={runtimeLoadProgress}
+          runtimeStatusStale={runtimeStatusStale}
+          mainView={mainView}
+          mobileConvOpen={mobileConvOpen}
+          mobileKbOpen={mobileKbOpen}
+          nextBestActionLabel={nextBestActionLabel}
+          nextBestActionTitle={nextBestActionTitle}
+          onModelChange={(v) => {
+            setModelPath(v)
+            const k = inferRuntimeKindForModelSelection(v, localModelFilePaths, winPlatform)
+            setRuntimeKind(k)
+            void window.api.setConfig({ runtimeKind: k })
+          }}
+          onStartRuntime={() => void startRuntime()}
+          onStopRuntime={() => void stopRuntime()}
+          onOpenRuntimeDrawer={() => setDrawer('runtime')}
+          onPrimaryAction={() => {
+            if (runtimeOn) openKnowledgeLibrary()
+            else setDrawer('runtime')
+          }}
+          onStageClick={(stage) => setMainView(STAGE_ENTRY_VIEW[stage])}
+          setMobileConvOpen={setMobileConvOpen}
+          setMobileKbOpen={setMobileKbOpen}
+        />
         <ActionDock items={actionDockItems} />
 
         {err && <div className="err-banner">{err}</div>}
@@ -6967,90 +6693,25 @@ export default function App(): React.ReactElement {
         />
 
         {welcomeModalOpen && (
-          <div
-            className="modal-overlay welcome-modal-overlay"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="welcome-modal-title"
-          >
-            <div className="modal-box modal-box--welcome" onClick={(e) => e.stopPropagation()}>
-              <h2 id="welcome-modal-title" className="modal-title">
-                Welcome to Local LLM Desktop
-              </h2>
-              <p className="modal-text welcome-modal-lead">
-                This workspace is tuned for <strong>{UI_ROLE_LABELS[parseUiRoleOrDefault(uiRole)]}</strong>. Follow this short
-                checklist to get to your first role-specific outcome quickly.
-              </p>
-              <ol className="welcome-modal-steps">
-                <li>
-                  <strong>{roleLayoutResolved.tourChecklist.steps[0]}</strong>
-                </li>
-                <li>
-                  <strong>{roleLayoutResolved.tourChecklist.steps[1]}</strong>
-                </li>
-                <li>
-                  <strong>{roleLayoutResolved.tourChecklist.steps[2]}</strong>
-                </li>
-              </ol>
-              <p className="welcome-modal-foot">
-                {roleLayoutResolved.tourChecklist.footnote}
-              </p>
-              <div className="modal-actions welcome-modal-actions">
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={() => void onWelcomeApplyAction(roleLayoutResolved.tourChecklist.primaryAction)}
-                >
-                  {roleLayoutResolved.tourChecklist.primaryAction.label}
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => void onWelcomeApplyAction(roleLayoutResolved.tourChecklist.secondaryAction)}
-                >
-                  {roleLayoutResolved.tourChecklist.secondaryAction.label}
-                </button>
-                <button type="button" className="btn-secondary" onClick={() => void markWelcomeGuideSeen()}>
-                  I&apos;m ready
-                </button>
-              </div>
-            </div>
-          </div>
+          <WelcomeChecklistModal
+            roleLabel={UI_ROLE_LABELS[parseUiRoleOrDefault(uiRole)]}
+            steps={roleLayoutResolved.tourChecklist.steps}
+            footnote={roleLayoutResolved.tourChecklist.footnote}
+            primaryLabel={roleLayoutResolved.tourChecklist.primaryAction.label}
+            secondaryLabel={roleLayoutResolved.tourChecklist.secondaryAction.label}
+            onPrimary={() => void onWelcomeApplyAction(roleLayoutResolved.tourChecklist.primaryAction)}
+            onSecondary={() => void onWelcomeApplyAction(roleLayoutResolved.tourChecklist.secondaryAction)}
+            onReady={() => void markWelcomeGuideSeen()}
+          />
         )}
 
         {deleteConvId && (
-          <div
-            className="modal-overlay"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="delete-conv-title"
-            onClick={() => setDeleteConvId(null)}
-          >
-            <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-              <h2 id="delete-conv-title" className="modal-title">
-                Delete this chat?
-              </h2>
-              <p className="muted modal-text">
-                The conversation and its messages will be removed from this device. This cannot be undone.
-              </p>
-              <label className="modal-check">
-                <input
-                  type="checkbox"
-                  checked={deleteConvRemoveKb}
-                  onChange={(e) => setDeleteConvRemoveKb(e.target.checked)}
-                />
-                <span>Also delete knowledge base content saved from this chat (via &quot;Save chat to knowledge base&quot;)</span>
-              </label>
-              <div className="modal-actions">
-                <button type="button" className="btn-secondary" onClick={() => setDeleteConvId(null)}>
-                  Cancel
-                </button>
-                <button type="button" className="btn-danger" onClick={() => void confirmDeleteConversation()}>
-                  Delete chat
-                </button>
-              </div>
-            </div>
-          </div>
+          <DeleteConversationModal
+            deleteConvRemoveKb={deleteConvRemoveKb}
+            onClose={() => setDeleteConvId(null)}
+            onToggleDeleteKb={setDeleteConvRemoveKb}
+            onConfirmDelete={() => void confirmDeleteConversation()}
+          />
         )}
 
         {wikiDeletePending && (
@@ -8523,7 +8184,9 @@ export default function App(): React.ReactElement {
                   </div>
                   <div className={`kg-workspace ${kgComparisonMode === 'analysis' ? 'kg-workspace--analysis' : ''}`}>
                     <section className="kg-workspace-graph">
-                      <KeywordGraphSigmaView onMetricsChange={setKgKeywordMetrics} />
+                      <Suspense fallback={<p className="muted">Loading graph workspace…</p>}>
+                        <KeywordGraphSigmaView onMetricsChange={setKgKeywordMetrics} />
+                      </Suspense>
                     </section>
                     <aside className="kg-workspace-side" aria-live="polite">
                       <div className="kg-compare-metrics-card">
@@ -8549,62 +8212,73 @@ export default function App(): React.ReactElement {
 
           {mainView === 'ontology' ? (
             <div className="main-knowledge-graph-shell">
-              <OntologyView
-                data={ontologyPayload}
-                stats={ontologyStats}
-                loading={ontologyLoading}
-                detailLoading={ontologyDetailLoading}
-                details={ontologyDetails}
-                onQuery={(request) => void loadOntology(request)}
-                onSelectEntity={(iri) => void loadOntologyEntityDetails(iri)}
-                onRefresh={() => void loadOntology()}
-                onRebuild={() => void rebuildOntologySnapshot()}
-                onExport={() => void exportOntologyJsonLd()}
-              />
+              <Suspense fallback={<p className="muted">Loading ontology…</p>}>
+                <OntologyView
+                  data={ontologyPayload}
+                  stats={ontologyStats}
+                  loading={ontologyLoading}
+                  detailLoading={ontologyDetailLoading}
+                  details={ontologyDetails}
+                  onQuery={(request) => void loadOntology(request)}
+                  onSelectEntity={(iri) => void loadOntologyEntityDetails(iri)}
+                  onRefresh={() => void loadOntology()}
+                  onRebuild={() => void rebuildOntologySnapshot()}
+                  onExport={() => void exportOntologyJsonLd()}
+                />
+              </Suspense>
             </div>
           ) : null}
 
           {mainView === 'architectureRepository' ? (
             <div className="main-arch-repo-shell">
-              <ArchitectureRepositoryView
-                scanRoot={architectureRepositoryScanRoot}
-                onChooseScanRoot={chooseArchitectureRepositoryScanRoot}
-                onClearScanRoot={clearArchitectureRepositoryScanRoot}
-                integrationListenEnabled={integrationListenEnabled}
-                integrationPort={integrationPortLive}
-                integrationTokenConfigured={integrationTokenDraft.trim().length > 0}
-                wikiTopics={wikiTopics}
-                kgNodeCount={kgPayload?.nodes.length ?? 0}
-                kgEdgeCount={kgPayload?.edges.length ?? 0}
-                kgLoading={kgLoading}
-                kgTruncated={kgPayload?.truncated ?? false}
-                onRefreshKnowledgeGraph={() => void loadKnowledgeGraph()}
-                hardwareSummary={hardwareSummary}
-                modelsDefaultPath={paths?.modelsDefault ?? null}
-                trainJobCount={trainJobs.length}
-                pluginReportCount={integrationPluginReports.length}
-                codebaseAnalysisSnapshots={codebaseAnalysisSnapshots}
-              />
+              <Suspense fallback={<p className="muted">Loading architecture repository…</p>}>
+                <ArchitectureRepositoryView
+                  scanRoot={architectureRepositoryScanRoot}
+                  onChooseScanRoot={chooseArchitectureRepositoryScanRoot}
+                  onClearScanRoot={clearArchitectureRepositoryScanRoot}
+                  integrationListenEnabled={integrationListenEnabled}
+                  integrationPort={integrationPortLive}
+                  integrationTokenConfigured={integrationTokenDraft.trim().length > 0}
+                  wikiTopics={wikiTopics}
+                  kgNodeCount={kgPayload?.nodes.length ?? 0}
+                  kgEdgeCount={kgPayload?.edges.length ?? 0}
+                  kgLoading={kgLoading}
+                  kgTruncated={kgPayload?.truncated ?? false}
+                  onRefreshKnowledgeGraph={() => void loadKnowledgeGraph()}
+                  hardwareSummary={hardwareSummary}
+                  modelsDefaultPath={paths?.modelsDefault ?? null}
+                  trainJobCount={trainJobs.length}
+                  pluginReportCount={integrationPluginReports.length}
+                  codebaseAnalysisSnapshots={codebaseAnalysisSnapshots}
+                />
+              </Suspense>
             </div>
           ) : null}
 
-          {mainView === 'train' ? <div className="main-train-shell">{trainPanel}</div> : null}
+          {mainView === 'train' ? (
+            <div className="main-train-shell">
+              <Suspense fallback={<p className="muted">Loading training workflow…</p>}>{trainPanel}</Suspense>
+            </div>
+          ) : null}
 
           {mainView === 'codebaseLandscape' ? (
             <div className="main-codebase-landscape-shell">
-              <CodebaseLandscapeView
-                onOpenIntegrations={() => openSettings('integrations')}
-                onEnrichmentComplete={() => {
-                  void loadWiki()
-                  void loadKnowledgeGraph({ keepAnalysis: true })
-                  void loadCodebaseAnalyses()
-                }}
-              />
+              <Suspense fallback={<p className="muted">Loading implementation validation…</p>}>
+                <CodebaseLandscapeView
+                  onOpenIntegrations={() => openSettings('integrations')}
+                  onEnrichmentComplete={() => {
+                    void loadWiki()
+                    void loadKnowledgeGraph({ keepAnalysis: true })
+                    void loadCodebaseAnalyses()
+                  }}
+                />
+              </Suspense>
             </div>
           ) : null}
 
           {mainView === 'electronDev' && devShellChrome ? (
-            <ElectronDevDashboard
+            <Suspense fallback={<p className="muted">Loading developer hub…</p>}>
+              <ElectronDevDashboard
               appPath={paths?.appPath ?? null}
               userDataPath={paths?.userData ?? null}
               logsPath={paths?.logs ?? null}
@@ -8654,7 +8328,8 @@ export default function App(): React.ReactElement {
                 void loadWiki()
               }}
               onRefreshRuntime={refreshRuntimeStatus}
-            />
+              />
+            </Suspense>
           ) : null}
 
           {mainView === 'releasePlanner' ? (

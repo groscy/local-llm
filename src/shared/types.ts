@@ -159,7 +159,13 @@ export interface KbImportDiagnostic {
   truncated: boolean
   cleanupEdits: number
   parserEngine?: string
-  parserMode?: 'text_layer' | 'ocr_fallback' | 'plain_text' | 'html_text'
+  parserMode?:
+    | 'text_layer'
+    | 'pdftotext_fallback'
+    | 'true_ocr_fallback'
+    | 'hybrid_merged'
+    | 'plain_text'
+    | 'html_text'
   parseDurationMs?: number
   ocrApplied?: boolean
   ocrCoverage?: number
@@ -218,7 +224,7 @@ export type KbIngestFileProgress =
   | { kind: 'selected'; filePath: string }
   | { kind: 'reading'; filePath: string; format: 'pdf' | 'text' }
   | { kind: 'pdf_page_progress'; processedPages: number; totalPages: number; pagesLeft: number }
-  | { kind: 'stage'; stage: KbIngestJobStage; stageLabel: string; jobId: string; progress?: number }
+  | { kind: 'stage'; stage: KbIngestJobStage; stageLabel: string; jobId: string; progress?: number; parserMode?: KbImportDiagnostic['parserMode'] }
   | {
       kind: 'chunking'
       chunkCount: number
